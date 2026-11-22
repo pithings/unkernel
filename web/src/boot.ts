@@ -31,7 +31,7 @@ import { CPUS_ONCE_KEY, GL_DISTROS, INLINE_ONCE_KEY, REPO, UP_ONCE_KEY } from ".
 import { attachDataDisk, detachDataDisk, downloadKwsparse, exportDataDisk, fmtSize, importDataDisk, resetDataDisk, storageState, acquireDiskLock, type DataAttach } from "./data.ts";
 import { createDisplayUi } from "./display.ts";
 import { KW } from "./kw.ts";
-import { showcaseFromUrl, waitPort } from "./launcher.ts";
+import { showcaseFromUrl, tryFromUrl, waitPort } from "./launcher.ts";
 import { browserNet, browserNetSpec } from "./net.ts";
 import { openCommand } from "./open.ts";
 import { attachPreview, closePreview, openPreview, previewSupported, previewUrl } from "./preview.ts";
@@ -421,6 +421,8 @@ export function start(): void {
 	KW.ready = () => guestReady;
 	// ?showcase: the scripted tour of the demos (launcher.ts).
 	void guestReady.then(showcaseFromUrl, () => {});
+	// ?try: a project's unkernel.json, run as a demo once confirmed (try.ts).
+	void guestReady.then(tryFromUrl, () => {});
 	// Fresh apk indexes, fetched by the page over Wisp and pushed in once user space runs (apk.ts).
 	if (cfg.net && alpine) void guestReady.then((vm) => prefetchApkIndexes(vm, { servers: cfg.wisp, log: (m) => ui.log(m, "h") }), () => {});
 	// What the base booted (/run/kw-base: the image id, the upper layer), for the

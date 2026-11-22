@@ -169,7 +169,7 @@ export function unavailable(d: Demo): string | null {
 }
 
 /** Single-quoted for sh. */
-const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+export const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
 // Makes the demo's directory $1 (relative to ~, or absolute) and gives it to
 // the user: one outside the user's reach (/srv/nginx), or one that is root's
@@ -317,6 +317,12 @@ export function showcaseFromUrl(): void {
 	const v = new URLSearchParams(location.search).get("showcase");
 	if (v === null || v === "0") return;
 	void import("./showcase.ts").then((m) => m.runShowcase(v), (e) => KW.ui?.toast(`showcase: ${(e as Error)?.message ?? e}`));
+}
+
+/** ?try=<src>: a project's "try it" link, its unkernel.json run as a demo (try.ts). Called once the guest is up (boot.ts). */
+export function tryFromUrl(): void {
+	const src = new URLSearchParams(location.search).get("try");
+	if (src) void import("./try.ts").then((m) => m.launchTry(src), (e) => KW.ui?.toast(`?try: ${(e as Error)?.message ?? e}`));
 }
 
 /** Demos between the click and their window appearing (the files are being written). */

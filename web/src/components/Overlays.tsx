@@ -170,7 +170,7 @@ export function Confirm() {
 				<>
 					<h2 id="confirm-title" className="absolute -top-2 left-3 bg-bg px-1.5 text-[12px] leading-4 font-normal"><span className="text-faint">┤</span> {ask.title} <span className="text-faint">├</span></h2>
 					<p id="confirm-msg" className="leading-relaxed text-muted">{ask.msg}</p>
-					{ask.url && <p id="confirm-url" className="mt-3 max-h-40 overflow-y-auto border border-line px-2 py-1.5 break-all text-fg">{ask.url}</p>}
+					{ask.url && <p id="confirm-url" className="mt-3 max-h-40 overflow-y-auto border border-line px-2 py-1.5 break-all whitespace-pre-wrap text-fg">{ask.url}</p>}
 					<div className="mt-4 flex justify-end gap-2">
 						<button id="confirm-cancel" type="button" title="Cancel (n, Esc)" className="btn btn-sm" onClick={() => ui.answer(false)}>{ask.cancel ?? "Cancel"}</button>
 						<button id="confirm-ok" ref={ok} type="button" aria-disabled={waiting || undefined} title={`${ask.ok} (y, Enter)`} className={`btn btn-sm ${waiting ? "cursor-default opacity-50" : ""} ${ask.danger ? "btn-danger" : "btn-primary"}`} onClick={() => { if (!waiting) ui.answer(true); }}>{ask.ok}</button>

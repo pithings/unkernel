@@ -1,0 +1,8 @@
+{
+	"unkernel": 1,
+	"name": "cowsay",
+	"description": "cowsay from npm",
+	"packages": { "alpine": ["nodejs", "npm"], "debian": ["nodejs", "npm"] },
+	"setup": ["command -v cowsay >/dev/null || $SUDO npm i -g cowsay"],
+	"try": ["cowsay hi"]
+}

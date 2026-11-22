@@ -6,11 +6,11 @@
 //
 // The settings below are kept in localStorage (SETTINGS_KEY: {name: value},
 // only those that differ from the defaults). Each one except ?simulate,
-// ?showcase and ?routes has a control under Options in the status panel; Reboot saves
+// ?showcase, ?try and ?routes has a control under Options in the status panel; Reboot saves
 // them there (ui.ts nextSettings()) and loads the page's bare URL. A URL
 // parameter of the same name overrides the saved one for that load (links,
-// the browser tests); the page never writes the URL. ?simulate, ?showcase
-// and ?routes are read from the URL only.
+// the browser tests); the page never writes the URL. ?simulate, ?showcase,
+// ?try and ?routes are read from the URL only.
 //
 //   ?mem=MiB                           kernel memory (default: auto, from the SDK's autoMemoryMiB():
 //                                      512 on phones, 2048 otherwise, less on low-memory devices)
@@ -132,6 +132,9 @@
 //   ?showcase[=warm,<step>,...]        URL only: a fast scripted tour of the demos with captions;
 //                                      warm pre-installs them, step ids pick a subset
 //                                      (showcase.ts); read in launcher.ts
+//   ?try=gh:owner/repo[@ref]|<url>     URL only: a "try it" link: the project's unkernel.json (schema
+//                                      in try.ts), shown, then run as a demo in ~/try/<id> once
+//                                      confirmed; read in launcher.ts
 //   ?simulate=nojspi,oom,lowmem        URL only: fake a failure (for tests)
 import { DEFAULT_MEMORY_FALLBACK_MIB, autoMemoryMiB, glUrl, kernelSmpUrl, kernelUrl, webCpuBlocker } from "./sdk.ts";
 import { distros as DISTROS } from "virtual:unkernel-kernel";

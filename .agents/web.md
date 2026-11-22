@@ -252,8 +252,8 @@ deploying the page needs no kernel toolchain.
   browser tests use that), and the page never writes the URL (where
   localStorage refuses, Reboot puts them in the URL instead). Every
   setting except `?shared` has a control under Options in the System tab
-  (`Options.tsx`, the store's `options`, `nextSettings()`); `?simulate`
-  and `?showcase` are URL only. A new setting needs a control too. The
+  (`Options.tsx`, the store's `options`, `nextSettings()`); `?simulate`,
+  `?showcase` and `?try` are URL only. A new setting needs a control too. The
   desktop test checks the mapping. The
   fields are controlled, and also read by native listeners on the form,
   because React drops change events for a value set from script (the test
@@ -1526,6 +1526,17 @@ docker shim, kernel/guest.md) came later too: with Docker installed, its
 command pulled and ran hello-world in 6 s (Node SDK, 1 GiB, data disk, the
 host's network, 2026-11-19); the first run adds the shim's install
 (about 1 min).
+
+`?try=gh:owner/repo[@ref]` (the repository's `unkernel.json` at that
+ref, default HEAD) or `?try=<https url>` is a "try it" link for a
+project's README (`src/try.ts`, schema at its top; `tryFromUrl()` starts
+it once the guest is up). try.ts checks the spec, the confirm dialog
+(`untrusted`) lists its packages, download and commands, and on Run it
+becomes demo `try-<name>` in `~/try/<name>`. The guest downloads the
+binary and checks its SHA-256. The spec's server must send
+`Access-Control-Allow-Origin` (raw GitHub does); `?try=/try/jq.json`
+runs an example in `web/public/try/`. URL only: a reload asks again,
+Reboot drops it. Checked by hand only.
 
 `?showcase` runs `src/showcase.ts` once the guest is up: a
 fast, hands-off tour of the demos, leaving out the web servers (described at its top).
