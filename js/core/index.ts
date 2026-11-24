@@ -11,7 +11,9 @@ export type { BlockDevice, BlockStats, CowDiskOptions, CowDiskStats, DiskBase, D
 export { KWSPARSE_MAGIC, decodeKwsparse, encodeKwsparse, gunzipIfNeeded, gzipBlob, isZeroBlock, kwsparseHeader, readKwsparse } from "./kwsparse.ts";
 export type { KwsparseImage } from "./kwsparse.ts";
 export { NetStack, ip4, ip4str } from "./net.ts";
-export type { NetBackend, NetConnection, NetConnectionEvents, NetStackOptions, NetStats } from "./net.ts";
+export type { NetAddress, NetBackend, NetConnection, NetConnectionEvents, NetStackOptions, NetStats } from "./net.ts";
+export { NET_PORT_WINDOW, portBackend, serveNetBackend } from "./net-port.ts";
+export type { NetPortOptions, ServeNetBackendOptions } from "./net-port.ts";
 export { DEFAULT_WISP_SERVERS, wispBackend } from "./net-wisp.ts";
 export type { WispBackend, WispBackendOptions } from "./net-wisp.ts";
 export { fetchRoutes } from "./net-fetch.ts";

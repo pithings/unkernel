@@ -8,7 +8,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type AddressInfo } from "node:net";
 import { createServer as createHttpServer } from "node:http";
-import { ip4, ip4str, type NetBackend, type NetConnectionEvents } from "../js/core/net.ts";
+import { ip4, ip4str, type NetAddress, type NetBackend, type NetConnectionEvents } from "../js/core/net.ts";
 import { wispBackend } from "../js/core/net-wisp.ts";
 import { directBackend, wispBackend as nodeWispBackend } from "../js/node/net.ts";
 import { acceptWebSocket } from "./ws-server.ts";
@@ -127,6 +127,30 @@ test("TCP retransmits unacknowledged data after the RTO and respects the guest w
 	await until(() => out.length > 0, 2500);
 	assert.equal(out[0]!.seq, iss + 1, "go back N from snd_una");
 	out.splice(0);
+	stack.close();
+});
+
+test("connect() gets the destination and the guest's source address and port; the guest's FIN reaches end()", async () => {
+	const seen: NetAddress[] = [];
+	let ended = false, ev!: NetConnectionEvents;
+	const fake: Partial<NetBackend> = {
+		connect(addr, e) {
+			seen.push(addr);
+			ev = e;
+			queueMicrotask(() => e.onConnect());
+			return { write() {}, end() { ended = true; }, destroy() {}, pause() {}, resume() {}, buffered: 0 };
+		},
+	};
+	const { stack, out } = mkStack(fake);
+	const dst = ip4("10.77.0.5");
+	stack.send(tcp(40123, dst, 80, 1, 0, 2, undefined, [2, 4, 0x05, 0xb4]));
+	await until(() => out.length === 1);
+	const iss = out.shift()!.seq!;
+	stack.send(tcp(40123, dst, 80, 2, iss + 1, 16));
+	stack.send(tcp(40123, dst, 80, 2, iss + 1, 17)); // FIN
+	await until(() => ended);
+	assert.deepEqual(seen, [{ host: "10.77.0.5", port: 80, source: { host: "10.0.2.15", port: 40123 } }]);
+	ev.onClose(null);
 	stack.close();
 });
 

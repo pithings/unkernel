@@ -257,7 +257,7 @@ export interface WorkerPort {
 
 /** The owner's end: a started worker running serveKernel(). */
 export interface WorkerEndpoint {
-	post(msg: ToWorker, transfer?: ArrayBuffer[]): void;
+	post(msg: ToWorker, transfer?: Array<ArrayBuffer | MessagePort>): void;
 	listen(handlers: {
 		message(msg: FromWorker): void;
 		/** An uncaught error in the worker. */

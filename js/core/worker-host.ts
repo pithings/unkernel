@@ -14,6 +14,8 @@
 // web/worker.ts).
 
 import { isDiskSpec, isNetSpec, type DiskSpec, type DiskState, type NetSpec, type SkippedDisk } from "./devices.ts";
+import { isNetBackend, type NetBackend } from "./net.ts";
+import { serveNetBackend } from "./net-port.ts";
 import { distroSpecOf, readOnlySpec, type DistroInfo } from "./distro.ts";
 import type { DisplayFrame, DisplayMode, DisplayOption, DisplaySize } from "./display.ts";
 import type { Evdev, InputState } from "./input.ts";
@@ -41,7 +43,7 @@ import type { FromWorker, ToWorker, WorkerBootSpec, WorkerEndpoint, WorkerExit, 
 /** How long stop() waits for the worker to confirm (it first lets saves in flight commit, up to 10 s) before it ends the worker anyway. */
 const STOP_GRACE_MS = 12000;
 const SPEC_HINT = 'pass a spec instead: { kind: "file", path } on Node, { kind: "data", template: "bundled" } or { kind: "http", url } in browsers';
-const NET_HINT = 'pass a spec instead: { kind: "net", backend: { kind: "direct" } } on Node, or { kind: "net", backend: { kind: "wisp", servers } }';
+const NET_HINT = 'pass a NetBackend object, which stays on this thread, or a spec: { kind: "net", backend: { kind: "direct" } } on Node, { kind: "net", backend: { kind: "wisp", servers } } or { kind: "net", backend: { kind: "port", port } }';
 const STATS_INTERVAL_MS = 500;
 
 /** Throws (BootError "support") if worker mode cannot run with these options on this platform. */
@@ -54,10 +56,21 @@ export function checkWorkerOptions(platform: Platform, opts: CreateKernelOptions
 	const d = opts.distro;
 	if (d !== undefined && typeof d !== "string" && !(d instanceof URL) && !isDiskSpec(d))
 		throw new BootError("support", `createKernel({ worker: true }): distro is a BlockDevice object, which cannot cross to the worker; pass its path or URL, or a spec ({ kind: "file", path } on Node, { kind: "http", url })`);
-	if (opts.net && !isNetSpec(opts.net))
-		throw new BootError("support", `createKernel({ worker: true }): net is a NetDevice or NetBackend object, which cannot cross to the worker; ${NET_HINT}`);
+	if (opts.net && !isNetSpec(opts.net) && !isNetBackend(opts.net))
+		throw new BootError("support", `createKernel({ worker: true }): net is a NetDevice object, which cannot cross to the worker; ${NET_HINT}`);
 	if (typeof opts.vsock === "object" && opts.vsock.raw)
 		throw new BootError("support", "createKernel({ worker: true }): vsock.raw (the guest's packets in a callback) is inline only; use vm.vsock, which works in worker mode");
+}
+
+/**
+ * The network as it crosses: a spec as it is (a port in it is transferred), or a NetBackend object, which stays here:
+ * served on one end of a new channel while the worker's NetStack gets the other as a "port" spec.
+ */
+function toWorkerNet(net: CreateKernelOptions["net"], log: (msg: string) => void): [NetSpec | undefined, Array<ArrayBuffer | MessagePort>, { close(): void } | undefined] {
+	if (!net) return [undefined, [], undefined];
+	if (isNetSpec(net)) return [net, net.backend.kind === "port" ? [net.backend.port] : [], undefined];
+	const { port1, port2 } = new MessageChannel();
+	return [{ kind: "net", backend: { kind: "port", port: port2 } }, [port2], serveNetBackend(port1, net as NetBackend, { log })];
 }
 
 /** Disk specs as they cross: template bytes copied into buffers to transfer, relative URLs made absolute. */
@@ -968,7 +981,8 @@ export async function createKernelInWorker(platform: Platform, opts: CreateKerne
 		display: opts.display ?? (opts.gpu ? true : undefined), onDisplay: opts.onDisplay, onInput: opts.onInput, sound: opts.sound, vsock: opts.vsock ?? true, shm: opts.shm, shared,
 		console: consoleRing, gpu,
 	});
-	let spec: WorkerBootSpec, transfer: ArrayBuffer[];
+	let spec: WorkerBootSpec, transfer: Array<ArrayBuffer | MessagePort>;
+	let netServer: { close(): void } | undefined;
 	try {
 		let kernel: WorkerSource | WebAssembly.Module, kernelTransfer: ArrayBuffer[] = [], compileMs: number | undefined;
 		if (compileHere) {
@@ -988,8 +1002,10 @@ export async function createKernelInWorker(platform: Platform, opts: CreateKerne
 			: toWorkerDisks([typeof opts.distro === "string" || opts.distro instanceof URL
 				? distroSpecOf(opts.distro, platform.distroSpec) : readOnlySpec(opts.distro as DiskSpec)], platform)[0][0];
 		const [restore, restoreTransfer] = toWorkerRestore(opts.restore, !!opts.transferRestore);
+		const [net, netTransfer, server] = toWorkerNet(opts.net, log);
+		netServer = server;
 		spec = {
-			kernel, initrd, disks, distro, net: opts.net as NetSpec | undefined,
+			kernel, initrd, disks, distro, net,
 			cmdline: opts.cmdline,
 			memoryMiB: opts.memoryMiB ?? platform.defaultMemoryMiB?.() ?? 2048,
 			memoryFallbackMiB: opts.memoryFallbackMiB ?? platform.defaultMemoryFallbackMiB,
@@ -1009,11 +1025,14 @@ export async function createKernelInWorker(platform: Platform, opts: CreateKerne
 			restore,
 			profile: opts.profile === true ? {} : opts.profile || undefined,
 		};
-		transfer = [...kernelTransfer, ...initrdTransfer, ...diskTransfer, ...restoreTransfer];
+		transfer = [...kernelTransfer, ...initrdTransfer, ...diskTransfer, ...restoreTransfer, ...netTransfer];
 	} catch (e) {
+		netServer?.close();
 		vm.abandon((e as Error)?.message ?? String(e));
 		throw e;
 	}
+	// The backend and the port end the way the kernel does (a terminated worker closes its port too).
+	if (netServer) void vm.exited.then(() => netServer!.close());
 	if (signal) {
 		const onAbort = () => endpoint.post({ t: "abort" });
 		signal.addEventListener("abort", onAbort, { once: true });

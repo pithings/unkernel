@@ -23,14 +23,17 @@
 //                  kernel bundle's unkernel.datadisk template or bytes;
 //                  the page's /data, openDataDisk())
 //   net    a NetStack over a backend: "direct" (Node: host sockets, the
-//          CLI's default) or "wisp" (a Wisp server; everywhere, with
-//          `routes` answered by fetch(), net-fetch.ts)
+//          CLI's default), "wisp" (a Wisp server; everywhere, with
+//          `routes` answered by fetch(), net-fetch.ts) or "port" (a
+//          NetBackend served on the other end of a MessagePort,
+//          net-port.ts)
 
 import { BaseDisk, CowDisk, F_RO, HttpBase, type BlockDevice, type CowDiskStats } from "./block.ts";
 import { BootError } from "./load.ts";
 import { NetStack, type NetBackend } from "./net.ts";
 import { fetchRoutes } from "./net-fetch.ts";
 import { wispBackend } from "./net-wisp.ts";
+import { portBackend } from "./net-port.ts";
 
 /** The spec format. A spec may carry `v`; a factory refuses other versions. */
 export const DEVICE_SPEC_VERSION = 1;
@@ -93,6 +96,14 @@ export interface NetSpec extends SpecCommon {
 			kind: "wisp"; servers: string | string[]; headers?: Record<string, string>;
 			/** Plain HTTP to these host names is answered with fetch() from these base URLs (net-fetch.ts fetchRoutes()). */
 			routes?: Record<string, string>;
+		}
+		| {
+			kind: "port";
+			/**
+			 * One end of a MessageChannel; `serveNetBackend(otherEnd, backend)` answers on the other. In worker mode the port
+			 * is transferred to the worker (it is unusable here afterwards).
+			 */
+			port: MessagePort;
 		};
 	/** TCP to the gateway (10.0.2.2) goes to the host's 127.0.0.1 (direct only). */
 	hostLoopback?: boolean;
@@ -118,7 +129,7 @@ export interface DeviceRegistry {
 	backends: Record<string, (spec: never, ctx: DeviceContext) => NetBackend>;
 }
 
-/** The universal kinds: "http" disks with the overlay in memory, and Wisp. */
+/** The universal kinds: "http" disks with the overlay in memory, Wisp, and a backend on a MessagePort. */
 export const coreDevices: DeviceRegistry = {
 	disks: {
 		async http(spec: HttpDiskSpec, ctx: DeviceContext) {
@@ -130,6 +141,7 @@ export const coreDevices: DeviceRegistry = {
 	backends: {
 		wisp: (spec: Extract<NetBackendSpec, { kind: "wisp" }>, ctx: DeviceContext) =>
 			wispBackend(spec.servers, { headers: spec.headers, log: ctx.log }),
+		port: (spec: Extract<NetBackendSpec, { kind: "port" }>, ctx: DeviceContext) => portBackend(spec.port, { log: ctx.log }),
 	},
 };
 

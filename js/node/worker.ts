@@ -16,7 +16,7 @@ export function spawnNodeWorker(): WorkerEndpoint {
 	const entry: URL | string = new URL("./worker-entry.ts", import.meta.url);
 	const w = typeof entry === "string" ? new Worker(entry, { eval: true }) : new Worker(entry);
 	return {
-		post: (msg, transfer) => w.postMessage(msg, transfer),
+		post: (msg, transfer) => w.postMessage(msg, transfer as import("node:worker_threads").Transferable[]),
 		listen(h) {
 			w.on("message", h.message);
 			w.on("error", h.error);

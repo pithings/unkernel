@@ -50,9 +50,10 @@
   "scripts": {
     "build": "obuild",
     "typecheck": "tsc -p .",
-    "test": "pnpm typecheck && pnpm test:block && pnpm test:net && pnpm test:tty && pnpm test:http && pnpm test:ws && pnpm test:9p && pnpm test:distro && pnpm test:gl-gpu",
+    "test": "pnpm typecheck && pnpm test:block && pnpm test:net && pnpm test:net-port && pnpm test:tty && pnpm test:http && pnpm test:ws && pnpm test:9p && pnpm test:distro && pnpm test:gl-gpu",
     "test:block": "node --test test/block.test.ts",
     "test:net": "node --test test/net.test.ts",
+    "test:net-port": "node --test test/net-port.test.ts",
     "test:tty": "node --test test/tty.test.ts",
     "test:9p": "node --test test/9p.test.ts",
     "test:http": "node --test test/http.test.ts",

@@ -379,8 +379,10 @@ parts that are easy to get wrong.
   (`Platform.distroSpec`, so a relative URL resolves against the page);
   the worker's disk indices skip it. Inline `createKernel` builds specs the
   same way, owns those disks and closes them at exit after their last
-  save. Worker mode takes specs only: a `BlockDevice`, `NetDevice` or
-  `NetBackend` object rejects with a `BootError` naming the spec to use.
+  save. Worker mode takes specs only: a `BlockDevice` or `NetDevice` object
+  rejects with a `BootError` naming the spec to use. A `NetBackend` object
+  is the exception: it stays on the owner's thread and the worker's
+  NetStack reaches it over a port (Network, below).
 - `sync()` in worker mode is a round trip to `Kernel.requestSync()`. A
   request open at exit is answered false; one left when the worker died
   resolves false if a persistent disk was attached, else true; after exit
@@ -1567,6 +1569,34 @@ parts that are easy to get wrong.
   addresses, and TCP (MSS, window scaling, flow control, go-back-N
   retransmit, FIN, RST). Each TCP connection goes to a backend (any object
   with `connect` and `lookup`). `net` may also be a spec (Worker mode).
+- `connect(addr, events)` gets `addr.source`, the guest end as the stack
+  sees it: 10.0.2.15 and the guest's source port. A guest that NATs (a
+  container namespace behind the machine's masquerade) shows the
+  translated address and port, so a backend cannot tell containers apart
+  by it. `end()` is the guest's FIN. `wispBackend()`'s `end()` is a no-op:
+  Wisp v1 has no half-close.
+- A backend object in worker mode (`js/core/net-port.ts`):
+  `createKernelInWorker()` makes a `MessageChannel`, serves the backend on
+  one end (`serveNetBackend()`) and gives the worker's NetStack the other
+  as `{ kind: "net", backend: { kind: "port", port } }`
+  (`portBackend()`); the same spec, with a port of the embedder's, is how
+  a backend is served from elsewhere. The messages are in the header of
+  net-port.ts. Guest to backend: the worker sends each write at once and
+  counts it in `buffered` until the owner reports that the backend no
+  longer holds it (`written - buffered` after each write and on
+  `onDrain`), which shuts the stack's window as for a local backend.
+  Backend to guest: at most `NET_PORT_WINDOW` (256 KiB) unacknowledged per
+  connection; past it the owner calls `pause()` and queues what the
+  backend sends anyway, and the worker acknowledges what it gave the stack
+  unless the stack paused the connection (`pause()` and `resume()` there
+  hold back the acknowledgements; they are not messages). Chunks are
+  transferred; one that is not all of its ArrayBuffer (a pooled Buffer) is
+  copied first (`new Uint8Array(u8)`: a Buffer's `slice()` shares memory).
+  The backend, its connections and the port end with the kernel
+  (`vm.exited`), and a worker that is terminated closes its port, which
+  has the same effect. `serveNetBackend()` closes the backend
+  (`close()`), so an embedder that reuses one backend across kernels
+  passes a wrapper without it.
 - `directBackend()` (Node only, the CLI's default) uses host sockets and
   `dns.lookup`. With `hostLoopback`, 10.0.2.2 goes to the host's 127.0.0.1.
 - `wispBackend()` multiplexes connections over one WebSocket to a Wisp v1

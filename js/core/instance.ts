@@ -24,7 +24,7 @@ import { prepareGl, startGl, type GlHost, type GlOption } from "./gl.ts";
 import { inlineGpuLink, VirglGpuBackend } from "./gl-gpu.ts";
 import { Kernel, bundledBoot, moduleIsMemory64, type ExitResult, type KernelStats, type MemoryStage, type NetDevice } from "./kernel.ts";
 import { BootError, loadBytes, loadKernelModule, type BytesSource, type DownloadProgress, type KernelSource } from "./load.ts";
-import { NetStack, type NetBackend, type NetStats } from "./net.ts";
+import { NetStack, isNetBackend, type NetBackend, type NetStats } from "./net.ts";
 import { buildDisks, buildNet, isNetSpec, type DeviceRegistry, type DiskSpec, type NetSpec, type SkippedDisk } from "./devices.ts";
 import { openDistro, type DistroInfo, type DistroSource } from "./distro.ts";
 import { ConsoleOutput } from "./output.ts";
@@ -126,9 +126,12 @@ export interface CreateKernelOptions {
 	/**
 	 * Network: a NetBackend (wrapped in a NetStack), a NetStack, any
 	 * NetDevice, or a spec ({ kind: "net", backend: { kind: "direct" } } on
-	 * Node, or { kind: "wisp", servers }). Default: none (the guest has no
-	 * eth0). The instance closes it (and its backend) when the kernel exits.
-	 * Worker mode takes a spec only.
+	 * Node, { kind: "wisp", servers }, or { kind: "port", port }: a backend
+	 * served on the other end of a MessagePort, net-port.ts). Default: none
+	 * (the guest has no eth0). The instance closes it (and its backend) when
+	 * the kernel exits. Worker mode takes a spec or a NetBackend, which stays
+	 * on this thread and is served to the worker's NetStack over a
+	 * MessagePort; a NetDevice cannot cross.
 	 */
 	net?: NetDevice | NetBackend | NetSpec;
 	/** A disk built from a spec failed to save a flush (e.g. QuotaExceededError; the guest gets EIO for it). */
@@ -525,10 +528,6 @@ export interface KernelHandle {
 	readonly transport: KernelTransport;
 	/** With the gl option, where it could start: the renderer's host side (ready, stats); it runs on this thread in both modes. */
 	readonly gl: GlHost | undefined;
-}
-
-function isBackend(n: NetDevice | NetBackend): n is NetBackend {
-	return typeof (n as NetBackend).connect === "function" && typeof (n as NetDevice).send !== "function";
 }
 
 /** A booted kernel: its console, its exit, and the low-level Kernel. */
@@ -980,7 +979,7 @@ export async function createKernelOn(platform: Platform, opts: CreateKernelOptio
 		: disks.length && !initrd ? "console=hvc0 root=/dev/wda rw" : "console=hvc0 rdinit=/init");
 
 	const net = !opts.net ? undefined : isNetSpec(opts.net) ? buildNet(opts.net, platform.devices, devCtx)
-		: isBackend(opts.net) ? new NetStack({ backend: opts.net, log: opts.log }) : opts.net;
+		: isNetBackend(opts.net) ? new NetStack({ backend: opts.net, log: opts.log }) : opts.net;
 
 	let kernelRef: Kernel | undefined;
 	const vsock = vopt && !raw ? new VsockHost({

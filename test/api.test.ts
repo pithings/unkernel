@@ -26,10 +26,11 @@ import type { AddressInfo } from "node:net";
 import { availableParallelism, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { until } from "./net-helpers.ts";
 
 const spec = process.env.UNKERNEL_DIST ? "unkernel" : "../js/node.ts";
 const sdk: typeof import("../js/node.ts") = await import(spec);
-const { createKernel, ConsoleRouter, NetStack, directBackend, wispBackend, DEFAULT_WISP_SERVERS, FileDisk, bundledBoot, bundledKernelUrl, createImageFromKwsparse, MemoryFs, nodeFs } = sdk;
+const { createKernel, ConsoleRouter, NetStack, serveNetBackend, directBackend, wispBackend, DEFAULT_WISP_SERVERS, FileDisk, bundledBoot, bundledKernelUrl, createImageFromKwsparse, MemoryFs, nodeFs } = sdk;
 type Instance = Awaited<ReturnType<typeof createKernel>>;
 /** The kernel under test: UNKERNEL_TEST_KERNEL (a bundle, e.g. from a build of your own), else the bundled one. */
 const testKernel = process.env.UNKERNEL_TEST_KERNEL ? path.resolve(process.env.UNKERNEL_TEST_KERNEL) : undefined;
@@ -267,8 +268,9 @@ describe("api", { concurrency: CONCURRENCY }, () => {
 		const disk = { size: 1 << 20, read: () => {} } as unknown as import("../js/node.ts").BlockDevice;
 		await assert.rejects(createKernel({ worker: true, disks: [{ kind: "file", path: "/nonexistent" }, disk] }), (e: Error) =>
 			e.name === "BootError" && /disks\[1\] is a BlockDevice object, which cannot cross to the worker; pass a spec instead: \{ kind: "file", path \}/.test(e.message));
-		await assert.rejects(createKernel({ worker: true, net: directBackend() }), (e: Error) =>
-			e.name === "BootError" && /net is a NetDevice or NetBackend object.*\{ kind: "net", backend: \{ kind: "direct" \} \}/.test(e.message));
+		// A NetBackend object is served over a port; a NetDevice (a NetStack) cannot cross.
+		await assert.rejects(createKernel({ worker: true, net: new NetStack({ backend: directBackend() }) }), (e: Error) =>
+			e.name === "BootError" && /net is a NetDevice object.*pass a NetBackend object.*\{ kind: "net", backend: \{ kind: "port", port \} \}/.test(e.message));
 		// A spec of a kind nobody registered, and a spec that cannot be built.
 		await assert.rejects(createKernel({ worker: true, disks: [{ kind: "nope" } as never], log: () => {} }), (e: Error) =>
 			e.name === "BootError" && /disk kind "nope" is not available on this platform/.test(e.message));
@@ -548,6 +550,172 @@ describe("api", { concurrency: CONCURRENCY }, () => {
 			vm.write("poweroff\n");
 			assert.equal((await vm.exited).code, 0);
 		});
+	});
+
+	/** A backend that records what the guest does and answers from memory (no sockets): 10.77.0.5 is "web", port 80, "page\n" for a GET. */
+	const customBackend = (opts: { onConnect?: (c: CustomConn) => void; silent?: boolean } = {}) => {
+		const conns: CustomConn[] = [];
+		const seen = { lookups: [] as string[], closed: false };
+		const backend: import("../js/node.ts").NetBackend = {
+			connect(addr, ev) {
+				const c: CustomConn = { addr, ev, received: "", ended: false, destroyed: false, order: [] };
+				conns.push(c);
+				queueMicrotask(() => {
+					if (c.destroyed) return;
+					if (opts.onConnect) return opts.onConnect(c);
+					ev.onConnect();
+				});
+				return {
+					write(u8) {
+						c.received += Buffer.from(u8).toString("latin1");
+						c.order.push("write");
+						if (!opts.silent && c.received.startsWith("GET ") && c.received.includes("\r\n\r\n") && !c.answered) {
+							c.answered = true;
+							ev.onData(Buffer.from("HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\npage from the custom backend\n"));
+							ev.onClose(null);
+						}
+					},
+					end() { c.ended = true; c.order.push("end"); c.onEnd?.(); },
+					destroy() { c.destroyed = true; },
+					pause() {},
+					resume() {},
+					buffered: 0,
+				};
+			},
+			async lookup(name) {
+				seen.lookups.push(name);
+				if (name === "web.test") return ["10.77.0.5"];
+				throw Object.assign(new Error("no such host"), { code: "ENOTFOUND" });
+			},
+			close() { seen.closed = true; },
+		};
+		return { backend, conns, seen };
+	};
+	interface CustomConn {
+		addr: import("../js/node.ts").NetAddress; ev: import("../js/node.ts").NetConnectionEvents;
+		received: string; ended: boolean; destroyed: boolean; answered?: boolean; order: string[]; onEnd?: () => void;
+	}
+
+	// The reproduction of the request for custom backends in a worker: both modes print the page.
+	for (const { worker, name } of MODES) test(`a custom NetBackend object serves the guest's connections (${name})`, async (t) => {
+		const { backend, conns } = customBackend();
+		const vm = await boot(t, { worker, memoryMiB: 128, log: () => {}, net: backend });
+		const r = await vm.exec("sh", ["-c", "/usr/lib/kw/net wait; wget -T 5 -qO- http://10.77.0.5/ 2>&1; echo exit=$?"]);
+		assert.equal(r.stdout.trim(), "page from the custom backend\nexit=0");
+		assert.equal(conns.length, 1);
+		assert.equal(conns[0]!.addr.host, "10.77.0.5");
+		assert.equal(conns[0]!.addr.port, 80);
+		// The guest's end of the connection: the stack's own address and the guest's ephemeral port.
+		assert.equal(conns[0]!.addr.source?.host, "10.0.2.15");
+		assert.ok(conns[0]!.addr.source!.port >= 1024, JSON.stringify(conns[0]!.addr));
+	});
+
+	test("worker mode: a NetBackend's lookup() answers the guest's DNS, and a refused connection and an unknown name fail the guest's client", async (t) => {
+		const { backend, conns, seen } = customBackend({ onConnect: (c) => { if (c.addr.port === 81) c.ev.onClose(Object.assign(new Error("refused"), { code: "ECONNREFUSED" })); else c.ev.onConnect(); } });
+		const vm = await boot(t, { worker: true, memoryMiB: 128, log: () => {}, net: backend });
+		const byName = await vm.exec("sh", ["-c", "/usr/lib/kw/net wait; wget -T 5 -qO- http://web.test/ 2>&1; echo exit=$?"]);
+		assert.equal(byName.stdout.trim(), "page from the custom backend\nexit=0");
+		assert.deepEqual(seen.lookups, ["web.test"]);
+		assert.equal(conns[0]!.addr.host, "10.77.0.5");
+		const unknown = await vm.exec("sh", ["-c", "wget -T 5 -qO- http://nope.test/ 2>&1; echo exit=$?"]);
+		assert.match(unknown.stdout, /bad address|exit=1/);
+		assert.ok(seen.lookups.includes("nope.test"));
+		const refused = await vm.exec("sh", ["-c", "wget -T 5 -qO- http://10.77.0.5:81/ 2>&1; echo exit=$?"]);
+		assert.match(refused.stdout, /exit=1/);
+		assert.doesNotMatch(refused.stdout, /page from/);
+	});
+
+	test("worker mode: the guest's half-close reaches the backend's end() after its data, and the backend can still answer", async (t) => {
+		const { backend, conns } = customBackend();
+		const vm = await boot(t, { worker: true, memoryMiB: 128, log: () => {}, net: backend });
+		// busybox nc shuts down its sending side when its input ends, then waits for the answer.
+		const answer = vm.exec("sh", ["-c", "/usr/lib/kw/net wait; printf 'hello' | nc -w 10 10.77.0.5 7; echo exit=$?"]);
+		await until(() => conns.length === 1, 15000);
+		const c = conns[0]!;
+		await new Promise<void>((resolve) => { c.onEnd = resolve; if (c.ended) resolve(); });
+		assert.equal(c.received, "hello");
+		assert.deepEqual(c.order, ["write", "end"]);
+		assert.equal(c.destroyed, false);
+		c.ev.onData(new TextEncoder().encode("bye\n"));
+		c.ev.onClose(null);
+		const r = await answer;
+		assert.equal(r.stdout.trim(), "bye\nexit=0");
+	});
+
+	test("worker mode: a guest that does not read bounds what the backend has sent (flow control through the port)", async (t) => {
+		let sent = 0, paused = false, pauses = 0, timer: ReturnType<typeof setTimeout> | undefined;
+		const CHUNK = 64 * 1024;
+		const { backend } = customBackend({
+			onConnect: (c) => {
+				c.ev.onConnect();
+				// A socket-like source: it sends while it is not paused, as fast as the event loop lets it.
+				const pump = () => {
+					for (let i = 0; i < 16 && !paused; i++) { c.ev.onData(new Uint8Array(CHUNK).fill(97)); sent += CHUNK; }
+					timer = c.destroyed ? undefined : setTimeout(pump, 1);
+				};
+				pump();
+			},
+		});
+		const inner = backend.connect.bind(backend);
+		backend.connect = (addr, ev) => {
+			const h = inner(addr, ev);
+			return { ...h, pause() { paused = true; pauses++; }, resume() { paused = false; } };
+		};
+		t.after(() => clearTimeout(timer));
+		const vm = await boot(t, { worker: true, memoryMiB: 128, log: () => {}, net: backend });
+		// nc's output goes into a pipe nobody reads for 5 s, so nc stops reading its socket.
+		const slow = vm.exec("sh", ["-c", "/usr/lib/kw/net wait; nc -w 20 10.77.0.5 9 | (sleep 5; wc -c) ; true"]);
+		await until(() => paused, 20000);
+		await new Promise((r) => setTimeout(r, 1500));
+		const held = sent;
+		await new Promise((r) => setTimeout(r, 1000));
+		// Stalled: the guest's socket buffers, the stack's 512 KiB and the port's 256 KiB window and what one chunk adds; not the hundreds of MiB a free-running source sends in 2.5 s.
+		assert.equal(sent, held, "the source stays paused while the guest does not read");
+		assert.ok(sent < 16 * 1024 * 1024, `the backend sent ${sent} bytes into a guest that was not reading`);
+		assert.ok(pauses >= 1);
+		// When the guest reads again the source runs on.
+		const before = sent;
+		await until(() => sent > before + 4 * CHUNK, 30000);
+		slow.catch(() => {}); // the kernel is stopped by the test's cleanup
+	});
+
+	test("worker mode: stopping the kernel destroys the connections that are open and closes the backend", async (t) => {
+		// The backend accepts the connection and never answers: the guest sits in wget.
+		const { backend, conns, seen } = customBackend({ silent: true });
+		const vm = await boot(t, { worker: true, memoryMiB: 128, log: () => {}, net: backend });
+		const wget = vm.exec("sh", ["-c", "/usr/lib/kw/net wait; wget -T 60 -qO- http://10.77.0.5:8080/ 2>&1; echo exit=$?"]);
+		wget.catch(() => {});
+		await until(() => conns.length === 1, 15000);
+		await until(() => conns[0]!.received.length > 0, 15000); // the request is at the backend: the connection is up
+		assert.equal(conns[0]!.destroyed, false);
+		const res = await vm.stop({ reason: "test" });
+		assert.ok(res);
+		await until(() => conns[0]!.destroyed && seen.closed, 15000);
+	});
+
+	test("worker mode: a net spec of kind port, served by the embedder with serveNetBackend()", async (t) => {
+		const { backend, conns, seen } = customBackend();
+		const { port1, port2 } = new MessageChannel();
+		const server = serveNetBackend(port1, backend, { window: 64 * 1024 });
+		t.after(() => server.close());
+		const vm = await boot(t, { worker: true, memoryMiB: 128, log: () => {}, net: { kind: "net", backend: { kind: "port", port: port2 } } });
+		const r = await vm.exec("sh", ["-c", "/usr/lib/kw/net wait; wget -T 5 -qO- http://10.77.0.5/ 2>&1; echo exit=$?"]);
+		assert.equal(r.stdout.trim(), "page from the custom backend\nexit=0");
+		assert.equal(conns.length, 1);
+		await vm.stop({ reason: "test" });
+		await until(() => seen.closed); // the kernel's end closes the backend, as in inline mode
+	});
+
+	test("a net spec of kind port also works inline, and the kernel's end closes the backend", async (t) => {
+		const { backend, seen } = customBackend();
+		const { port1, port2 } = new MessageChannel();
+		const server = serveNetBackend(port1, backend);
+		t.after(() => server.close());
+		const vm = await createKernel({ kernel: testKernel, cpus: testCpus, memoryMiB: 128, log: () => {}, net: { kind: "net", backend: { kind: "port", port: port2 } } });
+		const r = await vm.exec("sh", ["-c", "/usr/lib/kw/net wait; wget -T 5 -qO- http://10.77.0.5/ 2>&1; echo exit=$?"]);
+		assert.equal(r.stdout.trim(), "page from the custom backend\nexit=0");
+		await vm.stop({ reason: "test" });
+		await until(() => seen.closed);
 	});
 
 	for (const { worker, name } of MODES) test(`Wisp networking through the default server (${name})`, { skip: !process.env.UNKERNEL_TEST_WISP && "set UNKERNEL_TEST_WISP=1 (needs internet)" }, async (t) => {
@@ -2476,7 +2644,7 @@ describe("api", { concurrency: CONCURRENCY }, () => {
 			const { port1, port2 } = new MessageChannel();
 			serveKernel({ post: (m, tr) => port2.postMessage(m, tr), listen: (h) => port2.on("message", h) }, { readFile: nodeReadFile(), devices });
 			return {
-				post: (m, tr) => port1.postMessage(m, tr),
+				post: (m, tr) => port1.postMessage(m, tr as import("node:worker_threads").Transferable[]),
 				listen: (h) => port1.on("message", h.message),
 				terminate: () => { port1.close(); port2.close(); },
 			} satisfies import("../js/core/worker-protocol.ts").WorkerEndpoint;

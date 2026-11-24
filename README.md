@@ -347,7 +347,11 @@ await createKernel({ net: wispBackend(DEFAULT_WISP_SERVERS) });     // anywhere:
 
 Networking is off unless you pass `net`. Any object with `connect` and
 `lookup` methods can carry the guest's TCP and DNS, so you can write your
-own backend.
+own backend. `connect({ host, port, source }, events)` gets the guest's
+address and source port besides the destination, and the connection's
+`end()` is the guest's half-close (its FIN). With `worker: true` the backend
+stays on your thread and the kernel's network stack calls it over a
+message port (below).
 
 ### Add disks
 
@@ -571,9 +575,33 @@ const vm = await createKernel({
 ```
 
 The kernel runs in a worker thread or Web Worker, with the same API. Disks
-and the network are given as specs, which the worker builds: `{ kind:
-"file", path }` on Node, `{ kind: "http", url }` and `{ kind: "data",
-template: "bundled" }` in browsers. Input and frames go through shared
+are given as specs, which the worker builds: `{ kind: "file", path }` on
+Node, `{ kind: "http", url }` and `{ kind: "data", template: "bundled" }` in
+browsers. The network is a spec too (`{ kind: "net", backend: { kind:
+"direct" } }`, or `{ kind: "wisp", servers }`), or a backend object of your
+own, which stays on the thread that called `createKernel()`:
+
+```js
+const vm = await createKernel({
+  worker: true,
+  net: {
+    connect({ host, port, source }, ev) { /* ev.onConnect(), ev.onData(bytes), ... */ },
+    async lookup(name) { return ["10.77.0.5"]; },
+  },
+});
+```
+
+The worker's network stack calls it over a `MessagePort`, which the SDK
+makes and closes. Chunks cross by transfer (a `Uint8Array` given to
+`ev.onData()` is detached by the call), the guest's writes, `end()` and
+`destroy()` arrive in order, and flow control works in both directions: a
+backend that does not drain (`buffered`, `onDrain`) or a guest that does not
+read (`pause()` is called, `resume()` follows) holds the other side back,
+with at most 256 KiB in flight per connection. The same thing, for a
+backend served elsewhere (another thread, a service worker), is the spec
+`{ kind: "net", backend: { kind: "port", port } }` with
+`serveNetBackend(otherPort, backend)` on the other end of the channel; the
+port is transferred to the worker. Input and frames go through shared
 memory when it is available (`vm.transport` says). This mode is
 experimental.
 
