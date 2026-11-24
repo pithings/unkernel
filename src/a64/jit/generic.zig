@@ -52,7 +52,7 @@ pub const Kind = enum(u8) {
     mrs_fp,
     /// Xt = NZCV (MRS)
     mrs_nzcv,
-    /// Xt = the constant k (MRS DCZID_EL0, CTR_EL0, CNTFRQ_EL0)
+    /// Xt = the constant k (MRS DCZID_EL0, CTR_EL0, CNTFRQ_EL0, etc.)
     mrs_k,
     /// NZCV = compare of Sn/Dn with Sm/Dm or +0 (FCMP, FCMPE)
     fcmp,
@@ -74,6 +74,8 @@ pub const Kind = enum(u8) {
     cvtz,
     /// Dd = Sn (h 0) or Sd = Dn (h 1) (FCVT)
     fcvt,
+    /// Sd/Dd = round(Sn/Dn) (FRINTN, FRINTP, FRINTM, FRINTZ: op 0..3; h: double)
+    frint,
 };
 
 pub const Fast = struct {
@@ -116,12 +118,21 @@ pub fn decode(raw: u32) ?Fast {
         0x9eaf_0000 => return .{ .kind = .ins64, .d = d, .n = n, .h = 1 }, // fmov vd.d[1], xn
         else => {},
     }
-    // MRS Xt, <reg> (L = 1, op0 = 3, op1 = 3)
+    // MRS Xt, <reg> (L = 1, op0 = 3, op1 = 3 or 0)
     switch (raw & 0xffff_ffe0) {
         0xd53b_4400 => return .{ .kind = .mrs_fp, .d = d, .h = 0 }, // FPCR
         0xd53b_4420 => return .{ .kind = .mrs_fp, .d = d, .h = 1 }, // FPSR
         0xd53b_4200 => return .{ .kind = .mrs_nzcv, .d = d },
         0xd53b_00e0 => return .{ .kind = .mrs_k, .d = d, .k = branch.dczid },
+        0xd53b_0020 => return .{ .kind = .mrs_k, .d = d, .k = branch.ctr },
+        0xd53b_e000 => return .{ .kind = .mrs_k, .d = d, .k = branch.cntfrq },
+        0xd53b_d060 => return .{ .kind = .mrs_k, .d = d, .k = 0 }, // TPIDRRO_EL0
+        0xd538_0000 => return .{ .kind = .mrs_k, .d = d, .k = branch.midr },
+        0xd538_00a0 => return .{ .kind = .mrs_k, .d = d, .k = branch.mpidr },
+        0xd538_00c0 => return .{ .kind = .mrs_k, .d = d, .k = 0 }, // REVIDR_EL1
+        0xd538_0400 => return .{ .kind = .mrs_k, .d = d, .k = branch.id_aa64pfr0 },
+        0xd538_0500 => return .{ .kind = .mrs_k, .d = d, .k = branch.id_aa64dfr0 },
+        0xd538_0700 => return .{ .kind = .mrs_k, .d = d, .k = branch.id_aa64mmfr0 },
         else => {},
     }
     // AdvSIMD modified immediate: MOVI, MVNI (not ORR/BIC, not FMOV half)
@@ -194,6 +205,7 @@ fn decodeFp(raw: u32, d: u8, n: u8, m: u8) ?Fast {
         return switch (bits(raw, 20, 15)) {
             0, 1, 2 => .{ .kind = .fmov1, .d = d, .n = n, .h = h, .op = @intCast(bits(raw, 20, 15)), .raw = raw },
             3 => .{ .kind = .fsqrt, .d = d, .n = n, .h = h, .raw = raw },
+            8, 9, 10, 11 => .{ .kind = .frint, .d = d, .n = n, .h = h, .op = @intCast(bits(raw, 17, 15) & 3), .raw = raw },
             0b000101 => if (h == 0) .{ .kind = .fcvt, .d = d, .n = n, .h = 0, .raw = raw } else null, // FCVT Dd, Sn
             0b000100 => if (h == 1) .{ .kind = .fcvt, .d = d, .n = n, .h = 1, .raw = raw } else null, // FCVT Sd, Dn
             else => null,
@@ -234,7 +246,7 @@ pub fn usage(f: Fast) Use {
         .mrs_nzcv => cm.wr(xs(f.d)).with(.{ .flags_read = true }),
         .fcmp => cm.rd(vlo(f.n)).with(if (f.zero) .{} else cm.rd(vlo(f.m))).with(.{ .flags_write = true }),
         .farith => cm.rd(vlo(f.n)).with(cm.rd(vlo(f.m))).with(cm.wr(vlo(f.d))),
-        .fsqrt, .fmov1, .fcvt => cm.rd(vlo(f.n)).with(cm.wr(vlo(f.d))),
+        .fsqrt, .fmov1, .fcvt, .frint => cm.rd(vlo(f.n)).with(cm.wr(vlo(f.d))),
         .fimm => cm.wr(vlo(f.d)),
         .fcsel => cm.rd(vlo(f.n)).with(cm.rd(vlo(f.m))).with(cm.wr(vlo(f.d))).with(.{ .flags_read = true }),
         .cvtf => cm.rd(xs(f.n)).with(cm.wr(vlo(f.d))),
@@ -410,7 +422,7 @@ pub fn emit(e: *Emit, f: Fast, at: At) void {
             e.set(cm.l_nzcv);
             alu.exactNow(e);
         },
-        .farith, .fsqrt, .cvtf, .cvtz, .fcvt => fpFast(e, f, at),
+        .farith, .fsqrt, .cvtf, .cvtz, .fcvt, .frint => fpFast(e, f, at),
         .fmov1 => {
             const sign: u64 = if (f.h == 1) 1 << 63 else 1 << 31;
             cm.get(e, vlo(f.n));
@@ -463,14 +475,20 @@ const fpsr_off = fpcr_off + 4;
 const fpcr_fast_mask: i32 = @bitCast(c.FPCR_FZ | (3 << c.FPCR_RMODE_SHIFT));
 
 const Fo = struct {
+    const f32_ceil = 0x8d;
+    const f32_floor = 0x8e;
     const f32_trunc = 0x8f;
+    const f32_nearest = 0x90;
     const f32_sqrt = 0x91;
     const f32_add = 0x92;
     const f32_sub = 0x93;
     const f32_mul = 0x94;
     const f32_div = 0x95;
-    const f64_neg = 0x9a;
+    const f64_ceil = 0x9b;
+    const f64_floor = 0x9c;
     const f64_trunc = 0x9d;
+    const f64_nearest = 0x9e;
+    const f64_neg = 0x9a;
     const f64_sqrt = 0x9f;
     const f64_add = 0xa0;
     const f64_sub = 0xa1;
@@ -730,6 +748,24 @@ fn fpFast(e: *Emit, f: Fast, at: At) void {
                 e.set(t1);
                 inRange(e, t0, dbl);
             }
+        },
+        .frint => {
+            pushF(e, ln, dbl);
+            fop(e, dbl, switch (f.op) {
+                0 => Fo.f64_nearest,
+                1 => Fo.f64_ceil,
+                2 => Fo.f64_floor,
+                else => Fo.f64_trunc,
+            }, switch (f.op) {
+                0 => Fo.f32_nearest,
+                1 => Fo.f32_ceil,
+                2 => Fo.f32_floor,
+                else => Fo.f32_trunc,
+            });
+            popF(e, t0, dbl);
+            e.k64(0);
+            e.set(t1);
+            inRange(e, ln, dbl);
         },
         .cvtf => {
             // The integer, sign- or zero-extended from W; its magnitude.

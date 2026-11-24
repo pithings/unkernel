@@ -532,11 +532,20 @@ fn genFast(r: std.Random, out: []u32, pc: u64) usize {
             (if (r.uintLessThan(u32, 16) == 0) @as(u32, 1) << 11 else 0) | (r.uintLessThan(u32, 32) << 5) | vd, // MOVI, MVNI, ORR, BIC, FMOV
         9 => 0x0e20_1c00 | q | (r.uintLessThan(u32, 2) << 29) | (r.uintLessThan(u32, 4) << 22) | (vm << 16) | (vn << 5) | vd, // AND .. BIF
         10, 11 => 0x1e20_2000 | (r.uintLessThan(u32, 2) << 22) | (vm << 16) | (vn << 5) | (r.uintLessThan(u32, 4) << 3), // FCMP(E) S/D, reg or #0
-        12 => @as(u32, switch (r.uintLessThan(u32, 4)) { // MRS
+        12 => @as(u32, switch (r.uintLessThan(u32, 13)) { // MRS
             0 => 0xd53b_4400,
             1 => 0xd53b_4420,
             2 => 0xd53b_4200,
-            else => 0xd53b_00e0,
+            3 => 0xd53b_00e0,
+            4 => 0xd53b_0020,
+            5 => 0xd53b_e000,
+            6 => 0xd53b_d060,
+            7 => 0xd538_0000,
+            8 => 0xd538_00a0,
+            9 => 0xd538_00c0,
+            10 => 0xd538_0400,
+            11 => 0xd538_0500,
+            else => 0xd538_0700,
         }) | d,
         else => 0xd51b_4400 | n, // msr fpcr, xN
     };
@@ -656,7 +665,7 @@ fn genFp(r: std.Random, out: []u32, pc: u64) usize {
             return 2;
         },
         6, 7, 8 => out[0] = 0x1e20_0800 | ftype | (vm << 16) | (r.uintLessThan(u32, 4) << 12) | (vn << 5) | vd, // fmul, fdiv, fadd, fsub
-        9 => out[0] = 0x1e20_4000 | ftype | (r.uintLessThan(u32, 4) << 15) | (vn << 5) | vd, // fmov, fabs, fneg, fsqrt
+        9 => out[0] = 0x1e20_4000 | ftype | ((if (r.boolean()) r.uintLessThan(u32, 4) else 8 + r.uintLessThan(u32, 4)) << 15) | (vn << 5) | vd, // fmov, fabs, fneg, fsqrt, frint
         10 => out[0] = if (r.boolean()) 0x1e62_4000 | (vn << 5) | vd else 0x1e22_c000 | (vn << 5) | vd, // fcvt sD, dN / dD, sN
         11 => out[0] = 0x1e20_1000 | ftype | (r.uintLessThan(u32, 256) << 13) | vd, // fmov (immediate)
         12 => { // fcsel after a compare
