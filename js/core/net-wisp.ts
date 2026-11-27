@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
 // NetStack backend for Wisp v1 servers (https://github.com/MercuryWorkshop/wisp-protocol):
-// the guest's TCP connections, multiplexed over one WebSocket. Works
-// wherever there is a global WebSocket (browsers, Node >= 22).
+// the guest's TCP connections and UDP flows, multiplexed over one
+// WebSocket. Works wherever there is a global WebSocket (browsers, Node >= 22).
 //
 // Packets: [type u8][stream id u32 LE][payload], all integers little-endian.
-//   0x01 CONNECT  type u8 (1 = TCP), port u16, hostname   client -> server
-//   0x02 DATA     bytes                                   both
-//   0x03 CONTINUE buffer remaining u32 (packets)          server -> client
-//   0x04 CLOSE    reason u8                               both
-// The server opens with CONTINUE on stream 0 (the per-stream packet credit).
+//   0x01 CONNECT  type u8 (1 = TCP, 2 = UDP), port u16, hostname   client -> server
+//   0x02 DATA     bytes (one datagram on a UDP stream)            both
+//   0x03 CONTINUE buffer remaining u32 (packets)                   server -> client
+//   0x04 CLOSE    reason u8                                        both
+// The server opens with CONTINUE on stream 0 (the per-stream packet credit
+// of TCP streams; UDP streams have none).
 //
 // What the guest can see, compared with real sockets:
 //   * Wisp has no DNS. lookup() hands out stable fake addresses from
@@ -21,8 +22,10 @@
 //     stays open until the server closes it).
 //   * Only the client -> server direction is flow-controlled; pause() is
 //     a no-op and NetStack buffers what the server sends.
+//   * A UDP flow is a stream to one host and port. A server without UDP
+//     closes it (reason 0x41 or 0x48), and the guest's datagrams are lost.
 
-import type { NetBackend, NetConnection, NetConnectionEvents } from "./net.ts";
+import type { NetBackend, NetConnection, NetConnectionEvents, NetDatagramSocket } from "./net.ts";
 
 /**
  * The default Wisp server: the project's own. Public alternatives (run by
@@ -50,12 +53,15 @@ const isBrowser = () => typeof (globalThis as { document?: unknown }).document !
 
 /** A Wisp backend; close() drops the WebSocket (and with it every stream). */
 export interface WispBackend extends NetBackend {
+	udp: NonNullable<NetBackend["udp"]>;
 	close(): void;
 }
 
 const RETRY_MS = 5000;
 const HANDSHAKE_TIMEOUT_MS = 10000;
 const MAX_PACKET = 64 * 1024;          // coalesce guest segments up to this size
+const UDP_QUEUE = 64;                  // datagrams a UDP stream queues until the WebSocket is up
+const TYPE_TCP = 0x01, TYPE_UDP = 0x02;
 const FAKE_BASE = (198 << 24 | 18 << 16) >>> 0, FAKE_SIZE = 1 << 17;
 const enc = new TextEncoder();
 
@@ -78,6 +84,8 @@ const isIPv4 = (s: string) => /^\d{1,3}(\.\d{1,3}){3}$/.test(s);
 
 interface Stream {
 	ev: NetConnectionEvents;
+	/** A UDP stream: one DATA packet per datagram, no credit. */
+	udp: boolean;
 	credit: number;
 	out: Uint8Array[];
 	outBytes: number;
@@ -105,6 +113,7 @@ export function wispBackend(url: string | readonly string[], opts: WispBackendOp
 	const streams = new Map<number, Stream>();
 	const nameToIp = new Map<string, number>(), ipToName = new Map<number, string>();
 	let nextFake = 1;
+	let udpWarned = false;
 	let connecting: WebSocket[] = [];   // sockets racing for the handshake
 
 	// With several URLs, all are tried at once and the first to complete the
@@ -171,58 +180,81 @@ export function wispBackend(url: string | readonly string[], opts: WispBackendOp
 			break;
 		case 0x04: {
 			const r = m.length > 5 ? m[5]! : 0x01;
-			st.closed(r === 0x02 ? null : new Error(`wisp: ${CLOSE_REASONS[r] ?? `close reason 0x${r.toString(16)}`}`));
+			if (r === 0x02) { st.closed(null); break; }
+			const err = new Error(`wisp: ${CLOSE_REASONS[r] ?? `close reason 0x${r.toString(16)}`}`);
+			if (r === 0x44) (err as Error & { code: string }).code = "ECONNREFUSED";
+			if (st.udp && (r === 0x41 || r === 0x48) && !udpWarned) {
+				udpWarned = true;
+				log("[net] the wisp server refused a UDP stream; it may not carry UDP");
+			}
+			st.closed(err);
 			break;
 		}
 		}
 	}
 
+	/** Open a stream (CONNECT once the WebSocket is up). */
+	function open(type: number, host: string, port: number, ev: NetConnectionEvents): { id: number; st: Stream } {
+		const id = nextId++;
+		const udp = type === TYPE_UDP;
+		const name = isIPv4(host) ? ipToName.get(ip4(host)) ?? host : host;
+		const st: Stream = {
+			ev, udp, credit: 0, out: [], outBytes: 0, done: false, scheduled: false, open: false,
+			closed(err) {
+				if (st.done) return;
+				st.done = true;
+				streams.delete(id);
+				ev.onClose(err);
+			},
+			// Send queued guest data as DATA packets while credit lasts.
+			pump() {
+				st.scheduled = false;
+				if (!st.open || st.done || !ws) return;
+				const before = st.outBytes;
+				while (st.out.length && (udp || st.credit > 0)) {
+					let n = 0, k = 0;
+					if (!udp) while (k < st.out.length && n + st.out[k]!.length <= MAX_PACKET) n += st.out[k++]!.length;
+					if (k === 0) { n = st.out[0]!.length; k = 1; }
+					const p = new Uint8Array(5 + n);
+					p[0] = 0x02;
+					new DataView(p.buffer).setUint32(1, id, true);
+					let o = 5;
+					for (const c of st.out.splice(0, k)) { p.set(c, o); o += c.length; }
+					ws.send(p);
+					if (!udp) st.credit--;
+					st.outBytes -= n;
+				}
+				if (st.outBytes < before) ev.onDrain();
+			},
+		};
+		streams.set(id, st);
+		connectWs().then((s) => {
+			if (st.done) return;
+			const host = enc.encode(name);
+			const req = new Uint8Array(3 + host.length);
+			req[0] = type;
+			new DataView(req.buffer).setUint16(1, port, true);
+			req.set(host, 3);
+			s.send(packet(0x01, id, req));
+			st.credit = initialCredit;
+			st.open = true;
+			ev.onConnect();
+			st.pump();
+		}, (e) => queueMicrotask(() => st.closed(e)));
+		return { id, st };
+	}
+
+	/** Drop a stream from this side (CLOSE, reason 0x02); no events follow. */
+	function drop(id: number, st: Stream): void {
+		if (st.done) return;
+		st.done = true;
+		streams.delete(id);
+		if (st.open) ws?.send(packet(0x04, id, Uint8Array.of(0x02)));
+	}
+
 	return {
 		connect({ host, port }, ev): NetConnection {
-			const id = nextId++;
-			const name = isIPv4(host) ? ipToName.get(ip4(host)) ?? host : host;
-			const st: Stream = {
-				ev, credit: 0, out: [], outBytes: 0, done: false, scheduled: false, open: false,
-				closed(err) {
-					if (st.done) return;
-					st.done = true;
-					streams.delete(id);
-					ev.onClose(err);
-				},
-				// Send queued guest data as DATA packets while credit lasts.
-				pump() {
-					st.scheduled = false;
-					if (!st.open || st.done || !ws) return;
-					const before = st.outBytes;
-					while (st.out.length && st.credit > 0) {
-						let n = 0, k = 0;
-						while (k < st.out.length && n + st.out[k]!.length <= MAX_PACKET) n += st.out[k++]!.length;
-						if (k === 0) { n = st.out[0]!.length; k = 1; }
-						const p = new Uint8Array(5 + n);
-						p[0] = 0x02;
-						new DataView(p.buffer).setUint32(1, id, true);
-						let o = 5;
-						for (const c of st.out.splice(0, k)) { p.set(c, o); o += c.length; }
-						ws.send(p);
-						st.credit--;
-						st.outBytes -= n;
-					}
-					if (st.outBytes < before) ev.onDrain();
-				},
-			};
-			streams.set(id, st);
-			connectWs().then((s) => {
-				if (st.done) return;
-				const req = new Uint8Array(3 + enc.encode(name).length);
-				req[0] = 0x01;
-				new DataView(req.buffer).setUint16(1, port, true);
-				req.set(enc.encode(name), 3);
-				s.send(packet(0x01, id, req));
-				st.credit = initialCredit;
-				st.open = true;
-				ev.onConnect();
-				st.pump();
-			}, (e) => queueMicrotask(() => st.closed(e)));
+			const { id, st } = open(TYPE_TCP, host, port, ev);
 			return {
 				write(u8) {
 					if (st.done) return;
@@ -231,15 +263,26 @@ export function wispBackend(url: string | readonly string[], opts: WispBackendOp
 					if (!st.scheduled) { st.scheduled = true; queueMicrotask(st.pump); }
 				},
 				end() {},
-				destroy() {
-					if (st.done) return;
-					st.done = true;
-					streams.delete(id);
-					if (st.open) ws?.send(packet(0x04, id, Uint8Array.of(0x02)));
-				},
+				destroy() { drop(id, st); },
 				pause() {},
 				resume() {},
 				get buffered() { return st.outBytes; },
+			};
+		},
+		udp({ host, port }, ev): NetDatagramSocket {
+			const { id, st } = open(TYPE_UDP, host, port, {
+				onConnect() {}, onEnd() {}, onDrain() {},
+				onData: (u8) => ev.onMessage(u8),
+				onClose: (err) => ev.onClose(err),
+			});
+			return {
+				send(data) {
+					if (st.done || (!st.open && st.out.length >= UDP_QUEUE)) return;
+					st.out.push(data);
+					st.outBytes += data.length;
+					if (!st.scheduled) { st.scheduled = true; queueMicrotask(st.pump); }
+				},
+				close() { drop(id, st); },
 			};
 		},
 		lookup(name) {

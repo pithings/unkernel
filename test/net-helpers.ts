@@ -86,8 +86,10 @@ export function parse(f: Uint8Array): Parsed {
 			r.win = dv.getUint16(l4 + 14);
 			r.payload = f.subarray(l4 + (f[l4 + 12]! >> 4) * 4, l4 + len);
 		} else if (r.proto === 17) {
+			const ps = (r.src >>> 16) + (r.src & 0xffff) + (r.dst >>> 16) + (r.dst & 0xffff) + 17 + len;
+			if (dv.getUint16(l4 + 6)) assert.equal(csum(f, l4, len, ps), 0, "udp checksum");
 			r.sport = dv.getUint16(l4); r.dport = dv.getUint16(l4 + 2);
-			r.payload = f.subarray(l4 + 8);
+			r.payload = f.subarray(l4 + 8, l4 + dv.getUint16(l4 + 4));
 		} else if (r.proto === 1) {
 			r.icmpType = f[l4];
 			assert.equal(csum(f, l4, len), 0, "icmp checksum");
@@ -170,7 +172,8 @@ export async function echoTest(backend: NetBackend): Promise<void> {
 /**
  * A minimal Wisp v1 server: CONNECT to "echo.test" echoes DATA and closes
  * (reason 0x02) after "bye"; any other host is refused (0x44). The credit is
- * tiny, so the client has to wait for CONTINUE.
+ * tiny, so the client has to wait for CONTINUE. A UDP stream (seen as
+ * "udp:HOST:PORT") echoes each datagram, with no CONTINUE and no close.
  */
 export async function withWisp(fn: (b: WispBackend, seen: { hosts: string[]; packets: number }, url: string) => Promise<void>): Promise<void> {
 	const CREDIT = 2;
@@ -182,16 +185,19 @@ export async function withWisp(fn: (b: WispBackend, seen: { hosts: string[]; pac
 			b[0] = type; b.writeUInt32LE(id, 1); b.set(payload, 5);
 			return b;
 		};
+		const udp = new Set<number>();
 		const ws: TestWebSocket = acceptWebSocket(req, socket, head, (m) => {
 			const id = m.readUInt32LE(1);
 			if (m[0] === 0x01) {
 				const host = m.subarray(8).toString();
-				seen.hosts.push(`${host}:${m.readUInt16LE(6)}`);
+				if (m[5] === 0x02) udp.add(id);
+				seen.hosts.push(`${m[5] === 0x02 ? "udp:" : ""}${host}:${m.readUInt16LE(6)}`);
 				if (host !== "echo.test") ws.send(pkt(0x04, id, [0x44]));
 			} else if (m[0] === 0x02) {
 				seen.packets++;
 				const data = m.subarray(5);
 				ws.send(pkt(0x02, id, data));
+				if (udp.has(id)) return;
 				ws.send(pkt(0x03, id, [CREDIT, 0, 0, 0]));
 				if (data.toString().endsWith("bye")) ws.send(pkt(0x04, id, [0x02]));
 			}

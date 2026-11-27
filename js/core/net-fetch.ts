@@ -11,13 +11,14 @@
 // A routed name resolves to a reserved address of 198.51.100.0/24
 // (TEST-NET-2: outside Wisp's 198.18.0.0/15 and the guest's 10.0.2.0/24,
 // and passed through by NetStack.backendHost()). A connection to it on port
-// 80 is served here; on another port it is refused.
+// 80 is served here; on another port it is refused, and so is UDP to it.
+// UDP to anything else goes to the inner backend's udp(), if it has one.
 //
 // A string route rewrites the URL's prefix (http://HOST/path?q becomes
 // BASE/path?q) and forwards only the headers in FORWARD_HEADERS; a
 // function route gets a Request with the guest's headers.
 
-import type { NetBackend, NetConnection, NetConnectionEvents } from "./net.ts";
+import type { NetBackend, NetConnection, NetConnectionEvents, NetDatagramEvents, NetDatagramSocket } from "./net.ts";
 
 /** A base URL (prefix rewrite) or a handler. */
 export type FetchRoute = string | ((req: Request) => Response | Promise<Response>);
@@ -262,7 +263,20 @@ export function fetchRoutes(inner: NetBackend | undefined, routes: Record<string
 		};
 	}
 
+	/** UDP to a routed address: port unreachable, asynchronously. */
+	function refusedUdp(ev: NetDatagramEvents): NetDatagramSocket {
+		let dead = false;
+		queueMicrotask(() => { if (!dead) ev.onClose(Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" })); });
+		return { send() {}, close() { dead = true; } };
+	}
+	const innerUdp = inner?.udp?.bind(inner);
+
 	return {
+		...(innerUdp && {
+			udp(addr: { host: string; port: number }, ev: NetDatagramEvents): NetDatagramSocket {
+				return byIp.has(addr.host) || byName.has(normName(addr.host)) ? refusedUdp(ev) : innerUdp(addr, ev);
+			},
+		}),
 		lookup(name) {
 			const r = byName.get(normName(name));
 			if (r) return Promise.resolve([r.ip]);

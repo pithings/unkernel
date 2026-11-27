@@ -285,7 +285,7 @@ well behind native.
 - The SDK and CLI boot one CPU by default; the page boots several where
   it can (`?cpus=`). A snapshot of several CPUs (SMP), and so a session
   suspended on the page, resumes only on as many.
-- No IPv6, no UDP beyond DHCP and DNS, no inbound network connections
+- No IPv6, no ICMP beyond the gateway, no inbound network connections
   ([`vm.connect()`, `vm.fetch()`](#talk-over-vsock) and `--forward` reach
   guest servers over vsock instead).
 - No hardware breakpoints or watchpoints: `gdb`'s watchpoints are
@@ -346,8 +346,8 @@ await createKernel({ net: wispBackend(DEFAULT_WISP_SERVERS) });     // anywhere:
 ```
 
 Networking is off unless you pass `net`. Any object with `connect` and
-`lookup` methods can carry the guest's TCP and DNS, so you can write your
-own backend.
+`lookup` methods can carry the guest's TCP and DNS (and with a `udp`
+method its UDP), so you can write your own backend.
 
 ### Add disks
 
