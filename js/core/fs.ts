@@ -125,7 +125,7 @@ export interface FsFile {
  * A file system by path: every path absolute and normalised ("/" the
  * root, no "." or ".." parts, names never contain "/"). getattr, readdir
  * and open are required. A missing change method answers EROFS (symlink
- * EOPNOTSUPP); hard links are not supported (EPERM). Handlers may be async
+ * EOPNOTSUPP, link EPERM). Handlers may be async
  * and throw an FsError, or any Error with an errno `code` as Node's fs
  * errors have, to answer with that errno; anything else is EIO and logged.
  */
@@ -143,6 +143,11 @@ export interface Fs {
 	remove?(path: string, dir: boolean): MaybePromise<void>;
 	/** Replaces `to` if it exists (an empty directory, or a non-directory over a non-directory). */
 	rename?(from: string, to: string): MaybePromise<void>;
+	/**
+	 * Make `path` a new name (a hard link) for the regular file at `target`; EEXIST if `path` exists.
+	 * The server checks `target`'s type as the guest walked it, which may have changed since: check it again.
+	 */
+	link?(target: string, path: string): MaybePromise<void>;
 	/** Change a path that is not open (chmod, utimes, truncate by name). */
 	setattr?(path: string, attr: FsSetAttr): MaybePromise<void>;
 	statfs?(): MaybePromise<FsStatFs>;

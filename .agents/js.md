@@ -292,8 +292,9 @@ parts that are easy to get wrong.
   by path (`Session.restore()`) and sets `VsockDevice.keep`; other given
   mounts are mounted once the kernel runs. A file gone, another file now
   (another qid.path), unlinked or replaced by the guest while open
-  (`Fid.orphan`), or not opening within the request timeout leaves its fid
-  stale: its reads, writes, getattr, setattr and fsync answer ESTALE
+  (`Fid.orphan`; also when a hard link still names it, since the restore
+  opens by the fid's path), or not opening within the request timeout
+  leaves its fid stale: its reads, writes, getattr, setattr and fsync answer ESTALE
   ("Stale file handle" in the guest). A MemoryFs passed again keeps the
   guest's changes; a new one has its own content, which the guest sees
   within 1 s, as any host change. `test/9p.test.ts` saves and restores a
@@ -1234,15 +1235,22 @@ parts that are easy to get wrong.
   fid's I/O until it is clunked, so it must keep working after the path is
   renamed or removed (MemoryFs holds the node, nodeFs the FileHandle).
   Optional `create` (returns the file open), `mkdir`, `symlink`,
-  `readlink`, `remove`, `rename`, `setattr` (by path: chmod, utimes,
-  truncate by name), `statfs`, `close`. An FsError or an error with a Node
-  errno `code` answers that errno, anything else EIO plus one log line.
-  Missing methods: EROFS for changes, EOPNOTSUPP for `symlink`, mknod and
-  xattrs (kw9p mounts with `noxattr`); Tlink is always EPERM (no hard
-  links); a file without `write` is not opened for writing (EACCES);
-  Tfsync without `fsync` (a directory) succeeds. Tlcreate without O_EXCL
-  of a name that exists (the host made it after the guest's lookup) opens
-  it, honouring O_TRUNC. Writes, truncation, fsync and clunk through one
+  `readlink`, `remove`, `rename`, `link` (a hard link: a second name for a
+  regular file), `setattr` (by path: chmod, utimes, truncate by name),
+  `statfs`, `close`. An FsError or an error with a Node errno `code`
+  answers that errno, anything else EIO plus one log line. Missing
+  methods: EROFS for changes, EOPNOTSUPP for `symlink`, mknod and xattrs
+  (kw9p mounts with `noxattr`); EPERM for `link`, and for a hard link to
+  a fid walked as anything but a regular file (MemoryFs has no `link`).
+  nodeFs's `link` checks the source again itself (Darwin's link(2)
+  follows a symlink), and that every directory on both paths is one
+  (ESTALE if not), and runs alone against renames, removes and symlinks in the
+  same host directory, so the guest cannot swap a symlink in meanwhile;
+  a wait for that lock, or a link holding it, past 10 s answers EAGAIN.
+  A file without `write` is not opened for writing (EACCES); Tfsync
+  without `fsync` (a directory) succeeds. Tlcreate without O_EXCL of a
+  name that exists (the host made it after the guest's lookup) opens it,
+  honouring O_TRUNC. Writes, truncation, fsync and clunk through one
   fid run in order; everything else concurrently. A rename moves the fids
   below it. Names are made only below directory fids,
   and walks never pass a non-directory, so no path goes through a symlink.
