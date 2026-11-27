@@ -2,7 +2,10 @@
 // Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
 // Loading a kernel module and an initramfs: download with progress, then
 // compile (streaming when the engine can). Universal; the Node entry adds
-// file paths and file: URLs (readFile hook).
+// file paths and file: URLs (readFile hook). A kernel that is gzipped (a
+// .wasm.gz a server sends as it is, such as a release mirror's) is
+// gunzipped on the way (DecompressionStream), told by gzip's magic, not by
+// the name or the headers.
 
 import { smpKernelFromBundle } from "./kpatch.ts";
 
@@ -74,6 +77,44 @@ function toU8(src: ArrayBuffer | ArrayBufferView): Uint8Array {
 	return src instanceof Uint8Array ? src
 		: src instanceof ArrayBuffer ? new Uint8Array(src)
 		: new Uint8Array(src.buffer, src.byteOffset, src.byteLength);
+}
+
+const isGzip = (b: Uint8Array) => b.length >= 2 && b[0] === 0x1f && b[1] === 0x8b;
+
+/** `bytes` gunzipped if they are gzip (by the magic), else `bytes`. */
+export async function gunzipBytes(bytes: Uint8Array): Promise<Uint8Array> {
+	if (!isGzip(bytes)) return bytes;
+	const out = new Blob([bytes as Uint8Array<ArrayBuffer>]).stream().pipeThrough(new DecompressionStream("gzip"));
+	return new Uint8Array(await new Response(out).arrayBuffer());
+}
+
+/**
+ * `r` with its body gunzipped if it starts with gzip's magic (streamed),
+ * else as it is; with `headers`. It reads the first chunk to tell.
+ */
+async function gunzipBody(r: Response, headers: HeadersInit): Promise<Response> {
+	if (!r.body) return new Response(r.body, { status: r.status, headers });
+	const reader = r.body.getReader();
+	let head = new Uint8Array(0);
+	while (head.length < 2) {
+		const c = await reader.read();
+		if (c.done) break;
+		const n = new Uint8Array(head.length + c.value.length);
+		n.set(head);
+		n.set(c.value, head.length);
+		head = n;
+	}
+	const body = new ReadableStream<Uint8Array>({
+		start(c) { if (head.length) c.enqueue(head); },
+		async pull(c) {
+			const chunk = await reader.read();
+			if (chunk.done) c.close();
+			else c.enqueue(chunk.value);
+		},
+		cancel(reason) { return reader.cancel(reason); },
+	});
+	const out = isGzip(head) ? body.pipeThrough(new DecompressionStream("gzip") as unknown as ReadableWritablePair<Uint8Array, Uint8Array>) : body;
+	return new Response(out, { status: r.status, headers });
 }
 
 /** Expected size of a response body: x-decoded-length (if a server sends it), else content-length if not compressed. */
@@ -168,6 +209,11 @@ export async function loadBytes(src: BytesSource, opts: LoadOptions = {}): Promi
 export async function loadKernelModule(src: KernelSource, opts: LoadOptions = {}): Promise<WebAssembly.Module> {
 	if (src instanceof WebAssembly.Module) return src;
 	const compile = async (bytes: Uint8Array) => {
+		try {
+			bytes = await gunzipBytes(bytes);
+		} catch (e) {
+			throw new BootError("download", `The kernel is gzip that does not decompress: ${(e as Error).message}`, { cause: e });
+		}
 		if (opts.smp) {
 			try {
 				bytes = (await smpKernelFromBundle(bytes)) ?? bytes;
@@ -192,9 +238,10 @@ export async function loadKernelModule(src: KernelSource, opts: LoadOptions = {}
 	}
 	const url = r.url || (isLocation(src) ? String(src) : "");
 	if (opts.smp || typeof WebAssembly.compileStreaming !== "function" || !r.body) return compile(await readResponse(r, url, { ...opts, what: "kernel" }));
-	const [counted, readError] = withProgress(r, url, { ...opts, what: "kernel" }, WASM_HEADERS);
+	// Progress counts the bytes as they arrive (a .wasm.gz's, against its Content-Length).
+	const [counted, readError] = withProgress(r, url, { ...opts, what: "kernel" });
 	try {
-		return await WebAssembly.compileStreaming(counted);
+		return await WebAssembly.compileStreaming(await gunzipBody(counted, WASM_HEADERS));
 	} catch (e) {
 		if (e instanceof BootError) throw e;
 		const re = readError();

@@ -3,15 +3,21 @@
 // The page's guest network: the SDK's NetStack over Wisp servers, with the
 // plain-HTTP hosts of the route table (config.ts DEFAULT_ROUTES) answered by
 // fetch() (the SDK's fetchRoutes()).
-import { DEFAULT_WISP_SERVERS, NetStack, fetchRoutes, wispBackend, type NetSpec } from "./sdk.ts";
+import { NetStack, fetchRoutes, wispBackend, type NetSpec } from "./sdk.ts";
+
+/**
+ * The page's Wisp server, the project's own. It accepts only the page's
+ * origins (unkernel.dev, and localhost for the dev server); a page served
+ * elsewhere needs its own (?wisp=).
+ */
+export const DEFAULT_WISP_SERVERS: readonly string[] = Object.freeze(["wss://wisp.unkernel.dev:6680/"]);
 
 /** Guest-visible host name to base URL; null or empty: none. */
 type Routes = Record<string, string> | null;
 
 /**
  * The page's network: a NetStack whose backend is the fastest of the Wisp
- * servers (default: the SDK's DEFAULT_WISP_SERVERS; the project's server
- * accepts only page origins on its allow list), or none when `enabled` is
+ * servers (default: DEFAULT_WISP_SERVERS), or none when `enabled` is
  * false (config.ts: `?net=0`, `?wisp=0`; `?wisp=URL[,URL...]` sets `servers`;
  * `routes` is config.ts DEFAULT_ROUTES unless `?routes=0`).
  */

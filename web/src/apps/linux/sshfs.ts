@@ -11,7 +11,7 @@
 // 37 MB download.
 //
 // The guest's TCP goes through the page's Wisp server, which lets port 22
-// through (checked 2026-11-15 with wss://wisp.pi0.io:6680/). The server's
+// through (checked 2026-11-15 with the default Wisp server). The server's
 // host key is accepted on first use into known_hosts in the demo's
 // directory, so a key change on Rebex's side does not break the demo.
 //

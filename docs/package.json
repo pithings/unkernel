@@ -1,0 +1,12 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "undocs build",
+    "dev": "undocs dev"
+  },
+  "devDependencies": {
+    "undocs": "npm:undocs-nightly@0.10.1-20261127-212958-adfe045"
+  },
+  "packageManager": "pnpm@12.14.0"
+}

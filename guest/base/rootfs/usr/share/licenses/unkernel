@@ -21,3 +21,8 @@ https://github.com/pithings/unkernel (guest/).
 /usr/lib/kw/wlandr (in the Debian image) is not unkernel's: it is the relay of wland
 (https://github.com/pithings/wland), a release binary, under the Mozilla
 Public License 2.0 and the MIT License; its source is in that repository.
+
+/usr/lib/kw/xwayland-satellite (in the Debian image) is not unkernel's: it is
+xwayland-satellite (https://github.com/Supreeeme/xwayland-satellite), Fedora's
+aarch64 build of it, under the Mozilla Public License 2.0; its source is in
+that repository, and Fedora's source package is xwayland-satellite.

@@ -1,0 +1,16 @@
+# unkernel
+
+> A real Linux kernel, compiled to WebAssembly. Boot Alpine, Debian or your own aarch64 Linux userland in Node or the browser. This site (unkernel.dev) is the browser demo: a desktop running Linux in the page. The documentation lives at https://docs.unkernel.dev/.
+
+## Docs
+
+- [Docs index for LLMs](https://docs.unkernel.dev/llms.txt): every docs page, as Markdown links
+- [Introduction](https://docs.unkernel.dev/raw/index.md): what unkernel is and how it works
+- [SDK: Getting Started](https://docs.unkernel.dev/raw/sdk.md): embed Linux in your app with a zero-dependency TypeScript SDK
+
+## Optional
+
+- [Source code](https://github.com/pithings/unkernel): the kernel, the CPU emulator, the SDK and this page
+
+<!-- SPDX-License-Identifier: MIT -->
+<!-- Copyright (C) 2026 Pooya Parsa <pooya@pi0.io> -->

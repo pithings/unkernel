@@ -53,7 +53,23 @@ main/Contents-all.gz   0c2e2d099588073221d6eebb0a84e950f1728818faf527de9034d0116
 # Bump together: WLANDR_VERSION, WLANDR_SHA256 and wland's version in
 # web/package.json. build.sh takes a local relay from KW_WLANDR instead
 # (development).
-WLANDR_VERSION=v0.1.0-261124-3c987e5
+WLANDR_VERSION=v0.1.0-261125-0023837
 WLANDR_TARBALL="wlandr-link-$WLANDR_VERSION-linux-arm64.tar.gz"
 WLANDR_URL="https://github.com/pithings/wland/releases/download/$WLANDR_VERSION/wlandr-link-linux-arm64.tar.gz"
-WLANDR_SHA256=627b5b235a7dd1718c14a166e2609599ff66278ef004de711c2c199d2f8a0e57
+WLANDR_SHA256=135b4cc69996a9ee443ceda8b7122c2d9ede9101ef38c8db61a94775636baadd
+# xwayland-satellite (https://github.com/Supreeeme/xwayland-satellite,
+# MPL-2.0): rootless Xwayland for wland, X apps' windows as Wayland windows,
+# installed as /usr/lib/kw/xwayland-satellite, which wland's relay starts
+# when an X client connects (bin/wland, where the relay has lodpi: wland
+# 0.1.0-261125-0023837 or later). Neither
+# Debian nor upstream ships a binary: this is Fedora 43's aarch64 build,
+# whose newest glibc symbol is 2.34 (Arch Linux ARM's needs 2.43, trixie has
+# 2.41), from Koji, which keeps every build (the copy signed with Fedora's
+# key, 31645531, as the mirrors have it; its unsigned one differs). It
+# needs libxcb-cursor0 and libfontconfig1 (DEBIAN_PACKAGES in build.sh)
+# and, at run time, Xwayland (Debian's xwayland, not in the image: 215 MiB
+# installed with Mesa).
+XWS_VERSION=0.8.3-1.fc43
+XWS_RPM="xwayland-satellite-$XWS_VERSION.aarch64.rpm"
+XWS_URL="https://kojipkgs.fedoraproject.org/packages/xwayland-satellite/0.8.3/1.fc43/data/signed/31645531/aarch64/$XWS_RPM"
+XWS_SHA256=e721c1efd1dee42f25763c3a132fc8d063cc3ae41c9ad6208683b30a19efb986

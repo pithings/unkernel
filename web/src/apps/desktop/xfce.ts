@@ -11,7 +11,7 @@
 // GPU GL), Adwaita dark like the page. Log Out ends the session and X. Its
 // window is Xwayland's, which stands for the X11 app (x11.ts) on the Dock.
 import type { TerminalApp } from "../types.ts";
-import { XWL_PACKAGES, XWL_PREP, XWL_SH } from "../xwl.ts";
+import { XWL_PREP, XWL_ROOTFUL_PACKAGES, XWL_SH } from "../xwl.ts";
 
 const XFCONF = "~/.config/xfce4/xfconf/xfce-perchannel-xml";
 
@@ -24,7 +24,7 @@ export default {
 	colors: ["#3b82f6", "#1e3a8a"],
 	needs: { net: true, wayland: true },
 	packages: {
-		debian: [...XWL_PACKAGES, "xfce4-session", "xfwm4", "xfce4-panel", "xfdesktop4", "xfce4-settings",
+		debian: [...XWL_ROOTFUL_PACKAGES, "xfce4-session", "xfwm4", "xfce4-panel", "xfdesktop4", "xfce4-settings",
 			"xfce4-terminal", "thunar", "dbus-x11", "librsvg2-common", "fonts-dejavu-core"],
 	},
 	files: {
@@ -54,5 +54,5 @@ export default {
 			'  </property>\n' +
 			"</channel>\n",
 	},
-	commands: [XWL_PREP, "./setup.sh", "XWL_NO_WM=1 XDG_CURRENT_DESKTOP=XFCE ./xwl.sh -g 1280x800 dbus-run-session -- xfce4-session"],
+	commands: [XWL_PREP, "./setup.sh", "XWL_ROOTFUL=1 XDG_CURRENT_DESKTOP=XFCE ./xwl.sh -g 1280x800 dbus-run-session -- xfce4-session"],
 } satisfies TerminalApp;

@@ -63,7 +63,7 @@ contains changes to that area.
 | Anything a real userland sees | `node js/cli.ts --timeout 120 --input '{8}uname -a; apk --version\n{2}poweroff\n'`; `pnpm test:distro` |
 | Debian image, or anything glibc sees | `kernel/build.sh distro debian`; `node js/cli.ts --distro debian --timeout 180 --input '{10}getconf GNU_LIBC_VERSION; apt --version; dpkg -l \| wc -l\n{4}poweroff\n'` (exit 0); with a network, also `apt-get update` and an `apt-get install` |
 | Data disk, overlay root (`block.ts`, `kwsparse.ts`, `web/src/data.ts`, the base's `/init`, `kw-overlay`, `data-stop`) | `pnpm test:block`; `pnpm test:distro` (persistence, safe mode, `kw.root=initramfs`, `kw-overlay discard`, an image change, two distros on one disk); `pnpm test:api` (its data disk tests); `node js/cli.ts --data /tmp/d.img --timeout 120 --input '{10}ls /data /data/distros\n{2}{sync}{2}poweroff\n'` (`sync: block flush after`, a clean exit; delete the image afterwards) |
-| Network (SDK or kwnet) | `pnpm test:net`; `UNKERNEL_TEST_WISP=1 node --test test/api.test.ts` |
+| Network (SDK or kwnet) | `pnpm test:net`; `UNKERNEL_TEST_WISP=wss://wisp.unkernel.dev:6680/ node --test test/api.test.ts` (sends `Origin: http://localhost`) |
 | SDK (`js/`, `package.json`, `build.config.ts`) | `pnpm typecheck`; `pnpm test:tty`; `pnpm test:http`; `pnpm test:9p`; `pnpm test:api`; `pnpm test:distro`; `pnpm build`, then the kwtest and userland rows with `node dist/cli.mjs`, `UNKERNEL_DIST=1 node --test test/api.test.ts`, and `npm pack --dry-run`; after a change to `fetchDistro()` or the CLI's `--distro`, the installed package (`npm pack`, unpacked elsewhere) against a local copy of a release (a static server over a directory with `distros.json` and the images, `UNKERNEL_RELEASE_URL=http://127.0.0.1:PORT/ UNKERNEL_CACHE_DIR=/tmp/c node PKG/dist/cli.mjs`): a download, a second run from the cache, a corrupted cache file downloaded again, and the server stopped (an error naming `--distro none` without a cache, the cached image with one) |
 | Host file systems (`fs.ts`, `9p.ts`, `memfs.ts`, `mounts.ts`, `nodefs.ts`, `kw9p.c`) | after a kw9p change `kernel/build.sh base`; `pnpm test:9p`; `pnpm test:api`; `node test/9p-bench.ts` and with `--worker`, against js.md's table |
 | Page (`web/`) | `pnpm typecheck:web`; `node --test web/test/open.test.ts`; `pnpm build:web` (it uses a local build when there is one, else the newest release's base bundle and distro images, and refuses a release without them or of another kwemu ABI; web.md, The page's kernel and distro images) |
@@ -172,7 +172,10 @@ of the step). A release publishes the tarball to npm and a GitHub release
 tarball, `unkernel.wasm`, `distros.json` and the images it names
 (`alpine.erofs`, `debian.erofs`; not the `.ext4`, `.tar` or `.id` files),
 which the package's `fetchDistro()` and the page's build
-(web.md, The page's kernel and distro images) download. The build steps
+(web.md, The page's kernel and distro images) download, plus the page's
+own files for loading them from a CORS mirror (`unkernel-up.wasm`,
+`unkernel-smp.wasm`, a gzipped `<file>.wasm.gz` of every `.wasm` and
+`page.json`: `web/scripts/page-assets.ts`). The build steps
 are `kernel/build.sh all`'s, split so that each cache is saved after its
 part. Re-running a release skips what exists (the tag, the npm version)
 and uploads only the assets an existing GitHub release lacks, publishing

@@ -12,10 +12,15 @@
 # normal one, marked latest, its notes a compare link from the previous
 # v* tag) with the npm tarball, unkernel.wasm, distros.json, the images
 # it names, the GL renderer (virgl.mjs, virgl.wasm) and the Vulkan
-# translator (kwvk-naga.wasm) attached. The SDK's fetchDistro() and the
-# page's build (web/scripts/kernel.ts) download those assets by the tag
-# v<version>, the version stamped into package.json (the page takes the GL
-# renderer for its GL option and the translator for its Vulkan option).
+# translator (kwvk-naga.wasm) attached, and the page's own files
+# (unkernel-up.wasm and unkernel-smp.wasm, the bundle's two kernels, a
+# gzipped copy of every .wasm, <file>.wasm.gz, and page.json, which lists
+# what the page loads: web/scripts/page-assets.ts), for a page that loads
+# them from a CORS mirror of the assets. The SDK's
+# fetchDistro() and the page's build (web/scripts/kernel.ts) download those
+# assets by the tag v<version>, the version stamped into package.json (the
+# page takes the GL renderer for its GL option and the translator for its
+# Vulkan option).
 #
 # Runs:
 #   - by hand from main (Actions > Release > Run workflow): a release with
@@ -411,9 +416,18 @@ jobs:
       # image: the SDK downloads those by the tag), unkernel.wasm, distros.json,
       # the images it names (not the .ext4, .tar or .id files next to them) and
       # the GL renderer for the page (virgl.mjs, virgl.wasm), the Vulkan
-      # translator for the page (kwvk-naga.wasm), and the third-party notices
-      # those carry (THIRD-PARTY.md).
+      # translator for the page (kwvk-naga.wasm), the third-party notices
+      # those carry (THIRD-PARTY.md), and for a page that loads its files from
+      # a mirror of these assets (CORS) rather than copying them into its
+      # output: the bundle's UP and SMP kernels (unkernel-up.wasm,
+      # unkernel-smp.wasm, split as a page build splits it), a gzipped copy
+      # of every .wasm (<file>.wasm.gz, for DecompressionStream: the mirror
+      # sends files as they are) and page.json (tag, ABI, base id, Linux
+      # release, each file's size and sha256 and its .gz's, the images;
+      # web/scripts/page-assets.ts).
       - name: Pack
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
         run: |
           mkdir -p out
           # A fixed name; the version is inside (package.json) and in the tag.
@@ -431,6 +445,10 @@ jobs:
           cp vendor/build/bundle/unkernel.wasm vendor/build/distro/distros.json vendor/build/gl-wasm/virgl.mjs vendor/build/gl-wasm/virgl.wasm vendor/build/vk/kwvk-naga.wasm THIRD-PARTY.md out/
           for f in $(node -p 'JSON.parse(require("node:fs").readFileSync("vendor/build/distro/distros.json", "utf8")).distros.map((d) => d.file).join(" ")'); do
             cp "vendor/build/distro/$f" out/
+          done
+          node web/scripts/page-assets.ts out --tag "v$VERSION"
+          for f in unkernel-up.wasm unkernel-smp.wasm unkernel-up.wasm.gz unkernel-smp.wasm.gz page.json; do
+            [ -s "out/$f" ] || { echo "::error::no $f (the bundle must carry the SMP patch)"; exit 1; }
           done
           ls -l out
           (cd out && sha256sum -- *)

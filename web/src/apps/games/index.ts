@@ -15,6 +15,7 @@ import armagetronad from "./armagetronad.ts";
 import blobby from "./blobby.ts";
 import openarena from "./openarena.ts";
 import minecraft from "./minecraft.ts";
+import steam from "./steam.ts";
 import bzflag from "./bzflag.ts";
 import teeworlds from "./teeworlds.ts";
 import chromiumBsu from "./chromium-bsu.ts";
@@ -32,6 +33,6 @@ export default defineGroup({
 	icon: { svg: '<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7.5h10a4.5 4.5 0 0 1 4.3 5.8l-1 3.4a2.3 2.3 0 0 1-3.9.9l-1.9-2.1h-5l-1.9 2.1a2.3 2.3 0 0 1-3.9-.9l-1-3.4A4.5 4.5 0 0 1 7 7.5Z"/><path d="M8 10.5v3M6.5 12h3"/><path d="M15.5 11.2h.01M17.5 12.8h.01" stroke-width="2.6"/></g>' },
 	colors: ["#f43f5e", "#4c0519"],
 }, [
-	doom, minecraft, openarena, bzflag, teeworlds, chromiumBsu, glimmer, neverball, armagetronad, lugaru,
+	doom, minecraft, steam, openarena, bzflag, teeworlds, chromiumBsu, glimmer, neverball, armagetronad, lugaru,
 	supertuxkart, extremetuxracer, xmoto, triggerRally, pinball, foobillardplus, blobby, puzzles, fourInARow, tali,
 ]);

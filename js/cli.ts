@@ -108,9 +108,7 @@ one (custom section unkernel.datadisk), else vendor/build/disk/kwdata.kwsparse.g
 Networking (a user-mode NAT of TCP and UDP over host sockets) is on by
 default: --no-net disables it, --net-mtu N sets the MTU handed out by DHCP.
 The guest is 10.0.2.15, gateway 10.0.2.2 (= host 127.0.0.1), DNS 10.0.2.3.
---net-wisp URL sends the guest's TCP and UDP through a Wisp server instead
-(handshake with Origin: http://localhost, which wss://wisp.pi0.io:6680/
-requires).
+--net-wisp URL sends the guest's TCP and UDP through a Wisp server instead.
 
 kwemu's JIT tier (hot guest code compiled to WebAssembly) is offered by default;
 --no-jit runs the interpreter only (a kernel built without the JIT never
@@ -192,11 +190,12 @@ needs vsock. Half-closes pass through; a refused guest port resets the host
 connection.
 
 --wasi (prototype) runs the guest's WASI programs (wasm32-wasi .wasm files,
-preview 1 or 0, executable, run by path) on this host's wasm engine, each in
-a worker thread of its own: the guest's binfmt_misc hands them to kwwasi
-(/usr/lib/kw/kwwasi, a link to kwbox), which talks to the host over vsock
-port 1021 and does the program's file I/O in the guest, as that process;
-killing kwwasi ends the program. It needs vsock, and kwwasi registered in
+preview 1 or 0, executable, run by path; wasi-threads too) on this host's
+wasm engine, each in a worker thread of its own (one per wasm thread): the
+guest's binfmt_misc hands them to kwwasi (/usr/lib/kw/kwwasi, a link to
+kwbox), which talks to the host over vsock port 1021 and does the program's
+file and socket I/O in the guest, as that process; killing kwwasi ends the
+program. It needs vsock, and kwwasi registered in
 the guest (the kw layer's /usr/lib/kw/rc does it at boot, also in the base
 shell).
 
@@ -444,7 +443,7 @@ const log = (m: string) => process.stderr.write(m + "\n");
 const wisp = opt("net-wisp");
 const mtu = opt("net-mtu");
 const useNet = !flag("no-net");
-// With --worker the network crosses as a spec (Wisp from a spec sends NODE_WISP_HEADERS too).
+// With --worker the network crosses as a spec.
 const netSpec: NetSpec | undefined = useNet && worker
 	? { kind: "net", backend: wisp ? { kind: "wisp", servers: wisp } : { kind: "direct" }, hostLoopback: !wisp, mtu: mtu ? Number(mtu) : undefined }
 	: undefined;

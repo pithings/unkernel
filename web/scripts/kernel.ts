@@ -15,27 +15,27 @@
 //      release): vendor/build/bundle/unkernel.wasm and at least one image
 //      in vendor/build/distro/ (kernel/build.sh base and distro, or all).
 //   3. Else the Latest GitHub release of this repository (KW_KERNEL_RELEASE=
-//      <tag>: that one), which must carry unkernel.wasm, distros.json and
-//      every image distros.json names; a release from before this layout
-//      (unkernel-alpine.wasm only) is refused with what to do instead.
+//      <tag>: that one), which must carry page.json (web/scripts/page-assets.ts;
+//      the release workflow attaches it); a release without it (every one
+//      before v0.2.0-261127-3b71fa5) is refused with what to do instead.
 // It logs which it picked and why (a page build between two lines of =).
 // The About dialog says "local build" for 1 and 2 and names the release
 // for 3.
 //
-// A release is downloaded here, at build time (and by the dev server when
-// it has no copy yet), because GitHub sends release assets without CORS, so
-// a browser cannot fetch them. Everything is checked before it replaces
-// web/kernel/release/ (a temporary directory, then a rename), so a refused
-// or broken release leaves the copy there as it was: distros.json first
-// (its kwemu ABI must be include/kw_emu.h's KW_ABI_VERSION, its entries
-// well formed), then unkernel.wasm (the API's sha256 digest where there is
-// one, wasm magic, its own ABI, its base id against distros.json's), then
-// each image (size and sha256 from distros.json, and the API's digest);
-// an image the copy already has with that sha256 is reused, not downloaded.
-// web/kernel/release/release.json records the release (tag, date, the
-// files and their sha256). The dev server uses that copy as it is, without
-// a network check; a page build checks for a newer release.
+// A release: only page.json is downloaded (at build time, and when a dev
+// server starts), and the page loads everything from the release mirror
+// (KW_MIRROR, default
+// https://mirror.unkernel.dev/github/pithings/unkernel/releases/download,
+// then /<tag>/<file>), which sends GitHub's release assets with CORS (GitHub
+// sends them without, so a browser cannot fetch them there): the UP and SMP
+// kernels and the Vulkan translator gzipped (<file>.wasm.gz, gunzipped by
+// the SDK), the GL renderer and the images as they are (the images read
+// with Range requests). Nothing is copied into the output. The mirror
+// answers only the origins it knows (unkernel.dev, localhost, LAN
+// addresses, *.vercel.app). page.json must say this checkout's ABI, or the
+// build fails.
 //
+// For a local build (1 and 2):
 // The kernel's URLs: the dev server serves the base's UP and SMP bundles
 // from web/kernel/page/<hash>/ (splitBase(), written again when the bundle
 // changes); a build emits them as hashed assets from memory (baseSplit()),
@@ -48,8 +48,7 @@
 // The guest GL renderer (createKernel({ gl }), the page's GL option):
 // virgl.mjs and virgl.wasm (gl/wasm/build.sh), optional. KW_GL=<dir> gives
 // them (KW_GL=0: none); else a local build's vendor/build/gl-wasm/ with a
-// local kernel, or the release's virgl.mjs and virgl.wasm assets with a
-// release (a release without them, every one before guest GL, has none).
+// local kernel, or the release's (page.json's gl) on the mirror.
 // Without them the page offers no GL. The dev server serves them at
 // /_gl/virgl.mjs and /_gl/virgl.wasm; a build emits both into
 // /assets/virgl-<16 hex digits of their sha256>/, side by side, because
@@ -58,8 +57,8 @@
 // The guest Vulkan renderer's SPIR-V to WGSL translator (createKernel({ vk }),
 // the page's Vulkan option): kwvk-naga.wasm (vk/naga/build.sh), optional,
 // picked the same way: KW_VK=<dir> (KW_VK=0: none), else a local build's
-// vendor/build/vk/ with a local kernel, else the release's kwvk-naga.wasm
-// asset. Without it the page offers no Vulkan. The dev server serves it at
+// vendor/build/vk/ with a local kernel, else the release's (page.json's vk)
+// on the mirror. Without it the page offers no Vulkan. The dev server serves it at
 // /_vk/kwvk-naga.wasm; a build emits it as /assets/kwvk-naga-<16 hex digits
 // of its sha256>.wasm.
 //
@@ -79,6 +78,7 @@
 //   KW_GL=<dir> | 0           the GL renderer (virgl.mjs, virgl.wasm) | none
 //   KW_VK=<dir> | 0           the Vulkan translator (kwvk-naga.wasm) | none
 //   KW_KERNEL_RELEASE=<tag>   this release instead of the newest (e.g. v0.2.0)
+//   KW_MIRROR=<url>           the release mirror (the base before /<tag>/<file>)
 //   KW_LOCAL=1 | 0            use a local build when there is one (default,
 //                             except when CI or VERCEL is set) | never
 //   GITHUB_TOKEN, GH_TOKEN    for the GitHub API (60 requests an hour without
@@ -87,12 +87,10 @@
 //   KW_GITHUB_API, KW_GITHUB  the API and web origins (default
 //                             https://api.github.com, https://github.com):
 //                             a stand-in server for testing
-// If GitHub cannot be reached, a build keeps the copy in web/kernel/release/
-// (when it is the tag asked for, if one was). A local build whose ABI is
-// not this checkout's only gets a warning.
+// A local build whose ABI is not this checkout's only gets a warning.
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { copyFile, link, mkdir, readdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { smpKernelFromBundle, withoutSmpPatch } from "../../js/core/kpatch.ts";
@@ -102,9 +100,6 @@ const GITHUB_API = (process.env.KW_GITHUB_API || "https://api.github.com").repla
 const GITHUB = (process.env.KW_GITHUB || "https://github.com").replace(/\/+$/, "");
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const DIR = fileURLToPath(new URL("../kernel/", import.meta.url));
-/** The downloaded release (gitignored): unkernel.wasm, distros.json, the images, release.json. */
-export const RELEASE_DIR = `${DIR}release/`;
-const META = "release.json";
 /** The dev server's split of the base bundle (splitBase()). */
 const PAGE_DIR = `${DIR}page/`;
 /** A local build's base bundle and images. */
@@ -166,6 +161,20 @@ export interface PageSource {
 	vk: PageVk | null;
 	/** Where the translator comes from, or why there is none (logged). */
 	vkWhy: string;
+	/**
+	 * The release mirror's URLs (see the top), or null: the page's own files.
+	 * With it, base is "" and the images' url is the mirror's (file "").
+	 */
+	remote: PageRemote | null;
+}
+
+/** The URLs a page loads from the release mirror (page.json's files under /<tag>/). */
+export interface PageRemote {
+	kernel: string;
+	kernelSmp: string | null;
+	/** virgl.mjs (it loads virgl.wasm next to itself), or null. */
+	gl: string | null;
+	vk: string | null;
 }
 
 /** The guest Vulkan renderer's translator: kwvk-naga.wasm. */
@@ -185,15 +194,6 @@ export interface PageGl {
 /** One entry of distros.json (guest/tools/distros-json.mjs). */
 interface IndexEntry { name: string; file: string; size: number; sha256: string; image?: string | null }
 interface DistrosIndex { abi: number | null; base: string | null; distros: IndexEntry[] }
-/** web/kernel/release/release.json. */
-interface ReleaseMeta extends KernelRelease {
-	abi: number; baseId: string | null; distros: IndexEntry[];
-	/** The GL renderer's files' sha256 (GL_FILES), or null: the release has none; absent in a copy made before the page knew them. */
-	gl?: Record<string, string> | null;
-	/** The Vulkan translator's sha256 (VK_FILE), or null: the release has none; absent in a copy made before the page knew it. */
-	vk?: string | null;
-}
-
 const UA = { "user-agent": "unkernel-web-build" };
 const sha256 = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
 const log = (msg: string) => console.log(`[kernel] ${msg}`);
@@ -201,7 +201,7 @@ const mib = (n: number) => `${(n / 1048576).toFixed(1)} MiB`;
 /** `f` relative to the repository (absolute outside it), for messages. */
 const rel = (f: string) => { const r = path.relative(ROOT, f); return r.startsWith("..") ? f : r || "."; };
 const isFile = async (f: string) => { try { return (await stat(f)).isFile(); } catch { return false; } };
-const banner = (bytes: Uint8Array) => /Linux version (\S+)/.exec(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("latin1"))?.[1] ?? "";
+export const banner = (bytes: Uint8Array) => /Linux version (\S+)/.exec(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("latin1"))?.[1] ?? "";
 /** Debian first (the default), then by name. */
 const byName = (a: { name: string }, b: { name: string }) => (a.name === "debian" ? -1 : b.name === "debian" ? 1 : a.name.localeCompare(b.name));
 
@@ -229,7 +229,7 @@ async function wantAbi(): Promise<number> {
 }
 
 /** A base bundle's kwemu ABI and base id (kernel/tools/bundle.mjs, guest/tools/distros-json.mjs). */
-async function bundleInfo(bytes: Uint8Array): Promise<{ abi: number | null; base: string | null }> {
+export async function bundleInfo(bytes: Uint8Array): Promise<{ abi: number | null; base: string | null }> {
 	const { bundleInfo } = (await import(new URL("../../guest/tools/distros-json.mjs", import.meta.url).href)) as {
 		bundleInfo(wasm: Uint8Array): { abi: number | null; base: string | null };
 	};
@@ -317,7 +317,7 @@ async function localSource(base: string, images: PageImage[], why: string): Prom
 	const want = await wantAbi();
 	const { abi } = await bundleInfo(bytes);
 	if (abi !== want) log(`warning: ${rel(base)} has kwemu ABI ${abi ?? "unknown"}, this checkout's include/kw_emu.h has ${want} (a stale local build?)`);
-	return { why, kernel: { tag: "local", date: (await stat(base)).mtime.toISOString(), sha256: sha256(bytes) }, linux: banner(bytes), base, distros: images, gl: null, glWhy: "", vk: null, vkWhy: "" };
+	return { why, kernel: { tag: "local", date: (await stat(base)).mtime.toISOString(), sha256: sha256(bytes) }, linux: banner(bytes), base, distros: images, gl: null, glWhy: "", vk: null, vkWhy: "", remote: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -356,13 +356,13 @@ async function resolve(want?: string): Promise<Resolved> {
 	return { tag, date: "", assets: null };
 }
 
-/** The error for a release that does not have this layout. */
+/** The error for a release without page.json. */
 const notThisLayout = (tag: string, missing: string, why: string) => new Error(
-	`release ${tag} of ${REPO} has no ${missing}: it predates the base bundle and distro images this page runs ` +
-	`(unkernel.wasm, distros.json and the images), or is incomplete. Build locally (kernel/build.sh all; ` +
+	`release ${tag} of ${REPO} has no ${missing}: it predates the page loading its files from the release mirror ` +
+	`(every release before v0.2.0-261127-3b71fa5), or is incomplete. Build locally (kernel/build.sh all; ` +
 	`a page build then uses vendor/build, or point KW_KERNEL and KW_DISTROS at a build) or cut a release ` +
-	`(.github/workflows/release.yml), or pick a release that has them (KW_KERNEL_RELEASE=<tag>). ` +
-	`No local build was used (${why}). web/kernel/ was left as it was`);
+	`(.github/workflows/release.yml), or pick a release that has it (KW_KERNEL_RELEASE=<tag>). ` +
+	`No local build was used (${why})`);
 
 /** Download `name` of release `r` (its API URL, else the usual download URL); check the API's digest. */
 async function download(r: Resolved, name: string, why: string): Promise<Uint8Array> {
@@ -382,7 +382,7 @@ function checkIndex(j: DistrosIndex, tag: string, want: number): IndexEntry[] {
 	if (j.abi !== want) {
 		throw new Error(`release ${tag}: distros.json says kwemu ABI ${j.abi ?? "unknown"}, this checkout's include/kw_emu.h has ${want}: ` +
 			`the release was built for another guest CPU or kernel contract. Cut a release from this checkout first (.github/workflows/release.yml), ` +
-			`build from a local build (KW_LOCAL=1, or KW_KERNEL and KW_DISTROS) or pick a matching release (KW_KERNEL_RELEASE=<tag>). web/kernel/ was left as it was`);
+			`build from a local build (KW_LOCAL=1, or KW_KERNEL and KW_DISTROS) or pick a matching release (KW_KERNEL_RELEASE=<tag>)`);
 	}
 	if (!Array.isArray(j.distros) || !j.distros.length) throw new Error(`release ${tag}: distros.json lists no images`);
 	for (const d of j.distros) {
@@ -393,148 +393,6 @@ function checkIndex(j: DistrosIndex, tag: string, want: number): IndexEntry[] {
 	return j.distros;
 }
 
-/** web/kernel/release/release.json, if the copy there is complete (every file at its size). */
-async function cached(): Promise<ReleaseMeta | undefined> {
-	let meta: ReleaseMeta;
-	try { meta = JSON.parse(await readFile(path.join(RELEASE_DIR, META), "utf8")) as ReleaseMeta; } catch { return undefined; }
-	try {
-		if (!(await isFile(path.join(RELEASE_DIR, BASE_ASSET)))) return undefined;
-		for (const d of meta.distros) if ((await stat(path.join(RELEASE_DIR, d.file))).size !== d.size) return undefined;
-	} catch {
-		return undefined;
-	}
-	return meta;
-}
-
-/**
- * Put the release in web/kernel/release/ (see the top) and return what is
- * there. `dev`: the dev server, which uses a copy that is there as it is.
- */
-async function fetchRelease(dev: boolean, why: string): Promise<ReleaseMeta> {
-	const want = process.env.KW_KERNEL_RELEASE || undefined;
-	const have = await cached();
-	if (dev && have && (!want || have.tag === want)) return have;
-	let r: Resolved;
-	try {
-		r = await resolve(want);
-	} catch (e) {
-		if (!have || (want && have.tag !== want)) {
-			throw new Error(`cannot fetch the page's kernel and distro images from ${REPO}'s GitHub releases: ${(e as Error).message}. ` +
-				`No local build was used (${why}): build locally (kernel/build.sh all) or give KW_KERNEL and KW_DISTROS`);
-		}
-		log(`${(e as Error).message}; keeping ${have.tag} (web/kernel/release/)`);
-		return have;
-	}
-	const sameDigest = (name: string, sum: string) => !r.assets?.get(name)?.sha256 || r.assets.get(name)!.sha256 === sum;
-	// A copy made before the page knew the GL renderer is fetched again when the release has one.
-	const glKnown = have?.gl !== undefined || (r.assets !== null && !r.assets.has(GL_FILES[0]));
-	const vkKnown = have?.vk !== undefined || (r.assets !== null && !r.assets.has(VK_FILE));
-	if (have?.tag === r.tag && glKnown && vkKnown && sameDigest(BASE_ASSET, have.sha256) && have.distros.every((d) => sameDigest(d.file, d.sha256))) return have;
-	log(`downloading ${r.tag} (was ${have?.tag ?? "none"})`);
-	const abi = await wantAbi();
-	// distros.json first: it is small, and an old or foreign release fails here.
-	const indexBytes = await download(r, INDEX_ASSET, why);
-	let index: DistrosIndex;
-	try { index = JSON.parse(Buffer.from(indexBytes).toString("utf8")) as DistrosIndex; }
-	catch { throw new Error(`release ${r.tag}: distros.json is not JSON`); }
-	const entries = checkIndex(index, r.tag, abi);
-	const base = await download(r, BASE_ASSET, why);
-	checkWasm(base, `${r.tag}: ${BASE_ASSET}`);
-	const info = await bundleInfo(base);
-	if (info.abi !== abi) throw new Error(`release ${r.tag}: ${BASE_ASSET} has kwemu ABI ${info.abi ?? "unknown"}, distros.json and include/kw_emu.h say ${abi}. web/kernel/ was left as it was`);
-	if (index.base && info.base && index.base !== info.base) throw new Error(`release ${r.tag}: ${BASE_ASSET} is base ${info.base}, distros.json was made for ${index.base}. web/kernel/ was left as it was`);
-	log(`${r.tag}: ${BASE_ASSET} ${mib(base.length)}, ABI ${abi}, base ${info.base ?? "?"}`);
-	// Everything goes to a temporary directory first; only a complete, checked copy replaces web/kernel/release/.
-	const tmp = `${DIR}release.tmp-${process.pid}/`;
-	await rm(tmp, { recursive: true, force: true });
-	await mkdir(tmp, { recursive: true });
-	try {
-		await writeFile(path.join(tmp, BASE_ASSET), base);
-		await writeFile(path.join(tmp, INDEX_ASSET), indexBytes);
-		for (const d of entries) {
-			const to = path.join(tmp, d.file);
-			const old = have?.distros.find((o) => o.file === d.file && o.sha256 === d.sha256);
-			if (old && (await fileSha256(path.join(RELEASE_DIR, d.file))) === d.sha256) {
-				await link(path.join(RELEASE_DIR, d.file), to).catch(() => copyFile(path.join(RELEASE_DIR, d.file), to));
-				log(`${r.tag}: ${d.file} ${mib(d.size)}, the same as the copy's`);
-				continue;
-			}
-			const bytes = await download(r, d.file, why);
-			const sum = sha256(bytes);
-			if (bytes.length !== d.size || sum !== d.sha256) throw new Error(`release ${r.tag}: ${d.file} is ${bytes.length} bytes, sha256 ${sum}; distros.json says ${d.size} bytes, ${d.sha256}`);
-			await writeFile(to, bytes);
-			log(`${r.tag}: ${d.file} ${mib(d.size)}, sha256 ${sum.slice(0, 16)} (${d.image ?? "no image id"})`);
-		}
-		const gl = await downloadGl(r, tmp, why);
-		const vk = await downloadVk(r, tmp, why);
-		const meta: ReleaseMeta = { tag: r.tag, date: r.date, sha256: sha256(base), abi, baseId: info.base, distros: entries, gl, vk };
-		await writeFile(path.join(tmp, META), `${JSON.stringify(meta, null, "\t")}\n`);
-		// Swap: the old copy aside, the new one in, the old one gone.
-		const old = `${DIR}release.old-${process.pid}/`;
-		await rm(old, { recursive: true, force: true });
-		await rename(RELEASE_DIR, old).catch((e: NodeJS.ErrnoException) => { if (e.code !== "ENOENT") throw e; });
-		await rename(tmp, RELEASE_DIR);
-		await rm(old, { recursive: true, force: true });
-		return meta;
-	} finally {
-		await rm(tmp, { recursive: true, force: true });
-	}
-}
-
-/**
- * The release's GL renderer (GL_FILES) into `dir`, checked; null when the
- * release has none (not listed, or a 404 without the API's list).
- */
-async function downloadGl(r: Resolved, dir: string, why: string): Promise<Record<string, string> | null> {
-	if (r.assets && !GL_FILES.every((f) => r.assets!.has(f))) {
-		log(`${r.tag}: no GL renderer (${GL_FILES.join(", ")}): the page offers no guest GL`);
-		return null;
-	}
-	const sums: Record<string, string> = {};
-	for (const f of GL_FILES) {
-		let bytes: Uint8Array;
-		try {
-			bytes = await download(r, f, why);
-		} catch (e) {
-			if (!r.assets && /has no virgl/.test((e as Error).message)) {
-				log(`${r.tag}: no GL renderer (${f}): the page offers no guest GL`);
-				return null;
-			}
-			throw e;
-		}
-		checkGlFile(f, bytes, `${r.tag}: ${f}`);
-		await writeFile(path.join(dir, f), bytes);
-		sums[f] = sha256(bytes);
-	}
-	log(`${r.tag}: GL renderer ${GL_FILES.join(", ")}`);
-	return sums;
-}
-
-/**
- * The release's Vulkan translator (VK_FILE) into `dir`, checked; null when
- * the release has none (not listed, or a 404 without the API's list).
- */
-async function downloadVk(r: Resolved, dir: string, why: string): Promise<string | null> {
-	if (r.assets && !r.assets.has(VK_FILE)) {
-		log(`${r.tag}: no Vulkan translator (${VK_FILE}): the page offers no guest Vulkan`);
-		return null;
-	}
-	let bytes: Uint8Array;
-	try {
-		bytes = await download(r, VK_FILE, why);
-	} catch (e) {
-		if (!r.assets && /has no kwvk/.test((e as Error).message)) {
-			log(`${r.tag}: no Vulkan translator (${VK_FILE}): the page offers no guest Vulkan`);
-			return null;
-		}
-		throw e;
-	}
-	checkWasm(bytes, `${r.tag}: ${VK_FILE}`);
-	await writeFile(path.join(dir, VK_FILE), bytes);
-	log(`${r.tag}: Vulkan translator ${VK_FILE}`);
-	return sha256(bytes);
-}
-
 /** virgl.wasm is wasm; virgl.mjs is the ES module build that finds virgl.wasm next to itself. */
 function checkGlFile(name: string, bytes: Uint8Array, what: string): void {
 	if (name.endsWith(".wasm")) return checkWasm(bytes, what);
@@ -542,20 +400,55 @@ function checkGlFile(name: string, bytes: Uint8Array, what: string): void {
 		throw new Error(`${what}: not the ES module build of the GL renderer (it does not locate virgl.wasm next to itself)`);
 }
 
-/** The release in web/kernel/release/ as the page's source; `why`: why no local build. */
-async function releaseSource(dev: boolean, why: string): Promise<PageSource> {
-	const meta = await fetchRelease(dev, why);
-	const base = path.join(RELEASE_DIR, BASE_ASSET);
-	const bytes = new Uint8Array(await readFile(base));
-	const distros = meta.distros.map((d) => ({
-		name: d.name, url: "", size: d.size, file: path.join(RELEASE_DIR, d.file), sha256: d.sha256, ...(d.image ? { imageId: d.image } : {}),
+// ---------------------------------------------------------------------------
+// The release mirror (see the top).
+
+const PAGE_ASSET = "page.json";
+const DEFAULT_MIRROR = `https://mirror.unkernel.dev/github/${REPO}/releases/download`;
+
+/** One file of page.json (web/scripts/page-assets.ts). */
+interface PageFile { file: string; size: number; sha256: string; gz?: { file: string; size: number; sha256: string } }
+interface PageJson {
+	tag: string | null; abi: number | null; base: string | null; linux: string;
+	kernel: PageFile; kernelSmp: PageFile | null; gl: PageFile[] | null; vk: PageFile | null; distros: IndexEntry[];
+}
+
+/** The release mirror's base (see the top). */
+const MIRROR = (process.env.KW_MIRROR || DEFAULT_MIRROR).replace(/\/+$/, "");
+
+/** The release's page.json as the page's source, its files on the mirror (see the top); `why`: why no local build. */
+async function releaseSource(why: string): Promise<PageSource> {
+	const want = process.env.KW_KERNEL_RELEASE || undefined;
+	let r: Resolved;
+	try {
+		r = await resolve(want);
+	} catch (e) {
+		throw new Error(`cannot find the page's release on ${REPO}'s GitHub releases: ${(e as Error).message}. ` +
+			`No local build was used (${why}): build locally (kernel/build.sh all) or give KW_KERNEL and KW_DISTROS`);
+	}
+	const bytes = await download(r, PAGE_ASSET, why);
+	let j: PageJson;
+	try { j = JSON.parse(Buffer.from(bytes).toString("utf8")) as PageJson; }
+	catch { throw new Error(`release ${r.tag}: ${PAGE_ASSET} is not JSON`); }
+	const abi = await wantAbi();
+	const entries = checkIndex({ abi: j.abi, base: j.base, distros: j.distros }, r.tag, abi);
+	const okFile = (f: PageFile | null | undefined) => !!f && /^[a-z0-9.-]+$/.test(f.file) && Number.isSafeInteger(f.size) && /^[0-9a-f]{64}$/.test(f.sha256);
+	if (!okFile(j.kernel) || (j.kernelSmp && !okFile(j.kernelSmp)) || (j.vk && !okFile(j.vk)) || (j.gl && (j.gl.length !== GL_FILES.length || !j.gl.every(okFile))))
+		throw new Error(`release ${r.tag}: ${PAGE_ASSET}: a bad file entry`);
+	const url = (name: string) => `${MIRROR}/${encodeURIComponent(r.tag)}/${name}`;
+	// The gzipped copy where there is one (the SDK gunzips it).
+	const pick = (f: PageFile) => url(f.gz?.file ?? f.file);
+	const gl = j.gl?.find((f) => f.file === GL_FILES[0]) ?? null;
+	const distros = entries.map((d) => ({
+		name: d.name, url: url(d.file), size: d.size, file: "", sha256: d.sha256, ...(d.image ? { imageId: d.image } : {}),
 	})).sort(byName);
-	const gl = meta.gl ? await glDir(RELEASE_DIR) : null;
-	const vk = meta.vk ? await vkDir(RELEASE_DIR) : null;
 	return {
-		why: `release ${meta.tag} (${why})`, kernel: { tag: meta.tag, date: meta.date, sha256: meta.sha256 }, linux: banner(bytes), base, distros,
-		gl, glWhy: gl ? `release ${meta.tag}` : `release ${meta.tag} has no ${GL_FILES.join(" and ")}`,
-		vk, vkWhy: vk ? `release ${meta.tag}` : `release ${meta.tag} has no ${VK_FILE}`,
+		why: `release ${r.tag} on the mirror ${MIRROR} (${why})`,
+		kernel: { tag: r.tag, date: r.date, sha256: r.assets?.get(BASE_ASSET)?.sha256 ?? "" },
+		linux: j.linux, base: "", distros, gl: null, vk: null,
+		glWhy: gl ? `release ${r.tag} on the mirror` : `release ${r.tag} has no ${GL_FILES.join(" and ")}`,
+		vkWhy: j.vk ? `release ${r.tag} on the mirror` : `release ${r.tag} has no ${VK_FILE}`,
+		remote: { kernel: pick(j.kernel), kernelSmp: j.kernelSmp ? pick(j.kernelSmp) : null, gl: gl ? url(gl.file) : null, vk: j.vk ? pick(j.vk) : null },
 	};
 }
 
@@ -612,7 +505,7 @@ async function withVk(s: PageSource): Promise<PageSource> {
 	return { ...s, vk, vkWhy: vk ? `a local build in ${rel(LOCAL_VK)}` : `no ${rel(LOCAL_VK)}${VK_FILE} (vk/naga/build.sh)` };
 }
 
-async function choose(dev: boolean): Promise<PageSource> {
+async function choose(): Promise<PageSource> {
 	const kk = process.env.KW_KERNEL, kd = process.env.KW_DISTROS;
 	if (kd === "0") throw new Error("KW_DISTROS=0 is gone: the page always boots a distro image (?distro=none is the base shell)");
 	if (kk || kd) {
@@ -623,7 +516,7 @@ async function choose(dev: boolean): Promise<PageSource> {
 		return localSource(base, images, `${[kk && "KW_KERNEL", kd && "KW_DISTROS"].filter(Boolean).join(" and ")} (a local build)`);
 	}
 	const tag = process.env.KW_KERNEL_RELEASE;
-	if (tag) return releaseSource(dev, `KW_KERNEL_RELEASE=${tag}`);
+	if (tag) return releaseSource(`KW_KERNEL_RELEASE=${tag}`);
 	const policy = localPolicy();
 	let why = policy.why;
 	if (policy.ok) {
@@ -631,11 +524,11 @@ async function choose(dev: boolean): Promise<PageSource> {
 		if (images.length) return localSource(LOCAL_BASE, images, `a local build in vendor/build, ${policy.why}`);
 		why = !(await isFile(LOCAL_BASE)) ? `no ${rel(LOCAL_BASE)} (kernel/build.sh base)` : `no images in ${rel(LOCAL_DISTROS)} (kernel/build.sh distro)`;
 	}
-	return releaseSource(dev, why);
+	return releaseSource(why);
 }
 
-const describe = (s: PageSource) => `${s.kernel.tag === "local" ? "a local build" : `release ${s.kernel.tag}`}, Linux ${s.linux || "?"}; ` +
-	s.distros.map((d) => `${d.name} ${mib(d.size)}`).join(", ") + `; GL renderer: ${s.gl ? "yes" : "none"}; Vulkan translator: ${s.vk ? "yes" : "none"}`;
+const describe = (s: PageSource) => `${s.kernel.tag === "local" ? "a local build" : `release ${s.kernel.tag}`}${s.remote ? " (mirror)" : ""}, Linux ${s.linux || "?"}; ` +
+	s.distros.map((d) => `${d.name} ${mib(d.size)}`).join(", ") + `; GL renderer: ${s.gl || s.remote?.gl ? "yes" : "none"}; Vulkan translator: ${s.vk || s.remote?.vk ? "yes" : "none"}`;
 
 let once: Promise<PageSource> | undefined;
 
@@ -644,18 +537,24 @@ let once: Promise<PageSource> | undefined;
  * dev server's; once per process; see the top). It logs the choice.
  */
 export function pageSource(dev: boolean): Promise<PageSource> {
-	return (once ??= choose(dev).then(withGl).then(withVk).then((s) => {
-		for (const d of s.distros) d.url = `/distros/${dev ? path.basename(d.file) : servedName(d)}`;
+	return (once ??= choose().then(withGl).then(withVk).then((s) => {
+		if (!s.remote) for (const d of s.distros) d.url = `/distros/${dev ? path.basename(d.file) : servedName(d)}`;
 		if (dev) log(`${describe(s)} (${s.why})`);
 		else {
 			const line = "=".repeat(72);
 			log(line);
 			log(`PAGE BUILD: ${describe(s)}`);
 			log(`  why: ${s.why}`);
-			log(`  base: ${rel(s.base)}`);
-			for (const d of s.distros) log(`  ${d.url} <- ${rel(d.file)}${d.imageId ? ` (${d.imageId})` : ""}`);
-			log(`  GL renderer: ${s.gl ? `${rel(path.dirname(s.gl.mjs))}/ (${s.glWhy})` : `none (${s.glWhy})`}`);
-			log(`  Vulkan translator: ${s.vk ? `${rel(s.vk.wasm)} (${s.vkWhy})` : `none (${s.vkWhy})`}`);
+			if (s.remote) {
+				log(`  kernel: ${s.remote.kernel}`);
+				log(`  SMP kernel: ${s.remote.kernelSmp ?? "none"}`);
+				for (const d of s.distros) log(`  ${d.url}${d.imageId ? ` (${d.imageId})` : ""}`);
+			} else {
+				log(`  base: ${rel(s.base)}`);
+				for (const d of s.distros) log(`  ${d.url} <- ${rel(d.file)}${d.imageId ? ` (${d.imageId})` : ""}`);
+			}
+			log(`  GL renderer: ${s.gl ? `${rel(path.dirname(s.gl.mjs))}/ (${s.glWhy})` : s.remote?.gl ? `${s.remote.gl} (${s.glWhy})` : `none (${s.glWhy})`}`);
+			log(`  Vulkan translator: ${s.vk ? `${rel(s.vk.wasm)} (${s.vkWhy})` : s.remote?.vk ? `${s.remote.vk} (${s.vkWhy})` : `none (${s.vkWhy})`}`);
 			log(line);
 		}
 		return s;

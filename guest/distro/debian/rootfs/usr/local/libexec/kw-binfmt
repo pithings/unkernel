@@ -1,0 +1,68 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+# The binfmt_misc interpreter for x86 binaries (kw-init registers it):
+# $1 = the binary, then its arguments. Both x86_64 and i386 run under
+# box64 (i386 in its 32-bit mode, box32), which translates to arm64 and
+# calls the arm64 builds of the libraries it wraps (libc, libm, GL, ...).
+# The first time, as root with a network, it adds the Debian architecture
+# (amd64, and i386 for an i386 binary), fetches the package lists (the
+# image has arm64's only) and installs box64, whose dependencies are the
+# amd64 libc6, libgcc-s1 and libstdc++6; for i386 also those three
+# libraries for i386. More libraries: apt-get install NAME:amd64 (:i386).
+# One install at a time, because apt locks its database. Another user than
+# root installs through `sudo -n` (kw-binfmt --kw-install BINARY: only the
+# install, as root; the image's user has sudo without a password). Without
+# root (or sudo) or a network it runs with what is there, and fails only
+# without box64.
+
+# unkernel: run an x86 binary, installing its emulator on first use.
+# The program gets the caller's PATH back.
+path=$PATH
+PATH=/usr/sbin:/usr/bin
+install=
+[ "$1" = --kw-install ] && { install=1; shift; }
+emu=/usr/bin/box64
+case $(od -An -tx1 -j18 -N1 "$1" 2>/dev/null) in
+*3e) arch=x86_64 debs=amd64 lib=/usr/lib/x86_64-linux-gnu pkgs=box64 ;;
+*03) arch=i386 debs="amd64 i386" lib=/usr/lib/i386-linux-gnu
+	pkgs="box64 libc6:i386 libgcc-s1:i386 libstdc++6:i386" ;;
+*) echo "$1: cannot tell the architecture" >&2; exit 126 ;;
+esac
+need() { [ ! -x $emu ] || [ ! -e $lib/libstdc++.so.6 ]; }
+add() { apt-get install -y -q --no-install-recommends $pkgs; }
+if need && [ "$(id -u)" != 0 ]; then
+	sudo -n true 2>/dev/null && sudo -n /usr/local/libexec/kw-binfmt --kw-install "$1"
+elif need && awk '$2 == "00000000" { f = 1 } END { exit !f }' /proc/net/route 2>/dev/null; then
+	exec 9>/run/kw-binfmt.lock && flock 9
+	if need; then
+		gray= reset=
+		[ -t 2 ] && gray='\033[90m' reset='\033[0m'
+		trap 'printf "$reset" >&2; exit 130' INT TERM
+		printf "${gray}%s: %s binary, apt-get install %s\n" "$1" $arch "$pkgs" >&2
+		# Not on the terminal's input: dpkg would eat what was typed ahead.
+		{
+			update=
+			for deb in $debs; do
+				dpkg --print-foreign-architectures | grep -qx $deb || dpkg --add-architecture $deb
+				ls /var/lib/apt/lists/*_binary-${deb}_Packages* >/dev/null 2>&1 || update=1
+			done
+			[ -z "$update" ] || apt-get update -q
+			add || { apt-get update -q && add; }
+		} </dev/null >&2
+		printf "$reset" >&2
+		trap - INT TERM
+	fi
+	exec 9>&-
+fi
+[ -z "$install" ] || exit 0
+if [ ! -x $emu ]; then
+	echo "$1: $arch binary, needs box64 (installed on first use by root or a sudo user, with a network)" >&2
+	exit 126
+fi
+# box64 prints a banner and, on a terminal, what it loads, unless told not
+# to; its errors stay.
+[ -n "${BOX64_NOBANNER+x}" ] || export BOX64_NOBANNER=1
+[ -n "${BOX64_LOG+x}" ] || export BOX64_LOG=0
+PATH=$path
+exec $emu "$@"

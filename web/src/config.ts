@@ -223,6 +223,12 @@ export function dataSizeCap(quota: number | undefined, have = 0): number {
 }
 
 /** ?datasize=: whole GiB from 4 to 1024, else the default. */
+/**
+ * A kernel's URL as the page keeps it (cfg, suspended sessions): its path on
+ * the page's origin, the whole URL on another (the release mirror).
+ */
+const pageRef = (u: URL) => (u.origin === location.origin ? u.pathname : u.href);
+
 function dataSizeParam(v: string | null): number {
 	const n = v !== null && /^\d+$/.test(v) ? Number(v) : NaN;
 	return n >= DATA_SIZE_DEFAULT && n <= 1024 ? n : DATA_SIZE_DEFAULT;
@@ -260,7 +266,7 @@ export function saveSettings(s: Record<string, string>): boolean {
 export interface Config {
 	/** The settings this load read: the saved ones with the URL's on top (?net=0 as wisp=0). */
 	settings: Record<string, string>;
-	/** The kernel this page boots on one CPU: the base bundle unkernel.wasm (its UP kernel). */
+	/** The kernel this page boots on one CPU: the base bundle unkernel.wasm (its UP kernel); a path, or a URL on the release mirror. */
 	kernelUrl: string;
 	/** The image this load boots, or null (?distro=none). */
 	distro: DistroEntry | null;
@@ -286,7 +292,7 @@ export interface Config {
 	cmdlineGiven: boolean;
 	/** The guest network device (?net=0 or ?wisp=0 removes it). */
 	net: boolean;
-	/** ?wisp= servers, or null for the SDK's DEFAULT_WISP_SERVERS. */
+	/** ?wisp= servers, or null for net.ts DEFAULT_WISP_SERVERS. */
 	wisp: string[] | null;
 	/** Plain-HTTP hosts answered with fetch(): DEFAULT_ROUTES, or null with ?routes=0. */
 	routes: Record<string, string> | null;
@@ -560,7 +566,7 @@ export function readConfig(search: string = location.search, saved: Record<strin
 	const vkWhy = !vkParam ? null : vkBlocked ?? (VK_DISTROS.includes(distro?.name ?? "none") ? null : `guest Vulkan needs ${VK_DISTROS.join(" or ")}, not ${distro?.name ?? "the base shell"}`);
 	return {
 		settings: Object.fromEntries(params),
-		kernelUrl: kernelUrl.pathname,
+		kernelUrl: pageRef(kernelUrl),
 		distro,
 		distroParam,
 		distroWhy,
@@ -587,7 +593,7 @@ export function readConfig(search: string = location.search, saved: Record<strin
 		workerParam,
 		workerDefault,
 		workerAsked,
-		kernelSmpUrl: kernelSmpUrl?.pathname ?? null,
+		kernelSmpUrl: kernelSmpUrl ? pageRef(kernelSmpUrl) : null,
 		smpParam,
 		cpuDefault,
 		cpus,

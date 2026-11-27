@@ -51,10 +51,21 @@
 # swapchain image, which the page's Vulkan renderer shows without reading
 # it back, where the page offers that; else, and on other compositors,
 # by copying the frame into a wl_shm buffer.
+#
+# X apps: where the image has xwayland-satellite (/usr/lib/kw, the Debian
+# image) and the relay has lodpi (its --version), the relay holds X display
+# :1 (/tmp/.X11-unix/X1; :0 is the KMS Xorg's) and starts satellite for the
+# first X client, which runs Xwayland rootless: each X window a window in
+# the page, at scale 1 (the relay's wayland-0-lodpi socket: the page
+# upscales them on HiDPI, so X apps that know no DPI come out the right
+# size). The relay writes the display to $XDG_RUNTIME_DIR/wayland-0.x11,
+# from which kw-wayland.sh gives shells DISPLAY where Xwayland is installed
+# (Debian's xwayland, not in the image: sudo apt-get install xwayland).
 
 bb=/run/kw-lower/bin/busybox
 relay=/usr/lib/kw/wlandr
 link=vsock:2:1023
+satellite=/usr/lib/kw/xwayland-satellite
 die() { echo "wland: $*" >&2; exit 1; }
 if [ ! -x $relay ]; then
 	# The boot (rc) says nothing where there is no relay.
@@ -91,7 +102,11 @@ start() {
 	# Vulkan apps (the kw ICD) name their swapchain images instead of sending
 	# pixels, where the relay can and the page's Vulkan renderer resolves them.
 	has external-buffers && flags="$flags --external-buffers"
-	XDG_RUNTIME_DIR=$dir $bb setsid $relay --link $link --buffers kwshm $flags --display "$disp" \
+	# X apps: X display :1, satellite started for its first client, at scale 1.
+	[ -x $satellite ] && [ -d /tmp/.X11-unix ] && has lodpi && flags="$flags --xwayland $satellite --lodpi --xwayland-display 1"
+	# The distro's PATH (the boot's is the kw layer's busybox only): the
+	# satellite it starts runs Xwayland by name (the kw layer's wrapper).
+	PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin XDG_RUNTIME_DIR=$dir $bb setsid $relay --link $link --buffers kwshm $flags --display "$disp" \
 		</dev/null >"$dir/wlandr.log" 2>&1 &
 	pid=$!
 	$bb rm -f "$dir/wlandr.pid"
@@ -125,6 +140,8 @@ case ${1-} in
 	$bb mkdir -p -m 755 /run/user
 	$bb install -d -m 700 -o "$uid" -g "$($bb id -g "$user")" "/run/user/$uid" || exit 1
 	$bb install -d -m 700 /run/user/0
+	# X's socket directory, as X wants it (root's, 1777), for the relay's X display.
+	$bb install -d -m 1777 /tmp/.X11-unix
 	[ "$uid" = 0 ] && exec "$0" --start
 	# The relay runs as the user (its socket and directory are the user's).
 	exec $bb su -s /run/kw-lower/bin/sh "$user" -c "exec $0 --start"
@@ -164,6 +181,10 @@ if ! running "$rdir" "$sock"; then
 			sudo -n $bb install -d -m 700 -o "$uid" -g "$($bb id -g)" "$dir" || die "cannot make $dir (sudo)"
 		fi
 	fi
+	# X's socket directory (root's, 1777), for the relay's X display.
+	if [ -x $satellite ] && [ ! -d /tmp/.X11-unix ]; then
+		if [ "$uid" = 0 ]; then $bb install -d -m 1777 /tmp/.X11-unix; else sudo -n $bb install -d -m 1777 /tmp/.X11-unix; fi 2>/dev/null || :
+	fi
 	start
 	i=0
 	until [ -S "$sock" ]; do
@@ -200,7 +221,7 @@ export XDG_RUNTIME_DIR="$dir" WAYLAND_DISPLAY="$disp"
 # The toolkit hints (XDG_SESSION_TYPE=wayland, GTK, Qt, SDL, Firefox, Electron).
 [ -r /etc/profile.d/kw-wayland.sh ] && . /etc/profile.d/kw-wayland.sh
 if [ $# -eq 0 ]; then
-	echo "export XDG_RUNTIME_DIR='$XDG_RUNTIME_DIR' WAYLAND_DISPLAY='$WAYLAND_DISPLAY' XDG_SESSION_TYPE='$XDG_SESSION_TYPE' GDK_BACKEND='$GDK_BACKEND' QT_QPA_PLATFORM='$QT_QPA_PLATFORM' SDL_VIDEODRIVER='$SDL_VIDEODRIVER' SDL_VIDEO_WAYLAND_PREFER_LIBDECOR='$SDL_VIDEO_WAYLAND_PREFER_LIBDECOR' MOZ_ENABLE_WAYLAND='$MOZ_ENABLE_WAYLAND' ELECTRON_OZONE_PLATFORM_HINT='$ELECTRON_OZONE_PLATFORM_HINT' ADW_DEBUG_COLOR_SCHEME='$ADW_DEBUG_COLOR_SCHEME'"
+	echo "export XDG_RUNTIME_DIR='$XDG_RUNTIME_DIR' WAYLAND_DISPLAY='$WAYLAND_DISPLAY' XDG_SESSION_TYPE='$XDG_SESSION_TYPE' GDK_BACKEND='$GDK_BACKEND' QT_QPA_PLATFORM='$QT_QPA_PLATFORM' SDL_VIDEODRIVER='$SDL_VIDEODRIVER' SDL_VIDEO_WAYLAND_PREFER_LIBDECOR='$SDL_VIDEO_WAYLAND_PREFER_LIBDECOR' MOZ_ENABLE_WAYLAND='$MOZ_ENABLE_WAYLAND' ELECTRON_OZONE_PLATFORM_HINT='$ELECTRON_OZONE_PLATFORM_HINT' ADW_DEBUG_COLOR_SCHEME='$ADW_DEBUG_COLOR_SCHEME'${DISPLAY:+ DISPLAY='$DISPLAY'}"
 	exit 0
 fi
 export LANG="${LANG:-C.UTF-8}"

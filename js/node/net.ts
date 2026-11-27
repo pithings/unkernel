@@ -9,19 +9,6 @@ import net from "node:net";
 import dgram from "node:dgram";
 import dns from "node:dns";
 import { UDP_QUEUE, type NetBackend } from "../core/net.ts";
-import { wispBackend as coreWispBackend, type WispBackend, type WispBackendOptions } from "../core/net-wisp.ts";
-
-/**
- * Handshake headers the Node entry's wispBackend() sends unless `headers`
- * is given. Node's WebSocket sends no Origin, and the project's server
- * (DEFAULT_WISP_SERVERS) accepts only pages from localhost or 127.0.0.1.
- */
-export const NODE_WISP_HEADERS: Readonly<Record<string, string>> = Object.freeze({ Origin: "http://localhost" });
-
-/** wispBackend() with `headers` defaulting to NODE_WISP_HEADERS. */
-export function wispBackend(url: string | readonly string[], opts: WispBackendOptions = {}): WispBackend {
-	return coreWispBackend(url, { ...opts, headers: opts.headers ?? { ...NODE_WISP_HEADERS } });
-}
 
 const CONNECT_TIMEOUT_MS = 20000;
 

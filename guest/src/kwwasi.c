@@ -27,8 +27,22 @@
  *
  * WASI descriptors are this process's: 0, 1 and 2 are inherited, and the
  * one preopened directory, "/", is descriptor 3 (an inherited descriptor 3
- * is replaced; 4 and up stay). The connection and kwwasi's own descriptors
- * sit at 512 or above.
+ * is replaced; 4 and up stay). The connections and kwwasi's own
+ * descriptors sit at 512 or above.
+ *
+ * Sockets are this process's too: one the program inherited (a listening
+ * one, or a connection, as `nc -l -e` gives its program on 0 and 1) works
+ * with preview 1's sock_accept, sock_recv, sock_send and sock_shutdown and
+ * with fd_read, fd_write, fd_close, fd_fdstat_get (socket_stream or
+ * socket_dgram), fd_fdstat_set_flags (O_NONBLOCK) and poll_oneoff. Preview 1
+ * has no socket(), bind(), listen() or connect(), so for a program to have a
+ * listening socket of its own, KWWASI_TCPLISTEN=ADDR:PORT[,ADDR:PORT...]
+ * (as wasmtime's --tcplisten) opens each as a listening TCP socket at
+ * descriptors 4, 5, ... in order (exit 126 when one of those is already
+ * open, inherited); ADDR is a numeric IPv4 address, [IPv6] or empty (any IPv4 address). A
+ * write to a socket whose peer has gone fails with EPIPE instead of raising
+ * SIGPIPE (send() with MSG_NOSIGNAL): a WASI program cannot ignore a signal.
+ * Writes to pipes still raise it, as for any process.
  *
  * Paths and the cwd: a WASI program has no cwd. wasi-libc (and so Rust's
  * std and CPython) keeps its own, which starts as "/", makes a relative
@@ -44,17 +58,42 @@
  * only one; still undecided, the cwd. Such a collision prints one warning
  * per run on stderr. Descriptor 3 itself (fd_readdir, fstat) is the cwd.
  * KWWASI_CWD: "auto" (as unset, no warning), "root" (undecided collisions
- * go to "/", no warning), "off" (no cwd: descriptor 3 is "/" and every path
+ * go to "/", no warning), "cwd" (no guessing: "/x" is absolute and every
+ * other path is the cwd's, for a program that keeps the leading "/", as
+ * Zig's std does; wasi-libc's absolute paths then miss), "off" (no cwd: descriptor 3 is "/" and every path
  * is from "/", as for a WASI runtime with only "/" preopened). A cwd this
  * process may not search gives EACCES for paths in it, as on Linux.
  *
- * Protocol (version 2): frames both ways, u32 op, u32 payload length, then
- * the payload; integers little-endian. Strings are a u32 length and bytes.
+ * Threads (wasi-threads: a module that imports wasi.thread-spawn and a
+ * shared env.memory): each wasm thread has a connection of its own, served
+ * by a pthread of this process, so that a thread blocked in a read of its
+ * stdin holds up no other thread's calls, and they all share this process's
+ * descriptors, cwd and credentials. A thread-spawn is a request on the
+ * spawning thread's connection (R_SPAWN): kwwasi starts the pthread, which
+ * connects anew and sends THREAD (the program's token, which MODULE gave,
+ * its tid and the start argument) before R_SPAWN is answered with the tid;
+ * the tid is that pthread's Linux tid (positive, unique among the program's
+ * live threads, and what ps shows). EXIT comes on the program's connection
+ * and ends the process, every thread with it; the host closes a thread's
+ * connection when the wasm thread returned, which ends only its pthread
+ * (lost()). The state of a connection (sock, rx, host_spoke) is
+ * thread-local, so a program without threads pays nothing for them: no
+ * locks and no other system calls.
  *
- *   guest -> host  1 START    u32 version (2), u32 argc, u32 envc, u32
- *                             preopens, the module's identity, then argc
+ * Protocol (version 3): frames both ways, u32 op, u32 payload length, then
+ * the payload; integers little-endian. Strings are a u32 length and bytes.
+ * Requests go one at a time on each connection.
+ *
+ *   guest -> host  1 START    u32 version (3), u32 argc, u32 envc, u32
+ *                             preopens, the module's identity, u64
+ *                             CLOCK_REALTIME, u64 CLOCK_MONOTONIC (ns, read
+ *                             just before START is sent), then argc
  *                             strings, envc strings, preopens x (u32 fd,
  *                             string name)
+ *                  7 THREAD   the first frame of a wasm thread's
+ *                             connection: u32 version, the program's
+ *                             token (TOKEN bytes), u32 tid, u32 start
+ *                             argument
  *                  2 REPLY    i32 errno (Linux, 0 for success), then the
  *                             request's result
  *                  5 DATA     the next piece of the module (at most
@@ -63,12 +102,13 @@
  *                             host remembers the identity only when it is
  *                             the one START gave)
  *   host -> guest  4 MODULE   u32 1: send the module (DATA until its size,
- *                             then END), 0: the host has it
+ *                             then END), 0: the host has it; then the
+ *                             program's token (TOKEN bytes)
  *                  3 EXIT     u32 status, then a message for stderr
  *                             (may be empty); the guest exits with status
  *                  16.. requests, one at a time, each answered by REPLY;
  *                             the ops and their layouts are the R_ values
- *                             below (wasi-exec.ts has the same table)
+ *                             below (wasi-program.ts has the same table)
  *
  * The module's identity is u64 size, dev, ino, mtime (ns), ctime (ns) of
  * the opened file and u64 flags: 1 (UNSETTLED) when its ctime is less than
@@ -85,15 +125,23 @@
  * 9p mount shows once the mount's attribute cache expires (1 s), as for
  * reading it.
  *
+ * The program's realtime and monotonic clocks are this machine's: the host
+ * keeps START's readings as offsets from its own monotonic clock and
+ * answers clock calls itself (no request each), so they lag this side's by
+ * at most START's delivery (wasi-exec.ts, programClock()), and a later
+ * change of the guest's time (date -s) is not seen by a running program.
+ * Its threads use the same offsets.
+ *
  * stat results are u64 dev, ino, nlink, size, atime, mtime, ctime (ns),
  * then u32 mode. READDIR answers WASI dirents (u64 d_next, u64 d_ino, u32
  * d_namlen, u8 d_type, 3 bytes padding, name), cut at the asked length as
  * fd_readdir expects. Exit 0, the program's status, or 126 with
  * "kwwasi: what: error" on stderr when there is no host to run it or the
- * connection to it is lost (lost()). The host sends nothing while a
- * request is in flight except EXIT, so a read or write that may block
- * waits for the connection too (wait_ready()): a lost host ends this
- * process even while it waits for its stdin. One that cannot block (a
+ * connection to it is lost (lost()). The host sends nothing on a
+ * connection while a request is in flight there except EXIT, so a read,
+ * write, accept, recv or send that may block waits for the connection too
+ * (wait_ready()): a lost host ends this process even while it waits for
+ * its stdin. One that cannot block (a
  * directory, a regular file on a disk, tmpfs or 9p file system, /dev/null
  * and the like: may_block()) skips that wait, as pread and pwrite always
  * did.
@@ -105,10 +153,14 @@
  * program's data is read and written in place there, never copied.
  */
 #define _GNU_SOURCE
+#include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <poll.h>
+#include <pthread.h>
+#include <semaphore.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -118,18 +170,21 @@
 #include <sys/statfs.h>
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
+#include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
 #include <linux/vm_sockets.h>
 
 #define KWWASI_PORT 1021
-#define KWWASI_VERSION 2
+#define KWWASI_VERSION 3
 #define MAX_FRAME (64u << 20)
 #define CHUNK (256u << 10)
 #define SETTLE_NS 2000000000ull
 #define UNSETTLED 1
 /* A frame's header: u32 op, u32 payload length. */
 #define HDR 8
+/* The program's token (MODULE), which THREAD frames carry. */
+#define TOKEN 16
 /* rx's size to start with (it grows to the largest frame), and the most rx and out keep between requests. */
 #define RX_MIN (4u << 10)
 #define KEEP (4u << 20)
@@ -141,6 +196,7 @@ enum {
 	OP_MODULE = 4,
 	OP_DATA = 5,
 	OP_END = 6,
+	OP_THREAD = 7,
 	R_READ = 16,      /* u32 fd, u32 len -> bytes */
 	R_PREAD = 17,     /* u32 fd, u32 len, u64 off -> bytes */
 	R_WRITE = 18,     /* u32 fd, bytes -> u32 n */
@@ -148,8 +204,8 @@ enum {
 	R_SEEK = 20,      /* u32 fd, u32 whence, i64 off -> u64 pos */
 	R_CLOSE = 21,     /* u32 fd */
 	R_FSTAT = 22,     /* u32 fd -> stat */
-	R_FDSTAT = 23,    /* u32 fd -> u32 mode, u32 open flags, u32 isatty */
-	R_SETFL = 24,     /* u32 fd, u32 flags (O_APPEND, O_NONBLOCK) */
+	R_FDSTAT = 23,    /* u32 fd -> u32 mode, u32 open flags, u32 isatty, u32 SO_TYPE (0: not a socket) */
+	R_SETFL = 24,     /* u32 fd, u32 flags (O_APPEND, O_NONBLOCK; O_DSYNC, O_SYNC only as they are) */
 	R_OPENAT = 25,    /* u32 dirfd, u32 flags, path -> u32 fd */
 	R_STATAT = 26,    /* u32 dirfd, u32 at flags, path -> stat */
 	R_READDIR = 27,   /* u32 fd, u32 len, u64 cookie -> WASI dirents */
@@ -164,13 +220,27 @@ enum {
 	R_LINKAT = 36,    /* u32 olddirfd, u32 newdirfd, u32 at flags, string old, string new */
 	R_POLL = 37,      /* i32 timeout ms, u32 n, n x (u32 fd, u32 events) -> n x u32 revents */
 	R_RENUMBER = 38,  /* u32 from, u32 to */
+	R_ACCEPT = 39,    /* u32 fd, u32 flags (O_NONBLOCK) -> u32 fd */
+	R_RECV = 40,      /* u32 fd, u32 len, u32 WASI riflags (1 peek, 2 waitall) -> u32 WASI roflags (1 truncated), bytes */
+	R_SEND = 41,      /* u32 fd, u32 WASI siflags (none), bytes -> u32 n */
+	R_SHUTDOWN = 42,  /* u32 fd, u32 WASI sdflags (1 read, 2 write) */
+	R_SPAWN = 43,     /* u32 start argument -> u32 tid (its THREAD came on a connection of its own) */
+	R_ALLOCATE = 44,  /* u32 fd, u64 offset, u64 len (posix_fallocate: fallocate mode 0) */
 };
 
-static int sock = -1;
+/*
+ * The connection this thread serves, one request at a time: the program's
+ * (main()), or one wasm thread's (wasm_thread(), thread_conn). Per thread,
+ * as is what came on it (rx) and host_spoke, so a single-threaded program
+ * pays nothing for threads.
+ */
+static __thread int sock = -1, thread_conn;
+/* The program's token, from MODULE. */
+static uint8_t token[TOKEN];
 /* The program's "/" while its paths are resolved (resolve()), else -1; and "/" for those that go there. */
 static int virt_fd = -1, root_fd = -1;
-/* KWWASI_CWD: undecided collisions go to "/" ("root"); warn about the first one (unset). */
-static int prefer_root, warn_collision;
+/* KWWASI_CWD: undecided collisions go to "/" ("root"); warn about the first one (unset); no guessing ("cwd"). */
+static int prefer_root, warn_collision, strict_cwd;
 
 static void die(const char *what)
 {
@@ -238,6 +308,10 @@ static void bstr(struct buf *b, const char *s)
 	bput(b, s, strlen(s));
 }
 
+/* What came from the host: rx.p[rx_at, rx.len) is not used yet (it came with the frame before it). */
+static __thread struct buf rx;
+static __thread size_t rx_at;
+
 /*
  * The connection to the host is gone (err: why, 0 for an orderly close):
  * the host ended the program (its machine stopped, or it was killed
@@ -247,6 +321,13 @@ static void bstr(struct buf *b, const char *s)
  */
 static void lost(int err)
 {
+	/* A wasm thread's connection ends this thread only: the host closes it when that thread returned, and the program's decides the rest. */
+	if (thread_conn) {
+		close(sock);
+		free(rx.p);
+		rx = (struct buf){ 0 };
+		pthread_exit(NULL);
+	}
 	if (err)
 		fprintf(stderr, "kwwasi: lost the connection to the host (%s): the host ended the program, "
 			"or the machine was restored from a snapshot, which does not keep running WASI programs\n", strerror(err));
@@ -254,10 +335,6 @@ static void lost(int err)
 		fprintf(stderr, "kwwasi: the host closed the connection\n");
 	exit(126);
 }
-
-/* What came from the host: rx.p[rx_at, rx.len) is not used yet (it came with the frame before it). */
-static struct buf rx;
-static size_t rx_at;
 
 /* Has the host sent more than the frames taken so far? */
 static int rx_pending(void)
@@ -353,7 +430,7 @@ static void send_failed(int err)
 }
 
 /* Set when the host sent a frame while a request was in flight (wait_ready()): that request gets no reply. */
-static int host_spoke;
+static __thread int host_spoke;
 
 /*
  * Before an operation that may block for long (a read or write of a
@@ -401,10 +478,11 @@ static int wait_ready(int fd, short events)
 
 /*
  * What a read or write of a program's descriptor can do, for may_block():
- * not known yet, it cannot block, or it may. A descriptor's file never
- * changes, so this is kept until the program closes or replaces it.
+ * not known yet, it cannot block, it may, or it may and the descriptor is
+ * a socket (written with send(), below). A descriptor's file never changes,
+ * so this is kept until the program closes or replaces it.
  */
-enum { KIND_UNKNOWN, KIND_NEVER, KIND_MAY };
+enum { KIND_UNKNOWN, KIND_NEVER, KIND_MAY, KIND_SOCK };
 #define KINDS 512 /* kwwasi's own descriptors are at 512 and above */
 static uint8_t kind[KINDS];
 
@@ -422,17 +500,19 @@ static void forget_kind(int fd)
  * would see); a regular file elsewhere (procfs's kmsg, tracefs's
  * trace_pipe, FUSE) may, as may pipes, ttys, sockets and other devices.
  */
-static int may_block(int fd)
+static int fd_kind(int fd)
 {
 	struct stat st;
 	struct statfs fs;
 	int k = KIND_MAY;
 
 	if (fd >= 0 && fd < KINDS && kind[fd])
-		return kind[fd] == KIND_MAY;
+		return kind[fd];
 	if (fstat(fd, &st) < 0)
-		return 1; /* wait_ready() and the operation report it */
-	if (S_ISDIR(st.st_mode)) {
+		return KIND_MAY; /* wait_ready() and the operation report it */
+	if (S_ISSOCK(st.st_mode)) {
+		k = KIND_SOCK;
+	} else if (S_ISDIR(st.st_mode)) {
 		k = KIND_NEVER;
 	} else if (S_ISCHR(st.st_mode)) {
 		/* drivers/char/mem.c: 3 null, 5 zero, 7 full, 9 urandom (not 8 random, 11 kmsg) */
@@ -458,7 +538,12 @@ static int may_block(int fd)
 	}
 	if (fd >= 0 && fd < KINDS)
 		kind[fd] = k;
-	return k == KIND_MAY;
+	return k;
+}
+
+static int may_block(int fd)
+{
+	return fd_kind(fd) != KIND_NEVER;
 }
 
 static void send_all(const void *p, size_t n)
@@ -629,15 +714,19 @@ struct linux_dirent64 {
 };
 
 /* fd_readdir: entries from `cookie` on, as WASI dirents, cut at `len`. */
+#define RAW 32768
 static int do_readdir(int fd, uint32_t len, uint64_t cookie, struct buf *out)
 {
-	static char raw[32768];
+	static __thread char *raw;
 	size_t start = out->len;
+
+	if (!raw && !(raw = malloc(RAW)))
+		return ENOMEM;
 
 	if (lseek(fd, cookie, SEEK_SET) < 0)
 		return errno;
 	while (out->len - start < len) {
-		long n = syscall(SYS_getdents64, fd, raw, sizeof(raw));
+		long n = syscall(SYS_getdents64, fd, raw, RAW);
 
 		if (n < 0)
 			return errno;
@@ -742,7 +831,7 @@ static int resolve(int dirfd, const char *path, int creating)
 		return dirfd;
 	if (path[0] == '/')
 		return root_fd;
-	if (!path[0] || !strcmp(path, ".") || !strcmp(path, "..") || !strncmp(path, "./", 2) || !strncmp(path, "../", 3))
+	if (strict_cwd || !path[0] || !strcmp(path, ".") || !strcmp(path, "..") || !strncmp(path, "./", 2) || !strncmp(path, "../", 3))
 		return AT_FDCWD;
 	x = strcspn(path, "/");
 	c = exists(AT_FDCWD, path, x);
@@ -774,10 +863,12 @@ static int resolve(int dirfd, const char *path, int creating)
 	if (warn_collision) {
 		warn_collision = 0;
 		fprintf(stderr, "kwwasi: warning: \"%s\" may mean ./%s or /%s (a WASI program cannot say which); used %s%s. "
-			"KWWASI_CWD=auto, root or off chooses and silences this\n", path, path, path, use == AT_FDCWD ? "./" : "/", path);
+			"KWWASI_CWD=auto, root, cwd or off chooses and silences this\n", path, path, path, use == AT_FDCWD ? "./" : "/", path);
 	}
 	return use;
 }
+
+static int spawn_thread(uint32_t arg, int *tid);
 
 /* One request; the result goes to `out` (after the errno word). */
 static int serve(uint32_t op, struct req *r, struct buf *out)
@@ -813,14 +904,17 @@ static int serve(uint32_t op, struct req *r, struct buf *out)
 	case R_PWRITE: {
 		int fd = ru32(r);
 		uint64_t off = op == R_PWRITE ? ru64(r) : 0;
+		int k = op == R_WRITE && !r->bad ? fd_kind(fd) : KIND_NEVER;
 		ssize_t n;
 
 		if (r->bad)
 			return EINVAL;
-		if (op == R_WRITE && may_block(fd) && wait_ready(fd, POLLOUT))
+		if (k != KIND_NEVER && wait_ready(fd, POLLOUT))
 			return 0;
+		/* A socket whose peer went away: EPIPE, not SIGPIPE (see the top). */
 		do
-			n = op == R_PWRITE ? pwrite(fd, r->p, r->end - r->p, off) : write(fd, r->p, r->end - r->p);
+			n = op == R_PWRITE ? pwrite(fd, r->p, r->end - r->p, off) :
+				k == KIND_SOCK ? send(fd, r->p, r->end - r->p, MSG_NOSIGNAL) : write(fd, r->p, r->end - r->p);
 		while (n < 0 && errno == EINTR);
 		if (n < 0)
 			e = errno;
@@ -859,9 +953,15 @@ static int serve(uint32_t op, struct req *r, struct buf *out)
 		if (op == R_FSTAT) {
 			put_stat(out, &st);
 		} else {
+			int type = 0;
+			socklen_t tl = sizeof(type);
+
+			if (S_ISSOCK(st.st_mode) && getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &tl) < 0)
+				type = 0;
 			bu32(out, st.st_mode);
 			bu32(out, flags_to_wire(fl));
 			bu32(out, isatty(fd));
+			bu32(out, type);
 		}
 		break;
 	}
@@ -870,6 +970,9 @@ static int serve(uint32_t op, struct req *r, struct buf *out)
 
 		if (cur < 0)
 			e = errno;
+		/* Linux cannot change O_DSYNC or O_SYNC after open (F_SETFL ignores them): another state than the descriptor's fails rather than pretend. */
+		else if ((fl & (O_DSYNC | O_SYNC)) != (cur & (O_DSYNC | O_SYNC)))
+			e = EOPNOTSUPP;
 		else
 			SYS(fcntl(fd, F_SETFL, (cur & ~(O_APPEND | O_NONBLOCK)) | (fl & (O_APPEND | O_NONBLOCK))));
 		break;
@@ -1043,6 +1146,108 @@ static int serve(uint32_t op, struct req *r, struct buf *out)
 		}
 		break;
 	}
+	case R_ACCEPT: {
+		int fd = ru32(r), fl = flags_from_wire(ru32(r)), nfd;
+
+		if (r->bad)
+			return EINVAL;
+		if (may_block(fd) && wait_ready(fd, POLLIN))
+			return 0;
+		do
+			nfd = accept4(fd, NULL, NULL, fl & O_NONBLOCK ? SOCK_NONBLOCK : 0);
+		while (nfd < 0 && errno == EINTR);
+		if (nfd < 0) {
+			e = errno;
+		} else {
+			forget_kind(nfd);
+			bu32(out, nfd);
+		}
+		break;
+	}
+	case R_RECV: {
+		int fd = ru32(r);
+		uint32_t len = ru32(r), fl = ru32(r), ro = 0;
+		size_t at = out->len, got = 0;
+
+		if (r->bad)
+			return EINVAL;
+		if (len > MAX_FRAME / 2)
+			len = MAX_FRAME / 2;
+		bspace(out, 4 + len);
+		/* WAITALL without PEEK goes on until len, the peer's end or an error, waiting as a read does each time. */
+		for (;;) {
+			struct iovec iov = { out->p + at + 4 + got, len - got };
+			struct msghdr m = { .msg_iov = &iov, .msg_iovlen = 1 };
+			ssize_t n;
+
+			if (may_block(fd) && wait_ready(fd, POLLIN))
+				return 0;
+			n = recvmsg(fd, &m, fl & 1 ? MSG_PEEK | (fl & 2 ? MSG_WAITALL : 0) : 0);
+			if (n < 0 && errno == EINTR)
+				continue;
+			if (n < 0) {
+				if (!got)
+					e = errno;
+				break;
+			}
+			got += n;
+			if (m.msg_flags & MSG_TRUNC)
+				ro |= 1;
+			if (!n || !(fl & 2) || (fl & 1) || got >= len)
+				break;
+		}
+		out->len = at + 4 + got;
+		memcpy(out->p + at, &ro, 4);
+		break;
+	}
+	case R_SEND: {
+		int fd = ru32(r);
+		ssize_t n;
+
+		ru32(r); /* siflags: none defined */
+		if (r->bad)
+			return EINVAL;
+		if (may_block(fd) && wait_ready(fd, POLLOUT))
+			return 0;
+		do
+			n = send(fd, r->p, r->end - r->p, MSG_NOSIGNAL);
+		while (n < 0 && errno == EINTR);
+		if (n < 0)
+			e = errno;
+		else
+			bu32(out, n);
+		break;
+	}
+	case R_SHUTDOWN: {
+		int fd = ru32(r);
+		uint32_t how = ru32(r);
+
+		if (r->bad || !how || how > 3)
+			return EINVAL;
+		SYS(shutdown(fd, how == 1 ? SHUT_RD : how == 2 ? SHUT_WR : SHUT_RDWR));
+		break;
+	}
+	case R_ALLOCATE: {
+		int fd = ru32(r);
+		int64_t off = ru64(r), len = ru64(r);
+
+		if (r->bad)
+			return EINVAL;
+		/* posix_fallocate() is fallocate() mode 0 (musl's falls back to nothing; zig 0.16's returns -1, not the error). */
+		SYS(fallocate(fd, 0, off, len));
+		break;
+	}
+	case R_SPAWN: {
+		uint32_t arg = ru32(r);
+		int tid = 0;
+
+		if (r->bad)
+			return EINVAL;
+		e = spawn_thread(arg, &tid);
+		if (!e)
+			bu32(out, tid);
+		break;
+	}
 	default:
 		e = ENOSYS;
 	}
@@ -1083,6 +1288,8 @@ static void preopen(void)
 	root_fd = high(open_dir("/"), 520);
 	if (mode && !strcmp(mode, "root"))
 		prefer_root = 1;
+	if (mode && !strcmp(mode, "cwd"))
+		strict_cwd = 1;
 	warn_collision = !mode || !*mode;
 	if ((mode && !strcmp(mode, "off")) || (stat(".", &c) == 0 && stat("/", &r) == 0 && c.st_dev == r.st_dev && c.st_ino == r.st_ino)) {
 		fd = dup(root_fd);
@@ -1101,64 +1308,143 @@ static void preopen(void)
 	close(fd);
 }
 
-int main(int argc, char **argv)
+/* A listening TCP socket for "ADDR:PORT" (KWWASI_TCPLISTEN, the top); -1 with errno (EINVAL: not ADDR:PORT). */
+static int listen_on(char *spec)
+{
+	union {
+		struct sockaddr sa;
+		struct sockaddr_in in;
+		struct sockaddr_in6 in6;
+	} a = { 0 };
+	char *port = strrchr(spec, ':'), *host = spec, *end;
+	socklen_t alen = sizeof(a.in);
+	long pn;
+	int s, one = 1;
+
+	if (!port || !port[1])
+		goto bad;
+	*port++ = 0;
+	pn = strtol(port, &end, 10);
+	if (*end || pn < 0 || pn > 65535)
+		goto bad;
+	if (host[0] == '[') {
+		size_t n = strlen(host);
+
+		if (n < 2 || host[n - 1] != ']')
+			goto bad;
+		host[n - 1] = 0;
+		a.in6.sin6_family = AF_INET6;
+		a.in6.sin6_port = htons(pn);
+		if (inet_pton(AF_INET6, host + 1, &a.in6.sin6_addr) != 1)
+			goto bad;
+		alen = sizeof(a.in6);
+	} else {
+		a.in.sin_family = AF_INET;
+		a.in.sin_port = htons(pn);
+		if (*host && inet_pton(AF_INET, host, &a.in.sin_addr) != 1)
+			goto bad;
+	}
+	s = socket(a.sa.sa_family, SOCK_STREAM, 0);
+	if (s < 0)
+		return -1;
+	setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+	if (bind(s, &a.sa, alen) < 0 || listen(s, 128) < 0) {
+		int e = errno;
+
+		close(s);
+		errno = e;
+		return -1;
+	}
+	return s;
+bad:
+	errno = EINVAL;
+	return -1;
+}
+
+/* KWWASI_TCPLISTEN's sockets, at descriptors 4, 5, ... (the top). */
+static void tcp_listen(void)
+{
+	const char *spec = getenv("KWWASI_TCPLISTEN");
+	int next = 4;
+
+	for (const char *p = spec ? spec : ""; *p;) {
+		size_t n = strcspn(p, ",");
+		char item[128], what[128];
+		int s;
+
+		snprintf(item, sizeof(item), "%.*s", (int)n, p);
+		memcpy(what, item, sizeof(what)); /* listen_on() cuts item up */
+		p += n + (p[n] == ',');
+		if (!n)
+			continue;
+		/* kwwasi's own descriptors are at 512 and above: an open one here is inherited. */
+		if (fcntl(next, F_GETFD) >= 0) {
+			fprintf(stderr, "kwwasi: KWWASI_TCPLISTEN %s: descriptor %d is already open (inherited)\n", what, next);
+			exit(126);
+		}
+		s = n < sizeof(item) ? listen_on(item) : (errno = EINVAL, -1);
+		if (s < 0) {
+			fprintf(stderr, "kwwasi: KWWASI_TCPLISTEN %s: %s\n", what,
+				errno == EINVAL ? "not ADDR:PORT (a numeric IPv4 address, [IPv6] or none, and a port)" : strerror(errno));
+			exit(126);
+		}
+		s = high(s, 600);
+		if (dup2(s, next++) < 0)
+			die("dup2");
+		close(s);
+	}
+}
+
+/* A connection to the host (vsock port KWWASI_PORT), at 512 or above (close-on-exec); -1 with errno. */
+static int connect_host(void)
 {
 	struct sockaddr_vm addr = { .svm_family = AF_VSOCK, .svm_cid = VMADDR_CID_HOST, .svm_port = KWWASI_PORT };
-	int fd, s;
-	struct buf start = { 0 };
-	extern char **environ;
-	struct stat st;
-	int envc = 0;
+	int s = socket(AF_VSOCK, SOCK_STREAM | SOCK_CLOEXEC, 0), hi;
 
-	if (argc < 3) {
-		fprintf(stderr, "usage: kwwasi PATH ARGV0 [ARG...] (run by binfmt_misc with flag P)\n");
-		return 2;
-	}
-	/* The module, kept open (above the program's descriptors) until the host has it. */
-	fd = open(argv[1], O_RDONLY | O_CLOEXEC);
-	if (fd < 0 || fstat(fd, &st) < 0)
-		die(argv[1]);
-	fd = high(fd, 530);
-
-	s = socket(AF_VSOCK, SOCK_STREAM | SOCK_CLOEXEC, 0);
 	if (s < 0)
-		die("socket");
-	if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0)
-		die("connect to the host (vsock port 1021)");
-	sock = fcntl(s, F_DUPFD_CLOEXEC, 512);
-	if (sock < 0)
-		sock = s;
-	else
+		return -1;
+	if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		int e = errno;
+
 		close(s);
-
-	preopen();
-
-	while (environ && environ[envc])
-		envc++;
-	bframe(&start);
-	bu32(&start, KWWASI_VERSION);
-	bu32(&start, argc - 2);
-	bu32(&start, envc);
-	bu32(&start, 1); /* preopens */
-	{
-		struct timespec now;
-		uint64_t ctime = (uint64_t)st.st_ctim.tv_sec * 1000000000u + st.st_ctim.tv_nsec;
-
-		clock_gettime(CLOCK_REALTIME, &now);
-		put_identity(&start, &st, ctime + SETTLE_NS <= (uint64_t)now.tv_sec * 1000000000u + now.tv_nsec ? 0 : UNSETTLED);
+		errno = e;
+		return -1;
 	}
-	bstr(&start, strchr(argv[2], '/') ? argv[2] : argv[1]);
-	for (int i = 3; i < argc; i++)
-		bstr(&start, argv[i]);
-	for (int i = 0; i < envc; i++)
-		bstr(&start, environ[i]);
-	bu32(&start, 3);
-	bstr(&start, "/");
-	send_frame(OP_START, &start);
-	free(start.p);
+	hi = fcntl(s, F_DUPFD_CLOEXEC, 512);
+	if (hi < 0)
+		return s;
+	close(s);
+	return hi;
+}
+
+/* The module, kept open (above the program's descriptors) until the host has it; its path and size. */
+static int mod_fd = -1;
+static const char *mod_path;
+static uint64_t mod_size;
+
+/* MODULE (the program's connection): send the module if asked, and keep the program's token. */
+static void module_asked(const uint8_t *payload, uint32_t len)
+{
+	uint32_t want = 1;
+
+	if (len >= 4)
+		memcpy(&want, payload, 4);
+	if (len >= 4 + TOKEN)
+		memcpy(token, payload + 4, TOKEN);
+	if (mod_fd < 0)
+		return;
+	if (want)
+		send_module(mod_fd, mod_path, mod_size);
+	close(mod_fd);
+	mod_fd = -1;
+}
+
+/* Serve this thread's connection: requests until EXIT, or for a wasm thread's, until it ends (lost()). */
+static _Noreturn void serve_requests(void)
+{
+	struct buf out = { 0 }; /* kept from one reply to the next, as rx (btrim()) */
 
 	for (;;) {
-		static struct buf out; /* kept from one reply to the next, as rx (btrim()) */
 		uint32_t h[2];
 		uint8_t *payload = recv_frame(h);
 		struct req r;
@@ -1166,15 +1452,8 @@ int main(int argc, char **argv)
 
 		if (h[0] == OP_EXIT)
 			host_exit(payload, h[1]);
-		if (h[0] == OP_MODULE && fd >= 0) {
-			uint32_t want = 1;
-
-			if (h[1] >= 4)
-				memcpy(&want, payload, 4);
-			if (want)
-				send_module(fd, argv[1], st.st_size);
-			close(fd);
-			fd = -1;
+		if (h[0] == OP_MODULE && !thread_conn) {
+			module_asked(payload, h[1]);
 			continue;
 		}
 		r = (struct req){ payload, payload + h[1], 0 };
@@ -1187,4 +1466,141 @@ int main(int argc, char **argv)
 		host_spoke = 0;
 		btrim(&out);
 	}
+}
+
+/* R_SPAWN's handover to the new thread: its start argument, then its tid or why it failed. */
+struct spawn {
+	uint32_t arg;
+	int tid, err;
+	sem_t done;
+};
+
+/* A wasm thread's pthread: its own connection (THREAD), then that thread's requests. */
+static void *wasm_thread(void *p)
+{
+	struct spawn *sp = p;
+	struct buf f = { 0 };
+	int s = connect_host();
+
+	thread_conn = 1;
+	if (s < 0) {
+		sp->err = errno;
+		sem_post(&sp->done);
+		return NULL;
+	}
+	sock = s;
+	sp->tid = gettid();
+	bframe(&f);
+	bu32(&f, KWWASI_VERSION);
+	bput(&f, token, TOKEN);
+	bu32(&f, sp->tid);
+	bu32(&f, sp->arg);
+	memcpy(f.p, (uint32_t[2]){ OP_THREAD, f.len - HDR }, HDR);
+	/* Not send_all(): a failure goes to the spawner as an error. */
+	for (size_t at = 0; at < f.len;) {
+		ssize_t w = send(sock, f.p + at, f.len - at, MSG_NOSIGNAL);
+
+		if (w < 0 && errno == EINTR)
+			continue;
+		if (w <= 0) {
+			sp->err = w < 0 ? errno : EPIPE;
+			close(sock);
+			free(f.p);
+			sem_post(&sp->done);
+			return NULL;
+		}
+		at += w;
+	}
+	free(f.p);
+	sem_post(&sp->done); /* sp is the spawner's, gone after this */
+	serve_requests();
+}
+
+/* thread-spawn (R_SPAWN): a pthread for the new wasm thread, once it has connected; its Linux tid is the wasm thread's id. */
+static int spawn_thread(uint32_t arg, int *tid)
+{
+	struct spawn sp = { .arg = arg };
+	pthread_attr_t a;
+	pthread_t t;
+	int e;
+
+	if (sem_init(&sp.done, 0, 0))
+		return errno;
+	pthread_attr_init(&a);
+	pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+	pthread_attr_setstacksize(&a, 256 << 10);
+	e = pthread_create(&t, &a, wasm_thread, &sp);
+	pthread_attr_destroy(&a);
+	if (!e) {
+		while (sem_wait(&sp.done) && errno == EINTR)
+			;
+		e = sp.err;
+		*tid = sp.tid;
+	}
+	sem_destroy(&sp.done);
+	return e;
+}
+
+int main(int argc, char **argv)
+{
+	int fd;
+	struct buf start = { 0 };
+	extern char **environ;
+	struct stat st;
+	int envc = 0;
+	size_t clocks;
+
+	if (argc < 3) {
+		fprintf(stderr, "usage: kwwasi PATH ARGV0 [ARG...] (run by binfmt_misc with flag P)\n");
+		return 2;
+	}
+	fd = open(argv[1], O_RDONLY | O_CLOEXEC);
+	if (fd < 0 || fstat(fd, &st) < 0)
+		die(argv[1]);
+	mod_fd = high(fd, 530);
+	mod_path = argv[1];
+	mod_size = st.st_size;
+
+	tcp_listen();
+	sock = connect_host();
+	if (sock < 0)
+		die("connect to the host (vsock port 1021)");
+
+	preopen();
+
+	while (environ && environ[envc])
+		envc++;
+	bframe(&start);
+	bu32(&start, KWWASI_VERSION);
+	bu32(&start, argc - 2);
+	bu32(&start, envc);
+	bu32(&start, 1); /* preopens */
+	put_identity(&start, &st, 0);
+	clocks = start.len;
+	bspace(&start, 16); /* the clocks, read last (below) */
+	bstr(&start, strchr(argv[2], '/') ? argv[2] : argv[1]);
+	for (int i = 3; i < argc; i++)
+		bstr(&start, argv[i]);
+	for (int i = 0; i < envc; i++)
+		bstr(&start, environ[i]);
+	bu32(&start, 3);
+	bstr(&start, "/");
+	{
+		/* As late as can be, so the host's offsets lag the guest's clocks only by the frame's delivery. */
+		struct timespec rt, mt;
+		uint64_t real, mono, ctime = (uint64_t)st.st_ctim.tv_sec * 1000000000u + st.st_ctim.tv_nsec, fl;
+
+		clock_gettime(CLOCK_REALTIME, &rt);
+		clock_gettime(CLOCK_MONOTONIC, &mt);
+		real = (uint64_t)rt.tv_sec * 1000000000u + rt.tv_nsec;
+		mono = (uint64_t)mt.tv_sec * 1000000000u + mt.tv_nsec;
+		fl = ctime + SETTLE_NS <= real ? 0 : UNSETTLED;
+		memcpy(start.p + clocks - 8, &fl, 8); /* the identity's flags */
+		memcpy(start.p + clocks, &real, 8);
+		memcpy(start.p + clocks + 8, &mono, 8);
+	}
+	send_frame(OP_START, &start);
+	free(start.p);
+
+	serve_requests();
 }

@@ -3,7 +3,8 @@
 // Teeworlds: the 2D platform shooter, as a window on the page's Wayland
 // desktop (wayland.ts; Debian). SDL2 on Wayland (the session's
 // SDL_VIDEODRIVER, kw-wayland.sh) with OpenGL through EGL, inside the GL
-// 2.1 compatibility profile that guest GL offers (.agents/gl.md). It has no
+// 2.1 compatibility profile that guest GL offers (.agents/gl.md). Its
+// servers speak UDP, which the page's network does not carry, and it has no
 // bots: play.sh runs a server on the guest's loopback and joins it, to play
 // the maps alone (a second client in another window can join too). Started
 // windowed at 1280x800 (settings it saves).
@@ -15,8 +16,8 @@ import type { TerminalApp } from "../types.ts";
 import { SDL_WL, SDL_WL_PACKAGES } from "../sdlwl.ts";
 
 const PLAY = `#!/bin/sh
-# A Teeworlds server on this guest's loopback (not registered with the master
-# server), and the client joined to it; the server stops with it.
+# A Teeworlds server on this guest's loopback (no master server: the page's
+# network has no UDP), and the client joined to it; the server stops with it.
 /usr/games/teeworlds-server "sv_register 0" "sv_name unkernel" >server.log 2>&1 &
 server=$!
 trap 'kill $server 2>/dev/null' EXIT
@@ -35,7 +36,8 @@ export default {
 	packages: { debian: ["teeworlds", "teeworlds-server", ...SDL_WL_PACKAGES] },
 	files: {
 		"play.sh": { content: PLAY, mode: 0o755 },
-		README: "Teeworlds has no bots: ./play.sh runs a server here (server.log) and joins it.\n" +
+		README: "Teeworlds has no bots, and its online servers need UDP, which the page's\n" +
+			"network does not carry: ./play.sh runs a server here (server.log) and joins it.\n" +
 			"A/D move, Space jumps, the mouse aims and fires, the right button hooks,\n" +
 			"the wheel changes weapons, Esc is the menu.\n",
 	},

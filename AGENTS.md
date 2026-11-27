@@ -29,6 +29,7 @@ programs).
 | [.agents/gl.md](.agents/gl.md) | guest GL through virgl on WebGL2 (branch `webgl`): plan, measurements, headless tests |
 | [.agents/vk.md](.agents/vk.md) | guest Vulkan on WebGPU (kwvk): the ICD, the host renderer, the SPIR-V translator, the relay and headless tests |
 | [.agents/va.md](.agents/va.md) | guest VA-API on WebCodecs (kwva): the libva driver, the host decoder and its codecs (VP9, H.264, AV1, HEVC), decoders other than the modelled one, zero-copy output (dmabuf export into virtio-gpu resources), the relay and headless tests |
+| [.agents/x64.md](.agents/x64.md) | x86-64 and i386 guest binaries: box64 and qemu-user behind binfmt_misc, what runs and what does not, measurements, a native front end and its references |
 | [.agents/status.md](.agents/status.md) | roadmap and open issues; read only for planning, or when asked |
 
 ## Building and testing

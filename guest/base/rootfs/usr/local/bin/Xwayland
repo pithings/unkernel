@@ -13,6 +13,10 @@
 # leaves (no -noreset) forgets it if xsetroot was that client. Found first
 # on PATH (before /usr/bin; sudo's secure_path too), so whatever starts
 # Xwayland by name gets it: a shell, a launcher app, xwayland-satellite.
+# Without libEGL.so.1 (Debian's xwayland does not depend on libegl1) it
+# adds -shm: else Xwayland (rootless, as satellite starts it) tries glamor,
+# and libepoxy aborts when it cannot open libEGL (SIGABRT at startup);
+# with -shm its buffers go through wl_shm, as without a GPU.
 
 real=/usr/bin/Xwayland
 [ -x $real ] || { echo "Xwayland: not installed (Debian: sudo apt-get install xwayland)" >&2; exit 127; }
@@ -28,5 +32,8 @@ if [ -n "$d" ] && [ -x /usr/bin/xsetroot ] && [ ! -e "/tmp/.X11-unix/X$d" ]; the
 		done
 		DISPLAY=:$d /usr/bin/xsetroot -cursor_name left_ptr 2>/dev/null
 	) </dev/null >/dev/null 2>&1 &
+fi
+if [ ! -e /usr/lib/aarch64-linux-gnu/libEGL.so.1 ] && [ ! -e /usr/lib/libEGL.so.1 ]; then
+	case " $* " in *" -shm "*) ;; *) set -- "$@" -shm ;; esac
 fi
 exec $real "$@"

@@ -3,7 +3,7 @@
 // Prototype check of WASI programs run by the guest on the host's wasm
 // engine (guest/src/kwwasi.c, js/core/wasi-exec.ts), on Alpine. Builds
 // kwwasi and the test programs in test/wasi/ with zig (aarch64-linux-musl
-// and wasm32-wasi), mounts them in the guest, copies kwwasi to /usr/lib/kw,
+// and wasm32-wasi; threads.zig with zig build-exe), mounts them in the guest, copies kwwasi to /usr/lib/kw,
 // registers it with the guest's binfmt_misc (the kw layer does that at
 // boot), and runs the programs by path.
 //
@@ -15,7 +15,12 @@
 //   UNKERNEL_TEST_CPUS=n ...        CPUs for an SMP kernel (implies a worker)
 //
 // Exit 0 when every check passes. It checks argv[0], paths against the cwd
-// and "/" (KWWASI_CWD), preview 0 calls, and that a module is sent only
+// and "/" (KWWASI_CWD), file-system calls (fd_readdir's cookies, errors,
+// fd_allocate, fd_fdstat_set_flags, the umask), the clocks (the guest's
+// realtime and monotonic, CPU time, unknown clocks), preview 0 calls, sockets (KWWASI_TCPLISTEN's and
+// ones inherited from busybox nc), wasi-threads (file I/O in several
+// threads, one blocked on stdin beside them, proc_exit and a trap in a
+// thread, kills; on --messages a clean refusal), and that a module is sent only
 // when the host has not compiled it for that file (rewrites in the guest
 // and on the host). Each program runs in a worker of its own:
 // it checks that the guest and its console go on while one computes, that
@@ -24,8 +29,9 @@
 // module cached) and as aarch64 in the guest, how fast a small program
 // starts with and without idle workers, a 16 MiB copy through kwwasi and
 // what one small request costs.
-// With one CPU it also saves a snapshot with three programs running (one
-// computing, one waiting for its stdin, one blocked writing to a full pipe),
+// With one CPU it also saves a snapshot with programs running (one
+// computing, one waiting for its stdin, one blocked writing to a full pipe,
+// and on the shared path one with two threads computing),
 // stops, resumes it and checks that kwwasi tells them they are gone. A host
 // of its own on kwwasi's port checks kwwasi's side of the protocol's ends.
 import assert from "node:assert/strict";
@@ -35,6 +41,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createKernel, nodeFs, serveWasiPrograms, type VsockConnection } from "../js/node.ts";
+import { wasiErrno } from "../js/core/wasi-program.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const worker = process.argv.includes("--worker");
@@ -52,12 +59,18 @@ const dir = mkdtempSync(path.join(tmpdir(), "kwwasi-"));
 const cc = (target: string, src: string, out: string, flags: string[] = []) =>
 	execFileSync(zig, ["cc", "-target", target, "-O2", "-s", ...(target.startsWith("aarch64") ? ["-mcpu=generic", "-static"] : []), ...flags, "-o", path.join(dir, out), src]);
 cc("aarch64-linux-musl", path.join(root, "guest/src/kwwasi.c"), "kwwasi");
-for (const t of ["hello", "cat", "ls", "loop", "trap", "calls", "put"]) cc("wasm32-wasi", path.join(root, "test/wasi", `${t}.c`), `${t}.wasm`);
+for (const t of ["hello", "cat", "ls", "loop", "trap", "calls", "put", "sock", "fs", "clock"]) cc("wasm32-wasi", path.join(root, "test/wasi", `${t}.c`), `${t}.wasm`);
 cc("wasm32-wasi", path.join(root, "test/wasi/p0.c"), "p0.wasm", ["-nostdlib", "-fno-builtin"]);
 // Two modules of the same size that print different things.
 for (const v of ["A", "B"]) cc("wasm32-wasi", path.join(root, "test/wasi/ver.c"), `ver${v}.wasm`, [`-DVARIANT="${v}"`]);
 assert.equal(statSync(path.join(dir, "verA.wasm")).size, statSync(path.join(dir, "verB.wasm")).size);
 cc("aarch64-linux-musl", path.join(root, "test/wasi/loop.c"), "loop.a64");
+cc("aarch64-linux-musl", path.join(root, "test/wasi/sockclient.c"), "sockclient");
+cc("aarch64-linux-musl", path.join(root, "test/wasi/clock.c"), "clock.a64");
+// wasi-threads: zig's wasi-libc has no pthreads (its thread stub), so this one is Zig (std.Thread).
+execFileSync(zig, ["build-exe", path.join(root, "test/wasi/threads.zig"), "-target", "wasm32-wasi", "-mcpu=generic+atomics+bulk_memory",
+	"-fno-single-threaded", "-O", "ReleaseSmall", "--import-memory", "--shared-memory", "--max-memory=67108864", "--export=wasi_thread_start",
+	`-femit-bin=${path.join(dir, "threads.wasm")}`], { cwd: dir });
 
 const mounts = () => ({ "/mnt/kw": { fs: nodeFs(dir), readOnly: true } });
 const hostLog = (m: string) => process.stderr.write(`${m}\n`);
@@ -66,7 +79,8 @@ const serve = (v: typeof vm, opts: { idleWorkers?: number } = {}) => serveWasiPr
 let wasi = serve(vm);
 assert.equal(wasi.shared, !messages);
 console.log(`     requests ${wasi.shared ? "through a SharedArrayBuffer" : "as messages (JSPI)"}`);
-const sh = (cmd: string, input?: string) => vm.exec("sh", ["-c", cmd], { input });
+// As root: the distro images' exec user is uid 1000 (`user`).
+const sh = (cmd: string, input?: string) => vm.exec("sh", ["-c", cmd], { input, user: "root" });
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** Wait until `cond` holds (at most `ms`); the time it took, in ms. */
 async function until(cond: () => boolean, ms: number, what: string): Promise<number> {
@@ -77,8 +91,8 @@ async function until(cond: () => boolean, ms: number, what: string): Promise<num
 	}
 	return performance.now() - t;
 }
-/** No program running, no worker but the idle ones, no shared channel served. */
-const quiet = () => wasi.stats.running === 0 && wasi.stats.workers === wasi.stats.idle && wasi.stats.channels === 0;
+/** No program or thread running, no worker but the idle ones, no shared channel served. */
+const quiet = () => wasi.stats.running === 0 && wasi.stats.threads === 0 && wasi.stats.workers === wasi.stats.idle && wasi.stats.channels === 0;
 let failed = 0;
 async function check(name: string, cmd: string, want: { stdout?: string | RegExp; stderr?: RegExp; code: number }, input?: string) {
 	const r = await sh(cmd, input);
@@ -100,7 +114,7 @@ try {
 		d=/proc/sys/fs/binfmt_misc
 		[ -e $d/wasi ] || printf '%s\\n' ':wasi:M::\\x00asm\\x01\\x00\\x00\\x00::/usr/lib/kw/kwwasi:P' > $d/register || :
 		mkdir -p /root/work/sub /tmp/w /root/bin
-		cp /mnt/kw/*.wasm /mnt/kw/loop.a64 /root/work/ && chmod 755 /root/work/*.wasm /root/work/loop.a64
+		cp /mnt/kw/*.wasm /mnt/kw/loop.a64 /mnt/kw/sockclient /mnt/kw/clock.a64 /root/work/ && chmod 755 /root/work/*.wasm /root/work/*.a64 /root/work/sockclient
 		cp /root/work/hello.wasm /root/bin/ && ln -s /root/work/hello.wasm /root/bin/hello-link
 		echo "file in work dir" > /root/work/sub/data.txt
 		cat /proc/sys/fs/binfmt_misc/wasi`);
@@ -129,11 +143,18 @@ try {
 		"mkdir -p /tmp/w/priv/sub && echo x > /tmp/w/priv/sub/f && chmod 700 /tmp/w/priv && cd /tmp/w/priv && su nobody -s /bin/sh -c '/tmp/w/cat.wasm sub/f'",
 		{ stderr: /sub\/f: Permission denied/, code: 1 });
 	await cwdChecks();
+	await fsChecks();
 	await moduleChecks();
+	await clockChecks();
 	await check("preview 0 (wasi_unstable): fd_seek's whence, filestat, poll_oneoff", "cd / && /root/work/p0.wasm", { stdout: "p0 ok\n", code: 0 });
+	await socketChecks();
+	await threadChecks();
 	await check("trap", "/root/work/trap.wasm", { stdout: "before trap\n", stderr: /wasm trap: unreachable/, code: 134 });
 	await check("not a module", "printf '\\0asm\\1\\0\\0\\0xx' > /tmp/w/bad.wasm && chmod +x /tmp/w/bad.wasm && /tmp/w/bad.wasm",
 		{ stderr: /not a valid WebAssembly module/, code: 126 });
+	// A module with a 64-bit memory of its own and an empty _start.
+	await check("a wasm64 module is refused", "printf '\\0asm\\1\\0\\0\\0\\1\\4\\1\\140\\0\\0\\3\\2\\1\\0\\5\\3\\1\\4\\1\\7\\12\\1\\6_start\\0\\0\\12\\4\\1\\2\\0\\13' > /tmp/w/m64.wasm && " +
+		"chmod +x /tmp/w/m64.wasm && /tmp/w/m64.wasm", { stdout: "", stderr: /a wasm64 module \(64-bit memory\)/, code: 126 });
 	await check("killed while waiting for stdin", "(sleep 2; echo) | timeout -s INT 0.5 /root/work/cat.wasm", { code: 130 });
 	await check("SIGKILL while waiting for stdin",
 		"mkfifo /tmp/w/in && { sleep 3 > /tmp/w/in & } && timeout -s KILL 0.5 /root/work/cat.wasm < /tmp/w/in; rc=$?; kill $! 2>/dev/null; rm /tmp/w/in; exit $rc",
@@ -239,13 +260,16 @@ async function cwdChecks() {
 	await sh(`mkdir -p /tmp/w/col/etc /tmp/w/col/lib /tmp/w/half/etc && echo fake-hostname > /tmp/w/col/etc/hostname
 		echo mine > /tmp/w/col/lib/x && echo other > /tmp/w/half/etc/other && cat /etc/hostname /etc/hostname > /tmp/w/hh`);
 	const warning = (p: string, used: string) =>
-		new RegExp(`^kwwasi: warning: "${p}" may mean \\./${p} or /${p} \\(a WASI program cannot say which\\); used ${used}\\. KWWASI_CWD=auto, root or off chooses and silences this\n`);
+		new RegExp(`^kwwasi: warning: "${p}" may mean \\./${p} or /${p} \\(a WASI program cannot say which\\); used ${used}\\. KWWASI_CWD=auto, root, cwd or off chooses and silences this\n`);
 	await check("cwd and / both have the file: the cwd's, one warning", "cd /tmp/w/col && /root/work/cat.wasm /etc/hostname etc/hostname",
 		{ stdout: "fake-hostname\nfake-hostname\n", stderr: new RegExp(`${warning("etc/hostname", "\\./etc/hostname").source}$`), code: 0 });
 	await check("KWWASI_CWD=auto: the same, no warning", "cd /tmp/w/col && KWWASI_CWD=auto /root/work/cat.wasm /etc/hostname",
 		{ stdout: "fake-hostname\n", stderr: /^$/, code: 0 });
 	await check("KWWASI_CWD=root: such a collision goes to /", "cd /tmp/w/col && KWWASI_CWD=root /root/work/cat.wasm /etc/hostname",
 		{ stdout: host, stderr: /^$/, code: 0 });
+	await check("KWWASI_CWD=cwd: no guessing, every path the cwd's", "cd /tmp/w/half && KWWASI_CWD=cwd /root/work/cat.wasm etc/other && " +
+		"! KWWASI_CWD=cwd /root/work/cat.wasm etc/hostname 2>/dev/null && cd /tmp/w/col && KWWASI_CWD=cwd /root/work/cat.wasm etc/hostname",
+		{ stdout: "other\nfake-hostname\n", stderr: /^$/, code: 0 });
 	await check("KWWASI_CWD=off: every path from /", "cd /tmp/w/col && KWWASI_CWD=off /root/work/cat.wasm /etc/hostname etc/hostname | cmp - /tmp/w/hh",
 		{ stderr: /^$/, code: 0 });
 	await check("cwd and / both have the first component: where the file is", "cd /tmp/w/half && /root/work/cat.wasm etc/other /etc/hostname",
@@ -260,6 +284,204 @@ async function cwdChecks() {
 	await check("the cwd is /", "cd / && /root/work/cat.wasm etc/hostname /etc/hostname | cmp - /tmp/w/hh", { stderr: /^$/, code: 0 });
 	await check("absolute paths from a cwd the caller may not search", "cd /tmp/w/priv && su nobody -s /bin/sh -c '/tmp/w/cat.wasm /etc/hostname'",
 		{ stdout: host, stderr: /^$/, code: 0 });
+}
+
+/**
+ * File-system calls: fd_readdir's cookies on a large directory (tmpfs and
+ * the overlay root), Linux errors as WASI's, fd_allocate,
+ * fd_fdstat_set_flags with the sync flags, and created files' modes
+ * against the umask.
+ */
+async function fsChecks() {
+	const readdir = new RegExp("^3002 entries in \\d+ calls of 128 bytes, each once\nresumed from entry 1501's cookie: the same entries\n" +
+		"cookie 0 again: from the first entry\nshort buffers filled\nentries removed and added meanwhile: the others each once\n$");
+	await check("fd_readdir: 3000 files on tmpfs, small buffers, a mid cookie, cookie 0, changes between calls",
+		"mkdir /tmp/w/many && /root/work/fs.wasm readdir /tmp/w/many 3000 && rm -r /tmp/w/many", { stdout: readdir, code: 0 });
+	await check("fd_readdir: the same on the overlay root", "mkdir /root/many && /root/work/fs.wasm readdir /root/many 3000 && rm -r /root/many",
+		{ stdout: readdir, code: 0 });
+	await check("Linux errors as WASI's", `set -e; e=/tmp/w/e; mkdir -p $e/full $e/other $e/small $e/ro
+		touch $e/full/x && echo data > $e/file && ln -s loop $e/loop
+		mount -t tmpfs -o size=64k none $e/small && mount -t tmpfs -o ro none $e/ro && mount -t tmpfs none $e/other
+		cp /bin/busybox $e/busy && ln -s busy $e/sleep && { $e/sleep 10 & }; sleep 0.3
+		cd / && (ulimit -f 4096 && trap '' XFSZ && /root/work/fs.wasm errno $e); kill $!; umount $e/small $e/ro $e/other`,
+	{
+		stdout: "open a symlink loop: ELOOP\nrmdir a directory with a file: ENOTEMPTY\nrename to another file system: EXDEV\n" +
+			"open a directory for writing: EISDIR\na file as a directory: ENOTDIR\nwrite a full file system: ENOSPC\n" +
+			"create on a read-only file system: EROFS\nwrite beyond the file size limit: EFBIG\nopen a running program for writing: ETXTBSY\n" +
+			"a 299-byte name: ENAMETOOLONG\n",
+		code: 0,
+	});
+	// The table itself, for those the guest cannot easily make (EMLINK) and the socket ones.
+	const want: Array<[string, number, number]> = [["ELOOP", 40, 32], ["ENOTEMPTY", 39, 55], ["EXDEV", 18, 75], ["EISDIR", 21, 31], ["ENOTDIR", 20, 54],
+		["EMLINK", 31, 34], ["ENOSPC", 28, 51], ["EROFS", 30, 69], ["EFBIG", 27, 22], ["ETXTBSY", 26, 74], ["ENAMETOOLONG", 36, 37],
+		["ECONNABORTED", 103, 13], ["EADDRINUSE", 98, 3], ["EHOSTUNREACH", 113, 23], ["EMSGSIZE", 90, 35], ["ENOBUFS", 105, 42],
+		["EINPROGRESS", 115, 26], ["ENOTBLK, none: EIO", 15, 29]];
+	const wrong = want.filter(([, l, w]) => wasiErrno(l) !== w);
+	if (!wrong.length) console.log(`ok   errno table: ${want.map(([n]) => n).join(", ")}`);
+	else {
+		failed++;
+		console.log(`FAIL errno table: ${wrong.map(([n, l, w]) => `${n} (${l}) is ${wasiErrno(l)}, want ${w}`).join("; ")}`);
+	}
+	await check("fd_allocate (posix_fallocate)", "/root/work/fs.wasm alloc /tmp/w/alloc /etc/hostname && rm /tmp/w/alloc", {
+		stdout: "allocate 1 MiB: no error, size 1048576\nallocate 4 KiB at 4 MiB: no error, size 4198400\nallocate a negative length: EINVAL\n" +
+			"allocate in a file opened read-only: EBADF\n",
+		code: 0,
+	});
+	await check("fd_fdstat_set_flags: the sync flags only as they are", "echo x > /tmp/w/setfl && /root/work/fs.wasm setfl /tmp/w/setfl", {
+		stdout: "O_SYNC file: F_GETFL has O_SYNC yes, O_DSYNC yes\nO_SYNC file: F_SETFL F_GETFL's | O_NONBLOCK: no error\n... O_NONBLOCK now set\n" +
+			"O_SYNC file: F_SETFL O_NONBLOCK alone (O_SYNC cleared): ENOTSUP\nplain file: F_SETFL | O_APPEND: no error\n... O_APPEND now set\n" +
+			"plain file: F_SETFL | O_DSYNC: ENOTSUP\nplain file: F_SETFL | O_SYNC: ENOTSUP\n",
+		code: 0,
+	});
+	await check("created files and directories: the umask applies",
+		"mkdir /tmp/w/um && cd /tmp/w/um && umask 027 && /root/work/put.wasm f x && /root/work/put.wasm -d d && umask 0 && " +
+			"/root/work/put.wasm g x && /root/work/put.wasm -d e && stat -c '%n %a' f d g e",
+		{ stdout: "f 640\nd 750\ng 666\ne 777\n", stderr: /^$/, code: 0 });
+}
+
+/**
+ * Clocks: realtime and monotonic are the guest's (also after its date was
+ * set), how far behind they are, CPU time, unknown clocks, absolute sleeps.
+ */
+async function clockChecks() {
+	const ns = (s: string) => s.trim().split("\n").map((l) => BigInt(l));
+	/** Native, wasm, native readings: the wasm one between (at most `slack` ms before the first: it lags the guest by its START's delivery). */
+	const between = async (name: string, cmd: string) => {
+		const r = await sh(`${cmd} && /root/work/clock.a64 now && /root/work/clock.wasm now && /root/work/clock.a64 now`);
+		const v = r.exitCode === 0 ? ns(r.stdout) : [];
+		const slack = 20_000_000n;
+		const bad = v.length !== 6 ? "no readings" : [0, 1].map((i) => v[i]! - slack <= v[i + 2]! && v[i + 2]! <= v[i + 4]! ? "" : `clock ${i}: ${v[i]} ${v[i + 2]} ${v[i + 4]}`).filter(Boolean).join("; ");
+		if (!bad) console.log(`ok   ${name}`);
+		else {
+			failed++;
+			console.log(`FAIL ${name}: ${bad}\n  stdout: ${JSON.stringify(r.stdout)}\n  stderr: ${JSON.stringify(r.stderr)}`);
+		}
+	};
+	await between("clocks: realtime and monotonic are the guest's", "true");
+	// A day of 400 later (and back): the guest's realtime, not the host's.
+	await between("clocks: realtime follows the guest's date", "date -s @$(( $(date +%s) + 400 * 86400 )) >/dev/null");
+	await sh("date -s @$(( $(date +%s) - 400 * 86400 )) >/dev/null");
+	await check("clocks: resolutions, unknown clocks EINVAL (time, res, poll_oneoff)", "/root/work/clock.wasm ids", {
+		stdout: "clock 0: res under 1 ms\nclock 1: res under 1 ms\nclock 2: res under 1 ms\nclock 3: res under 1 ms\n" +
+			"clock 4: time EINVAL, res EINVAL, poll EINVAL\nclock 999: time EINVAL, res EINVAL, poll EINVAL\n",
+		code: 0,
+	});
+	const cpu = await sh("/root/work/clock.wasm cpu");
+	const c = /^start (\d+) (\d+)\ncompute (\d+) (\d+)\nsleep (\d+) (\d+)\n$/.exec(cpu.stdout)?.slice(1).map(Number);
+	if (c && c[0]! < 50 && c[1]! < 50 && c[2]! >= 150 && c[3]! >= 150 && c[4]! < 30 && c[5]! < 30)
+		console.log(`ok   clocks: CPU time (process, thread ms): ${c[0]}, ${c[1]} at the start, ${c[2]}, ${c[3]} over 300 ms computing, ${c[4]}, ${c[5]} over a 300 ms sleep`);
+	else {
+		failed++;
+		console.log(`FAIL clocks: CPU time: ${JSON.stringify(cpu.stdout)} ${JSON.stringify(cpu.stderr)}`);
+	}
+	const abs = await sh("/root/work/clock.wasm abs 100");
+	const a = /^realtime ok (\d+)\nmonotonic ok (\d+)\n$/.exec(abs.stdout)?.slice(1).map(Number);
+	if (a && a.every((ms) => ms >= 99 && ms < 250)) console.log(`ok   clocks: poll_oneoff until an absolute time: ${a[0]} ms (realtime), ${a[1]} ms (monotonic) for 100`);
+	else {
+		failed++;
+		console.log(`FAIL clocks: absolute sleeps: ${JSON.stringify(abs.stdout)} ${JSON.stringify(abs.stderr)}`);
+	}
+	// How far the program's monotonic clock is behind the guest's: for the first of a series of starts, and after 20 (the host keeps the best).
+	for (const [what, cmd] of [["a first start", "true"], ["after 20 starts", "for i in $(seq 20); do /root/work/clock.wasm now >/dev/null; done"]]) {
+		if (what === "a first start") await sleep(10_500); // the host's best offset expires (CLOCK_BEST_NS)
+		const lag = await sh(`${cmd}; /root/work/clock.wasm lag 100`);
+		const m = /^lag between (-?\d+) and (-?\d+) us/.exec(lag.stdout);
+		if (m && Number(m[2]) >= 0) console.log(`ok   clocks: the program's monotonic clock behind the guest's, ${what}: ${m[1]}-${m[2]} us`);
+		else {
+			failed++;
+			console.log(`FAIL clocks: lag ${what}: ${JSON.stringify(lag.stdout)} ${JSON.stringify(lag.stderr)}`);
+		}
+	}
+}
+
+/**
+ * Sockets: one from KWWASI_TCPLISTEN, a connection and a UDP socket
+ * inherited from busybox nc -l -e, against sockclient in the guest.
+ */
+async function socketChecks() {
+	await check("sockets: KWWASI_TCPLISTEN's listener: accept nonblocking, poll, accept, peek, recv WAITALL, read, send, write, shutdown",
+		`rm -f /tmp/w/sock.ready; cd / && { KWWASI_TCPLISTEN=127.0.0.1:7001 /root/work/sock.wasm serve /tmp/w/sock.ready > /tmp/w/serve.out & }
+		for i in $(seq 200); do [ -e /tmp/w/sock.ready ] && break; sleep 0.05; done
+		/root/work/sockclient 7001 send 'hello world'; wait $!; echo "server exit $?"; cat /tmp/w/serve.out`,
+		{
+			stdout: "echo: hello world\nbye\nserver exit 0\nlistener: socket_stream\naccept, nonblocking listener: EAGAIN\npoll: 0\npoll: listener readable\n" +
+				"accepted: socket_stream, nonblocking\npeeked 5: hello\nreceived 11: hello world\nread to the end: 11 bytes in all\nrecv after the client's end: 0\ndone\n",
+			code: 0,
+		});
+	await check("sockets: KWWASI_TCPLISTEN with two listeners: descriptors 4 and 5",
+		"cd / && KWWASI_TCPLISTEN=127.0.0.1:7005,:7006 /root/work/sock.wasm types 3 4 5 6",
+		{ stdout: "3: not a socket\n4: socket_stream\n5: socket_stream\n6: error\n", code: 0 });
+	await check("sockets: KWWASI_TCPLISTEN with descriptor 4 inherited", "KWWASI_TCPLISTEN=127.0.0.1:7007 /root/work/hello.wasm 4</dev/null",
+		{ stdout: "", stderr: /^kwwasi: KWWASI_TCPLISTEN 127\.0\.0\.1:7007: descriptor 4 is already open \(inherited\)\n$/, code: 126 });
+	await check("sockets: KWWASI_TCPLISTEN that is not ADDR:PORT", "KWWASI_TCPLISTEN=localhost /root/work/hello.wasm",
+		{ stdout: "", stderr: /^kwwasi: KWWASI_TCPLISTEN localhost: not ADDR:PORT/, code: 126 });
+	await check("sockets: an inherited connection on 0 and 1 (nc -l -e): nonblocking recv, poll, recv WAITALL, write, shutdown",
+		`nc -l -p 7002 -e /root/work/sock.wasm inherited 2>/tmp/w/inh.err & /root/work/sockclient 7002 go ping; wait $!; echo "nc exit $?"; cat /tmp/w/inh.err`,
+		{ stdout: "pong\nnc exit 0\nfd 0: socket_stream, fd 1: socket_stream\nnonblocking recv: EAGAIN\nreceived 4: ping\n", code: 0 });
+	await check("sockets: an inherited UDP socket (nc -u -l -e): socket_dgram, a datagram cut short",
+		`nc -u -l -p 7003 -e /root/work/sock.wasm udp 2>/tmp/w/udp.err & /root/work/sockclient 7003 udp datagram-payload; wait $!; echo "nc exit $?"; cat /tmp/w/udp.err`,
+		{ stdout: "ok\nnc exit 0\nfd 0: socket_dgram\ndatagram: 4 bytes, truncated\n", code: 0 });
+}
+
+/**
+ * wasi-threads (threads.zig): threads computing and doing file I/O at
+ * once, one blocked on its stdin while others go on, proc_exit and a trap
+ * in a thread, kills while threads run. On the message path a threads
+ * module fails at its start.
+ */
+async function threadChecks() {
+	if (messages) {
+		await check("wasi-threads on the message path: exit 126 at the start", "/root/work/threads.wasm files 2",
+			{ stdout: "", stderr: /^kwwasi: \/root\/work\/threads\.wasm: a wasi-threads module needs SharedArrayBuffer .* passes requests as messages\n$/, code: 126 });
+		return;
+	}
+	await check("threads: eight computing and doing file I/O at once, positive unique tids", "cd / && /root/work/threads.wasm files 8 && echo \"files left: $(ls /tmp/w | grep -c thr-)\"",
+		{ stdout: /^(thread \d: sum \d+\n){8}tids positive and unique\nfiles left: 0\n$/, code: 0 });
+	await threadCpuChecks();
+	await check("threads: one blocked reading stdin while four do file calls", "cd / && (sleep 2; echo late) | /root/work/threads.wasm stdin 4",
+		{ stdout: "4 threads did their file calls; the stdin reader still waited\nstdin: late\n", code: 0 });
+	await check("threads: proc_exit in a thread ends the program", "/root/work/threads.wasm exit", { stdout: "", code: 7 });
+	await check("threads: a trap in a thread ends the program", "/root/work/threads.wasm trap", { stderr: /wasm trap: unreachable \(in thread \d+\)/, code: 134 });
+	await until(quiet, 2000, "no program and no thread");
+	await check("threads: three computing in the background", "/root/work/threads.wasm spin 3 >/dev/null 2>&1 & echo $! > /tmp/w/spin.pid", { code: 0 });
+	await until(() => wasi.stats.threads === 3, 10000, "three threads running");
+	await check("... kwwasi has a pthread for each", "ls /proc/$(cat /tmp/w/spin.pid)/task | wc -l", { stdout: "4\n", code: 0 });
+	await check("kill -9 while threads run", "kill -9 $(cat /tmp/w/spin.pid) && sleep 0.1 && ! kill -0 $(cat /tmp/w/spin.pid) 2>/dev/null", { code: 0 });
+	console.log(`ok   its four workers gone ${(await until(quiet, 2000, "the killed program's workers to end")).toFixed(0)} ms after the guest saw it die`);
+	await check("SIGINT while threads run", "timeout -s INT 1 /root/work/threads.wasm spin 2 >/dev/null; exit $?", { code: 130 });
+	console.log(`ok   its three workers gone ${(await until(quiet, 2000, "the killed program's workers to end")).toFixed(0)} ms after the guest saw it exit`);
+}
+
+/**
+ * A threaded program's process CPU clock (clock 2; threads.zig's cpu
+ * modes): read right after joining threads that computed without calls at
+ * their end, read by main while threads compute without calls, with
+ * threads waiting (in memory.atomic.wait32, in poll_oneoff) counted as
+ * idle, and in a program on workers another one used before. Tolerances
+ * for a loaded host.
+ */
+async function threadCpuChecks() {
+	const judge = async (name: string, cmd: string, re: RegExp, ok: (v: number[]) => boolean) => {
+		const r = await sh(cmd);
+		const v = r.exitCode === 0 ? re.exec(r.stdout)?.slice(1).map(Number) : undefined;
+		if (v && ok(v)) console.log(`ok   ${name}: ${r.stdout.trim()}`);
+		else {
+			failed++;
+			console.log(`FAIL ${name}\n  stdout: ${JSON.stringify(r.stdout)}\n  stderr: ${JSON.stringify(r.stderr)}\n  exit: ${r.exitCode}`);
+		}
+	};
+	await judge("threads: waiting threads are not counted", "/root/work/threads.wasm cpuidle",
+		/^process cpu grew (\d+) ms in 400 ms/, ([ms]) => ms! < 40);
+	await judge("threads: the process CPU clock counts every thread's (waiting after computing without calls, then joined)", "/root/work/threads.wasm cpu 3",
+		/^process cpu grew (\d+) ms while they waited, (\d+)% of .*; (\d+) ms after the joins, (\d+)%/,
+		([, mid, , end]) => mid! >= 75 && mid! <= 125 && end! >= 75 && end! <= 125);
+	await judge("threads: the process CPU clock while two threads compute without calls", "/root/work/threads.wasm cpulive 2",
+		/^process cpu grew (\d+) ms in (\d+) ms of wall time, ([\d.]+) x, (\d+) of 10/, ([, , rate, steps]) => rate! >= 1.2 && rate! <= 2.3 && steps! >= 9);
+	// The workers of programs that ended (idle now, each having computed for 300 ms or more) run the next: its clocks start from its own start.
+	await until(() => wasi.stats.idle >= 2, 2000, "two idle workers");
+	await judge("threads: a program on reused workers starts from 0", "/root/work/threads.wasm cpustart",
+		/^process (\d+) ms, main (\d+) ms at the start; the thread (\d+) ms at its start; process (\d+) ms after the join/,
+		([p0, m0, t0, p1]) => p0! < 50 && m0! < 50 && t0! < 50 && p1! < 100);
 }
 
 /**
@@ -402,18 +624,21 @@ async function moduleChecks() {
 }
 
 /**
- * Snapshots with a program computing, one waiting for its stdin and one
- * blocked writing to a full pipe: they are not blocked, one without stop
+ * Snapshots with a program computing, one waiting for its stdin, one
+ * blocked writing to a full pipe and (shared path) one with two threads
+ * computing: they are not blocked, one without stop
  * leaves the three running, the programs' workers end when the machine
  * stops, and in the resumed machine kwwasi
  * finds its connection reset and exits 126.
  */
 async function snapshotCheck() {
+	const names = messages ? ["l", "c", "p"] : ["l", "c", "p", "t"], n = names.length;
 	await sh(`rm -f /tmp/w/*.rc
 		(/root/work/loop.wasm 100000000000 >/tmp/w/l.out 2>/tmp/w/l.err; echo $? > /tmp/w/l.rc) >/dev/null 2>&1 &
 		sleep 100000 | (/root/work/cat.wasm >/tmp/w/c.out 2>/tmp/w/c.err; echo $? > /tmp/w/c.rc) >/dev/null 2>&1 &
-		(/root/work/calls.wasm copy 4096 </dev/zero 2>/tmp/w/p.err; echo $? > /tmp/w/p.rc) | sleep 100000 >/dev/null 2>&1 &`);
-	await until(() => wasi.stats.running === 3, 5000, "three programs running");
+		(/root/work/calls.wasm copy 4096 </dev/zero 2>/tmp/w/p.err; echo $? > /tmp/w/p.rc) | sleep 100000 >/dev/null 2>&1 &
+		${messages ? "" : "(/root/work/threads.wasm spin 2 >/dev/null 2>/tmp/w/t.err; echo $? > /tmp/w/t.rc) >/dev/null 2>&1 &"}`);
+	await until(() => wasi.stats.running === n && wasi.stats.threads === 2 * (n - 3), 10000, `${n} programs running`);
 	await sleep(300);
 	// In a worker a snapshot may not have host file systems (they resume inline only).
 	if (worker) await vm.mounts.get("/mnt/kw")!.unmount();
@@ -421,38 +646,38 @@ async function snapshotCheck() {
 	// One without stop: the guest and the programs go on.
 	await vm.snapshot();
 	await sleep(200);
-	if (old.stats.running === 3 && old.stats.workers - old.stats.idle === 3) console.log("ok   a snapshot without stop leaves the three programs running");
+	if (old.stats.running === n && old.stats.workers - old.stats.idle === n + 2 * (n - 3)) console.log(`ok   a snapshot without stop leaves the ${n} programs running`);
 	else {
 		failed++;
 		console.log(`FAIL a snapshot without stop: ${JSON.stringify(old.stats)}`);
 	}
 	const t = performance.now();
 	const snap = await vm.snapshot({ stop: true });
-	console.log(`ok   snapshot with three programs running, in ${((performance.now() - t) / 1000).toFixed(2)} s`);
+	console.log(`ok   snapshot with ${n} programs running, in ${((performance.now() - t) / 1000).toFixed(2)} s`);
 	await until(() => old.stats.running === 0 && old.stats.workers === 0 && old.stats.channels === 0, 2000, "the stopped machine's program workers to end");
 	console.log(`ok   the stopped machine's program workers ended (stats ${JSON.stringify(old.stats)})`);
 	const vm2 = await createKernel({ kernel, distro, worker, log: () => {}, ...(worker ? {} : { mounts: mounts() }), restore: snap });
 	try {
 		wasi = serve(vm2);
 		for (let i = 0; ; i++) {
-			const r = await vm2.exec("sh", ["-c", "cat /tmp/w/l.rc /tmp/w/c.rc /tmp/w/p.rc 2>/dev/null"]);
-			if (r.stdout.split("\n").filter(Boolean).length === 3) break;
+			const r = await vm2.exec("sh", ["-c", `cd /tmp/w && cat ${names.map((x) => `${x}.rc`).join(" ")} 2>/dev/null`], { user: "root" });
+			if (r.stdout.split("\n").filter(Boolean).length === n) break;
 			if (i > 100) {
-				const ps = await vm2.exec("sh", ["-c", "ps; cat /tmp/w/*.err"]);
+				const ps = await vm2.exec("sh", ["-c", "ps; cat /tmp/w/*.err"], { user: "root" });
 				throw new Error(`kwwasi still running after the restore: ${r.stdout}\n${ps.stdout}`);
 			}
 			await sleep(100);
 		}
-		const r = await vm2.exec("sh", ["-c", "cat /tmp/w/l.rc /tmp/w/c.rc /tmp/w/p.rc /tmp/w/l.err /tmp/w/c.err /tmp/w/p.err"]);
+		const r = await vm2.exec("sh", ["-c", `cd /tmp/w && cat ${names.map((x) => `${x}.rc`).join(" ")} ${names.map((x) => `${x}.err`).join(" ")}`], { user: "root" });
 		try {
 			const lost = "kwwasi: lost the connection to the host \\([^)]+\\): [^\\n]*snapshot[^\\n]*\\n";
-			assert.match(r.stdout, new RegExp(`^126\\n126\\n126\\n${lost}${lost}${lost}$`));
-			console.log(`ok   after the restore the three kwwasi exit 126 (computing, waiting for stdin, blocked writing to a full pipe): ${JSON.stringify(r.stdout.split("\n")[3])}`);
+			assert.match(r.stdout, new RegExp(`^${"126\\n".repeat(n)}${lost.repeat(n)}$`));
+			console.log(`ok   after the restore the ${n} kwwasi exit 126 (computing, waiting for stdin, blocked writing to a full pipe${n > 3 ? ", with threads" : ""}): ${JSON.stringify(r.stdout.split("\n")[n])}`);
 		} catch (e) {
 			failed++;
 			console.log(`FAIL after the restore: ${(e as Error).message}`);
 		}
-		const h = await vm2.exec("sh", ["-c", "/root/work/hello.wasm"]);
+		const h = await vm2.exec("sh", ["-c", "/root/work/hello.wasm"], { user: "root" });
 		if (h.exitCode === 41) console.log("ok   a program runs in the resumed machine");
 		else {
 			failed++;

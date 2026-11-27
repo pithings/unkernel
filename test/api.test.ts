@@ -9,7 +9,7 @@
 //
 //   node --test test/api.test.ts                       # from source (js/node.ts)
 //   UNKERNEL_DIST=1 node --test test/api.test.ts       # the built package ("unkernel" -> dist/)
-//   UNKERNEL_TEST_WISP=1 ...                           # also the default Wisp server (internet)
+//   UNKERNEL_TEST_WISP=wss://... ...                  # also a Wisp server on the internet (sent Origin: http://localhost)
 //   UNKERNEL_TEST_KERNEL=path ...                      # another bundle instead of the bundled kernel
 //   UNKERNEL_TEST_DISTRO_DIR=dir ...                   # where alpine.erofs is (default vendor/build/distro)
 //   UNKERNEL_TEST_CPUS=n ...                           # CPUs for an SMP kernel under test (the bundle's SMP kernel for n > 1)
@@ -29,7 +29,7 @@ import { fileURLToPath } from "node:url";
 
 const spec = process.env.UNKERNEL_DIST ? "unkernel" : "../js/node.ts";
 const sdk: typeof import("../js/node.ts") = await import(spec);
-const { createKernel, ConsoleRouter, NetStack, directBackend, wispBackend, DEFAULT_WISP_SERVERS, FileDisk, bundledBoot, bundledKernelUrl, createImageFromKwsparse, MemoryFs, nodeFs } = sdk;
+const { createKernel, ConsoleRouter, NetStack, directBackend, wispBackend, FileDisk, bundledBoot, bundledKernelUrl, createImageFromKwsparse, MemoryFs, nodeFs } = sdk;
 type Instance = Awaited<ReturnType<typeof createKernel>>;
 /** The kernel under test: UNKERNEL_TEST_KERNEL (a bundle, e.g. from a build of your own), else the bundled one. */
 const testKernel = process.env.UNKERNEL_TEST_KERNEL ? path.resolve(process.env.UNKERNEL_TEST_KERNEL) : undefined;
@@ -609,15 +609,16 @@ describe("api", { concurrency: CONCURRENCY }, () => {
 		});
 	});
 
-	for (const { worker, name } of MODES) test(`Wisp networking through the default server (${name})`, { skip: !process.env.UNKERNEL_TEST_WISP && "set UNKERNEL_TEST_WISP=1 (needs internet)" }, async (t) => {
-		const logs: string[] = [];
-		const vm = await boot(t, { worker, log: (m) => logs.push(m), net: worker ? { kind: "net", backend: { kind: "wisp", servers: [...DEFAULT_WISP_SERVERS] } }
-			: wispBackend(DEFAULT_WISP_SERVERS, { log: (m) => logs.push(m) }) });
+	for (const { worker, name } of MODES) test(`Wisp networking through UNKERNEL_TEST_WISP (${name})`, { skip: !process.env.UNKERNEL_TEST_WISP && "set UNKERNEL_TEST_WISP=wss://... (needs internet)" }, async (t) => {
+		const logs: string[] = [], servers = process.env.UNKERNEL_TEST_WISP!.split(",");
+		const headers = { Origin: "http://localhost" };   // Node's WebSocket sends none, and some servers want one
+		const vm = await boot(t, { worker, log: (m) => logs.push(m), net: worker ? { kind: "net", backend: { kind: "wisp", servers, headers } }
+			: wispBackend(servers, { headers, log: (m) => logs.push(m) }) });
 		const { s, waitFor } = screen(vm);
 		await waitFor(PROMPT);
 		const at = s.text.length;
 		vm.write("/usr/lib/kw/net wait; wget -q -O - http://example.com/ | grep -o '<title>.*</title>'; echo wisp-done\n");
-		await waitFor(/^wisp-done/m, at, 90000); // not the echo of the command line
+		await waitFor(/^wisp-done/m, at, 90000);
 		assert.match(s.text.slice(at), /<title>Example Domain<\/title>/, logs.join("\n"));
 		vm.write("poweroff\n");
 		assert.equal((await vm.exited).code, 0);
@@ -1281,6 +1282,21 @@ describe("api", { concurrency: CONCURRENCY }, () => {
 			assert.match(r.err, /rm: can't remove '\/mnt\/ro\/r.txt': Read-only file system/);
 			assert.match(r.err, /now.txt: Permission denied/);
 			assert.equal(r.out, "read only");
+		});
+
+		test("hard links on nodeFs: ln in the guest makes a second name for the host file (one inode)", async (t) => {
+			// Not below scratch: the next test lists all of it.
+			const dir = mkdtempSync(path.join(tmpdir(), "unkernel-api-hard-"));
+			writeFileSync(path.join(dir, "a.txt"), "same\n");
+			const m = await k.vm.mount("/hard", nodeFs(dir));
+			t.after(async () => {
+				if (m.mounted) await m.unmount();
+				rmSync(dir, { recursive: true, force: true });
+			});
+			const r = await sh("ln /hard/a.txt /hard/b.txt && stat -c %h /hard/b.txt && cat /hard/b.txt");
+			assert.equal(r.code, 0, r.err);
+			assert.deepEqual(r.out.split("\n").slice(0, 2), ["2", "same"], "the guest sees one file with two names");
+			assert.equal(lstatSync(path.join(dir, "b.txt")).ino, lstatSync(path.join(dir, "a.txt")).ino, "one inode on the host");
 		});
 
 		test("vm.mount() and unmount() at runtime: nodeFs (symlinks stay links, ls -i matches stat, names that are not UTF-8 left out), busy paths", async () => {

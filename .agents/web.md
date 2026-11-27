@@ -55,7 +55,8 @@ their top):
   tabs), `wterms.ts` (terminals 1-9), `bottom.ts` (keeps a terminal at
   its bottom when it gets shorter), `autohide.ts` (the console minimizing
   itself after boot), `sysapps.ts` (the Settings and System windows),
-  `launcher.ts` (how an app runs), `installer.ts` (an app's install, out
+  `launcher.ts` (how an app runs), `docs.ts` (the Docs window: the docs
+  site in a credentialless iframe, in the page's theme), `installer.ts` (an app's install, out
   of sight), `showcase.ts`.
 - `apps/`: the launcher's apps (Launcher, below); `apps/sdlwl.ts`,
   `apps/xkms.ts` and `apps/xwl.ts` are what the SDL Wayland games, the
@@ -73,7 +74,7 @@ their top):
   system apps' portals and frame), `Settings.tsx`, `Options.tsx`,
   `DesktopSettings.tsx`, `SystemInfo.tsx`, `Overview.tsx`, `About.tsx`,
   `Display.tsx` and `Pad.tsx` (the display's content: rotation, mouse and
-  touch input, touch controls), `Preview.tsx` (the Browser's content),
+  touch input, touch controls), `Preview.tsx` (the Browser's content), `Docs.tsx` (the Docs window's),
   `WaylandOutput.tsx`, `Dialog.tsx`, `Overlays.tsx` (the confirm and paste
   dialogs, the Resume card, the toast), `icons.tsx`.
 
@@ -122,44 +123,28 @@ deploying the page needs no kernel toolchain.
      (`kernel/build.sh distro`; both from `kernel/build.sh all`).
   3. Else the newest non-draft release of `pithings/unkernel`
      (`.github/workflows/release.yml`; `KW_KERNEL_RELEASE=<tag>` picks
-     one), which must carry `unkernel.wasm`, `distros.json` and every image
-     `distros.json` names. A release without them (every release before
-     the base bundle: `unkernel-alpine.wasm` only) fails the build with
-     what to do: build locally (`kernel/build.sh all`), cut a release, or
-     name a release that has them. So a deploy (Vercel) and CI ship a
-     release, never a local build.
+     one), which must carry `page.json` (`web/scripts/page-assets.ts`, which
+     the workflow runs). A release without it (every one before
+     v0.2.0-261127-3b71fa5) fails the build with what to do: build locally
+     (`kernel/build.sh all`), cut a release, or name a release that has
+     it. So a deploy (Vercel) and CI ship a release, never a local build.
   1 and 2 show as "local build" in About (Settings), 3 as the release's tag.
-- A release is downloaded at build time (the dev server only when it has no
-  copy yet, and then without a network check), because GitHub serves
-  release assets without CORS (both the `github.com` redirect and
-  `release-assets.githubusercontent.com`), so the browser cannot fetch
-  them, and CDNs such as jsDelivr only serve files from the git tree. The
-  copy is `web/kernel/release/` (gitignored: `unkernel.wasm`,
-  `distros.json`, the images, `release.json` with the tag and every file's
-  sha256). Everything is checked in a temporary directory before it
-  replaces that copy (a rename), so a refused or broken release leaves
-  `web/kernel/` as it was: `distros.json` first (its `abi` must be
-  `include/kw_emu.h`'s `KW_ABI_VERSION`, its entries well formed), then
-  `unkernel.wasm` (the API's sha256 digest where there is one, wasm magic,
-  its own ABI from `kernelInfo()` in `kernel/tools/bundle.mjs`, its base
-  id against `distros.json`'s `base`, `bundleInfo()` in
-  `guest/tools/distros-json.mjs`), then each image (size and sha256 from
-  `distros.json`, and the API's digest). An image the copy already has
-  with that sha256 is reused, and a build whose newest release is the
-  copy's downloads nothing. The GitHub API gives the newest release and the
-  digests; without `GITHUB_TOKEN` (or `GH_TOKEN`) it allows 60 requests an
-  hour per IP, so on any API failure the build reads the newest tag from
-  `releases.atom` and downloads from the usual URLs (no digests; the
-  sha256 in `distros.json` still checks the images). If GitHub cannot be
-  reached, a build keeps the copy (when it is the tag asked for).
-  `KW_GITHUB_API` and `KW_GITHUB` replace `https://api.github.com` and
-  `https://github.com`, for a stand-in server. Checked 2026-11-19 against
-  such a stand-in: a complete release built and booted (Alpine, Debian),
-  a second build downloaded nothing, and a release without
-  `distros.json`, one without an image, one whose `distros.json` says
-  another ABI and one with a wrong image sha256 each failed with
-  `web/kernel/` unchanged; the real newest release (v0.1.0-261117-0e4b2ec)
-  fails with that message.
+- A release: the build (or a dev server, when it starts) downloads only
+  `page.json` and the page loads everything from the release mirror,
+  `https://mirror.unkernel.dev/github/pithings/unkernel/releases/download/<tag>/<file>`
+  (`KW_MIRROR=<url>` another base), because GitHub serves release assets
+  without CORS and the mirror with: Range, one ETag on 200 and 206,
+  immutable, for the origins it knows (unkernel.dev, localhost, LAN
+  addresses, `*.vercel.app`). The kernels and the Vulkan translator are
+  their `.wasm.gz` (the mirror sends files as they are; the SDK gunzips a
+  body that starts with gzip's magic, `js/core/load.ts`), the GL renderer
+  and the images as they are, and nothing goes into the output;
+  `page.json`'s ABI must be this checkout's. The GitHub API gives the
+  newest release (60 requests an hour per IP without `GITHUB_TOKEN` or
+  `GH_TOKEN`; on any API failure the build follows `github.com`'s
+  `/releases/latest` redirect). `KW_GITHUB_API` and `KW_GITHUB` replace
+  `https://api.github.com` and `https://github.com`, for a stand-in
+  server. The hashed assets and `/distros/` below are local builds' only.
 - The kernel must match the page: a local base bundle whose kwemu ABI is
   not `KW_ABI_VERSION` only gets a warning, a release is refused (above).
   The page's texts and apps (the Ubuntu app's arm64 tarball, the
@@ -265,12 +250,11 @@ deploying the page needs no kernel toolchain.
   below), optional, picked with the kernel (`withGl()` in
   `web/scripts/kernel.ts`): `KW_GL=<dir>` (`KW_GL=0`: none), else with a
   local kernel `vendor/build/gl-wasm/` (`gl/wasm/build.sh`), else the
-  release's `virgl.mjs` and `virgl.wasm` assets (the release workflow
-  attaches them; a release without them, every one before guest GL, gives
-  none and the page builds without GL: `release.json`'s `gl` is null). The
-  build log's `GL renderer:` line says which. `virtual:unkernel-kernel`'s
+  release's on the mirror (`page.json`'s `gl`; none there, and the page
+  builds without GL). The build log's `GL renderer:` line says which. `virtual:unkernel-kernel`'s
   `glUrl` (null without one; `src/sdk.ts` passes it to `webPlatform()`):
-  in a build both files are emitted under fixed names into
+  a release's is the mirror's `virgl.mjs`; a local one's, in a build,
+  both files emitted under fixed names into
   `/assets/virgl-<16 hex digits of their sha256>/` (virgl.mjs loads
   `./virgl.wasm` next to itself, so neither may be renamed alone); the dev
   server answers `/_gl/virgl.mjs` and `/_gl/virgl.wasm` itself (`serveGl()`,
@@ -279,11 +263,13 @@ deploying the page needs no kernel toolchain.
   (the SDK imports the module then; Guest GL, below).
 - `web/src/sdk.ts` imports `js/core/index.ts`, `js/web/memory.ts` and
   `js/web/platform.ts`, not `js/web.ts`, whose own bundled kernel would
-  become a second 10 MB asset. Its `kernelUrl` is a hashed Vite asset,
-  which the Node server sends precompressed (br, zstd, gzip). Compressed
-  responses have no decoded length, so there is no download percentage.
+  become a second 10 MB asset. Its `kernelUrl` is a release's
+  `unkernel-up.wasm.gz` on the mirror (the download percentage counts its
+  compressed bytes), or with a local build a hashed Vite asset, which the
+  Node server sends precompressed (br, zstd, gzip); compressed responses
+  have no decoded length, so that has no download percentage.
 - `vite.config.ts` keeps the dev server from watching `.output/`,
-  `.vercel/`, `kernel/release/` and `kernel/page/`: a page build rewrites
+  `.vercel/` and `kernel/page/`: a page build rewrites
   `index.html` there, which would reload an open dev page and end its VM.
 
 ## Rules
@@ -591,8 +577,9 @@ deploying the page needs no kernel toolchain.
   tile per other open window (`#dock-terminal-K`, `#dock-display`,
   `#dock-preview`, ...), and while wland's relay is connected
   `#dock-wayland` (Ctrl-A w). Pins (`pins.ts`): localStorage `kw.pins`, an
-  ordered list of app ids and `group:<id>` (by default Terminal and
-  Settings), changed from the
+  ordered list of app ids and `group:<id>` (by default Terminal, Settings
+  and Docs; a default added later, Docs, goes into a stored list once,
+  `kw.pins-added`), changed from the
   tiles' and the launcher's menus (Keep in Dock, Remove from Dock, Move
   Left, Move Right); an entry the registry no longer has is kept but not
   shown. A pinned app's tile stands for its window (`appwindows.ts`
@@ -868,8 +855,7 @@ external buffer), else as wl_shm windows (frames read back).
 - The translator is picked like the GL renderer (`withVk()` in
   `web/scripts/kernel.ts`): `KW_VK=<dir>` (`KW_VK=0`: none), else with a
   local kernel `vendor/build/vk/kwvk-naga.wasm` (`vk/naga/build.sh`), else
-  the release's `kwvk-naga.wasm` asset (the release workflow builds and
-  attaches it; `release.json`'s `vk`). The dev server answers
+  the release's `kwvk-naga.wasm.gz` on the mirror (`page.json`'s `vk`). The dev server answers
   `/_vk/kwvk-naga.wasm` (`serveGl()`), a build emits
   `/assets/kwvk-naga-<16 hex digits of its sha256>.wasm`;
   `virtual:unkernel-kernel`'s `vkShaderUrl`, which `src/sdk.ts` passes to
@@ -900,11 +886,9 @@ external buffer), else as wl_shm windows (frames read back).
   `vkd3d-demos` (vkd3d 1.2: `/usr/bin/vkd3d-gears`, `vkd3d-triangle`;
   with libvkd3d1, libvkd3d-shader1 and libvkd3d-utils1 about 230 kB to
   download, 880 KiB installed) and the Xwayland packages (`xwl.ts`): the
-  demos are xcb only, so each runs on a rootful Xwayland of its window's
-  size (300x300, 640x480) with no window manager (`XWL_NO_WM=1`), its
-  frames read back and put with XPutImage (vk.md, Presentation). The
-  gears' X screen is black (`gears.sh`), since the page's window for it
-  is 320 wide. vkd3d makes four pipelines at start-up that WebGPU cannot
+  demos are xcb only, so each window is a window of the page through
+  xwayland-satellite, its frames read back and put with XPutImage
+  (vk.md, Presentation). vkd3d makes four pipelines at start-up that WebGPU cannot
   run (texel buffers, 1D-array storage images) and the demos never bind:
   kwvk prints a "cannot run on WebGPU" line for each, and the row counts
   them as renderer errors; the README they print first says these are
@@ -1432,8 +1416,10 @@ answered at the kernel's next yield.
   mesa-utils; `needs.wayland`) runs `es2gears_wayland` after `eglinfo -B
   -p wayland`; its README suggests glmark2-es2-wayland and
   gtk4-widget-factory (GTK 4). Other Wayland apps are in the Browsers,
-  Desktop, Games, Media and Tools groups: SDL games (what they share: `apps/sdlwl.ts`), X11 apps in
-  one rootful Xwayland window with twm (`apps/xwl.ts`). Started from the
+  Desktop, Games, Media and Tools groups: SDL games (what they share: `apps/sdlwl.ts`), X11 apps
+  each a window of its own through xwayland-satellite (Fedora 43's
+  aarch64 build; `apps/xwl.ts`), except Xfce's, one rootful Xwayland
+  window (`XWL_ROOTFUL`). Started from the
   launcher, a Wayland app's terminal is its log (`launcher.ts`): its tab
   opens selected, as any app's, and shows until the app's window maps and
   takes the focus (with `terminal: "window"` its own Terminal window is

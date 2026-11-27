@@ -95,8 +95,14 @@ with one floor: an image from before kwbox does not boot on a base with it
   closes the waiting apps at once), and where `/dev/dri/renderD128` exists
   `--dmabuf virtgpu:/dev/dri/renderD128` (GL apps by GPU resource; a
   running relay without it gets a note on how to restart it) with
-  `--no-fence-wait`, and `--external-buffers` (Vulkan apps' swapchain
-  images by id; vk.md, Presentation). `wland --boot` (the layer's rc, as root, with
+  `--no-fence-wait`, `--external-buffers` (Vulkan apps' swapchain
+  images by id; vk.md, Presentation), and where the image has
+  `/usr/lib/kw/xwayland-satellite` and `/tmp/.X11-unix` is there (the
+  boot makes it) `--xwayland <it> --lodpi --xwayland-display 1` (feature
+  `lodpi`: the relay holds X display :1, :0 being the KMS Xorg's, and
+  starts satellite for the first X client on its scale-1 socket
+  `wayland-0-lodpi`; it writes the display to `wayland-0.x11`, which
+  `kw-wayland.sh` exports as `DISPLAY` where `/usr/bin/Xwayland` exists). `wland --boot` (the layer's rc, as root, with
   `kw.wayland=1` on the command line: the page's boot) starts it for the
   image's user (`kw.user=`, else `user`, else root, as `kwtty login`
   picks), through busybox `su`, after making `/run/user/UID` (0700, the
@@ -379,9 +385,14 @@ layer: boot to a prompt 0.25 s (Alpine) and 0.32 s (Debian) from
   image only; the page's boot (`kw.wayland=1`) reads it, and the build's
   traced boots boot as the page does (`KW_TRACE_BOOT` in
   `guest/lib/image.sh`), so it is in the boot set.
+  `/usr/lib/kw/xwayland-satellite` (pins.sh `XWS_*`: Fedora 43's
+  aarch64 build, newest glibc symbol 2.34, taken out of the RPM by
+  `tools/rpmfile.py`) is for the relay's X display; Xwayland is not in
+  the image (215 MiB installed with Mesa).
   `DEBIAN_PACKAGES` in build.sh (curl, ca-certificates, unzip, dbus-daemon
   for session buses, which starts nothing at boot: kw-init makes its
-  machine id, which the image leaves out, once per machine) are
+  machine id, which the image leaves out, once per machine;
+  libxcb-cursor0 and libfontconfig1 for satellite) are
   installed at build time by the image's apt in the same build VM, from
   .debs the host fetches from snapshot.debian.org (checked against the
   baked lists); the install's changes to the overlay's upper layer are
@@ -402,6 +413,10 @@ layer: boot to a prompt 0.25 s (Alpine) and 0.32 s (Debian) from
   The user's `~/.bashrc` (from `/etc/skel`, whose two prompt lines the
   build makes no-ops) leaves the prompt to kw-prompt.sh; the build adds
   the group input (gid 101), which udev's package would.
+- **Foreign binaries (Debian)**: x86_64 and i386 run through box64;
+  kw-init registers both ELF types with the interpreter
+  `/usr/local/libexec/kw-binfmt`, which installs box64 and the
+  architecture's libc6, libgcc-s1 and libstdc++6 on first use (x64.md).
 - **Docker (Debian)**: `/usr/local/bin/docker` (ahead of `/usr/bin` on
   PATH, run for every call, described at its top) installs docker.io,
   docker-cli (a Recommends in trixie) and crun on first use (apt-get,

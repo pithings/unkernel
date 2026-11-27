@@ -4,6 +4,8 @@
 // around kwvk-naga.wasm (vk/naga/, naga plus the binding rules of
 // vk/PROTOCOL.md "Shaders and coordinates"). Runs in browsers and Node.
 
+import { gunzipBytes } from "./load.ts";
+
 export interface VkShaderOpts {
 	stage: "vertex" | "fragment" | "compute";
 	entryPoint: string;
@@ -91,7 +93,9 @@ async function wasmBytes(src: BufferSource | Response | Promise<Response> | URL 
 }
 
 export async function loadVkShader(wasm: BufferSource | Response | Promise<Response> | URL | string): Promise<VkShaderTranslator> {
-	const module = await WebAssembly.compile(await wasmBytes(wasm));
+	// A gzipped translator (kwvk-naga.wasm.gz, as a release mirror sends it) is gunzipped first.
+	const bytes = await wasmBytes(wasm);
+	const module = await WebAssembly.compile(await gunzipBytes(ArrayBuffer.isView(bytes) ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength) : new Uint8Array(bytes)) as Uint8Array<ArrayBuffer>);
 	let ex = (await WebAssembly.instantiate(module, {})).exports as unknown as Exports;
 	const enc = new TextEncoder();
 	const dec = new TextDecoder();

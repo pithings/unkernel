@@ -18,6 +18,10 @@
 # libadwaita (which ignores that setting and would ask a settings portal,
 # and none runs) by ADW_DEBUG_COLOR_SCHEME, Chromium by its flag. Debian's chromium wrapper takes its flag from
 # /etc/chromium.d/kw-wayland instead (it clears CHROMIUM_FLAGS).
+# X apps get DISPLAY where wland's relay holds an X display (it starts
+# xwayland-satellite for the first X client, /usr/lib/kw/bin/wland, and
+# writes the display to WAYLAND_DISPLAY's socket path plus .x11) and
+# Xwayland is installed.
 # Shell builtins only: every shell start reads this. [ -O / ] is root
 # ($UID is bash's only).
 
@@ -57,4 +61,11 @@ if [ -n "${WAYLAND_DISPLAY:-}" ]; then
 	export MOZ_ENABLE_WAYLAND="${MOZ_ENABLE_WAYLAND:-1}"
 	export ELECTRON_OZONE_PLATFORM_HINT="${ELECTRON_OZONE_PLATFORM_HINT:-auto}"
 	export ADW_DEBUG_COLOR_SCHEME="${ADW_DEBUG_COLOR_SCHEME:-prefer-dark}"
+	if [ -z "${DISPLAY:-}" ] && [ -x /usr/bin/Xwayland ]; then
+		case $WAYLAND_DISPLAY in /*) _kw_x=$WAYLAND_DISPLAY.x11 ;; *) _kw_x=${XDG_RUNTIME_DIR:-}/$WAYLAND_DISPLAY.x11 ;; esac
+		if [ -r "$_kw_x" ] && read -r _kw_x < "$_kw_x"; then
+			case $_kw_x in :[0-9]*) [ -S "/tmp/.X11-unix/X${_kw_x#:}" ] && export DISPLAY="$_kw_x" ;; esac
+		fi
+		unset _kw_x
+	fi
 fi

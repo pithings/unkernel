@@ -12,7 +12,7 @@
 // http://127.0.0.1, an origin the default Wisp server accepts, with
 // ?distro=alpine (apk and wget are Alpine's; the default image is debian).
 // The console runs as the distro's user, so apk runs through sudo.
-//   wisp      the default Wisp server (wss://wisp.pi0.io:6680/): DHCP, DNS,
+//   wisp      the default Wisp server (wss://wisp.unkernel.dev:6680/): DHCP, DNS,
 //             sudo apk update + apk add, http and https wget, a large download
 //             (throughput), and an unresolvable name failing.
 //   nonet     ?wisp=0: the guest boots without a network device, and wget

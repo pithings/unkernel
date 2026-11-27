@@ -12,6 +12,9 @@
 //   `group:<id>` for a group, in one order (app ids never hold a colon).
 //   Without it (a fresh profile, or storage that refuses) the pins are
 //   DEFAULT_PINS. Another tab's change follows through the storage event.
+// - A default pin added after profiles had stored their own list (LATER_PINS:
+//   Docs) is added to the end of a stored list once, and remembered in
+//   localStorage `kw.pins-added` so that removing it again sticks.
 // - Callers deal in targets ({ app } or { group }) and the shown pins (Pin:
 //   a target and its stored key), not in the stored strings.
 // - Entries the registry no longer has, a hidden app, or a group that is not
@@ -29,8 +32,12 @@ import { store } from "./prefs.ts";
 const KEY = "pins";
 /** A stored group entry's prefix. */
 const GROUP = "group:";
-/** A fresh profile's pins: the console's Terminal and Settings. */
-export const DEFAULT_PINS: readonly string[] = ["terminal", "settings"];
+/** A fresh profile's pins: the console's Terminal, Settings and Docs. */
+export const DEFAULT_PINS: readonly string[] = ["terminal", "settings", "docs"];
+/** The default pins a stored list predates: each is added to it once (see the top of this file). */
+const LATER_PINS: readonly string[] = ["docs"];
+/** The key of the LATER_PINS already added. */
+const ADDED_KEY = "pins-added";
 
 const BY_ID = new Map(APPS.map((a) => [a.id, a]));
 const GROUP_BY_ID = new Map(GROUPS.map((g) => [g.id, g]));
@@ -76,7 +83,21 @@ interface PinsState {
 }
 const derive = (ids: string[]): PinsState => ({ ids, pins: ids.flatMap((id) => resolve(id) ?? []) });
 
-export const pins$ = createStore<PinsState>(derive(parse(store(KEY))));
+/** The stored list with the LATER_PINS it has not had yet (saved when it changes). */
+function withLater(): string[] {
+	const raw = store(KEY), ids = parse(raw);
+	let added: string[] = [];
+	try { const v: unknown = JSON.parse(store(ADDED_KEY) ?? "[]"); if (Array.isArray(v)) added = v.filter((x): x is string => typeof x === "string"); } catch { /* none */ }
+	const fresh = LATER_PINS.filter((x) => !added.includes(x));
+	if (!fresh.length) return ids;
+	store(ADDED_KEY, JSON.stringify([...added, ...fresh]));
+	if (raw === null) return ids;
+	const next = [...ids, ...fresh.filter((x) => !ids.includes(x))];
+	if (next.length !== ids.length) store(KEY, JSON.stringify(next));
+	return next;
+}
+
+export const pins$ = createStore<PinsState>(derive(withLater()));
 
 function save(ids: string[]): void {
 	pins$.set(derive(ids));

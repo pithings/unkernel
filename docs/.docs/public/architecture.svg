@@ -1,0 +1,168 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 608" width="800" height="608" role="img" aria-labelledby="title desc">
+  <!-- SPDX-License-Identifier: GPL-2.0-or-later -->
+  <!-- Copyright (C) 2026 Pooya Parsa <pooya@pi0.io> -->
+  <title id="title">How unkernel fits together</title>
+  <desc id="desc">Unmodified aarch64 Linux programs run on kwemu, an aarch64 CPU linked into the Linux 7.x kernel; both are built into unkernel.wasm, and the kernel runs as native wasm. Programs make syscalls into the kernel (MMU, cgroups, namespaces, ext4, overlayfs, FUSE, 9p, TCP/IP, TUN, vsock, ALSA, evdev, fbdev), which talks through paravirtual devices to the JavaScript SDK: console, terminals, exec, host files, disks, network, fetch, screen, input, sound, vsock, shared memory, snapshots and workers.</desc>
+  <style>
+    svg { --card: #ffffff; --stroke: #e2e8f0; --text: #0f172a; --muted: #64748b; --pill: #f8fafc; --pillstroke: #e2e8f0; --line: #94a3b8; --mod1: #eef2ff; --mod2: #f5f3ff; --modstroke: #c7d2fe; --green: #16a34a; --amber: #d97706; --blue: #2563eb; --dot: #6366f1; --shadow: 0.07; }
+    @media (prefers-color-scheme: dark) { svg { --card: #161b22; --stroke: #30363d; --text: #e6edf3; --muted: #9198a1; --pill: #0d1117; --pillstroke: #30363d; --line: #6e7681; --mod1: #1b1d3f; --mod2: #211a3d; --modstroke: #4338ca; --green: #3fb950; --amber: #f0b429; --blue: #79c0ff; --dot: #a5b4fc; --shadow: 0; } }
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; fill: var(--text); }
+    .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; }
+    .tag { font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px; }
+    .title { font-size: 17px; font-weight: 600; }
+    .sub { font-size: 13px; fill: var(--muted); }
+    .small { font-size: 11.5px; fill: var(--muted); }
+    .card { fill: var(--card); stroke: var(--stroke); stroke-width: 1; }
+    .pill { fill: var(--pill); stroke: var(--pillstroke); stroke-width: 1; }
+    .module { fill: url(#module); stroke: var(--modstroke); stroke-width: 1; }
+    .wire { stroke: var(--line); stroke-width: 1.5; fill: none; }
+    .head { stroke: var(--line); stroke-width: 1.8; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .shadow { flood-color: #0f172a; flood-opacity: var(--shadow); }
+    .mod1 { stop-color: var(--mod1); } .mod2 { stop-color: var(--mod2); }
+    .badge { stroke-width: 1; fill-opacity: 0.12; stroke-opacity: 0.45; }
+    .badge-text { font-size: 11.5px; font-weight: 600; }
+    text.green { fill: var(--green); } rect.green { fill: var(--green); stroke: var(--green); }
+    text.amber { fill: var(--amber); } rect.amber { fill: var(--amber); stroke: var(--amber); }
+    text.blue { fill: var(--blue); } rect.blue { fill: var(--blue); stroke: var(--blue); }
+    .dot { fill: var(--dot); }
+    @media (prefers-reduced-motion: reduce) { .dot { display: none; } }
+  </style>
+  <defs>
+    <filter id="shadow" x="-5%" y="-10%" width="110%" height="130%">
+      <feDropShadow class="shadow" dx="0" dy="1" stdDeviation="2"/>
+    </filter>
+    <linearGradient id="module" x1="0" y1="0" x2="1" y2="1">
+      <stop class="mod1" offset="0"/><stop class="mod2" offset="1"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path class="head" d="M1,1 L9,5 L1,9"/>
+    </marker>
+  </defs>
+
+  <!-- User space -->
+  <rect class="card" x="40" y="20" width="720" height="86" rx="14" filter="url(#shadow)"/>
+  <text class="tag green" x="400.0" y="48" text-anchor="middle">USER SPACE</text>
+  <text class="title" x="400.0" y="72" text-anchor="middle">Linux programs</text>
+  <text class="sub" x="400.0" y="92" text-anchor="middle">unmodified aarch64 binaries</text>
+
+  <!-- unkernel.wasm -->
+  <rect class="module" x="40" y="146" width="720" height="270" rx="16"/>
+  <text class="title mono" x="736" y="186" font-size="16" text-anchor="end">unkernel.wasm</text>
+  <rect class="card" x="64" y="212" width="276" height="182" rx="12" filter="url(#shadow)"/>
+  <text class="tag amber" x="86" y="240">USER-MODE CPU</text>
+  <text class="title" x="86" y="264">kwemu</text>
+  <text class="sub" x="86" y="288">aarch64 CPU written in Zig</text>
+  <text class="sub" x="86" y="308">ARMv8.0-A + AES, SHA, CRC32</text>
+  <text class="sub" x="86" y="328">an interpreter (JIT to come)</text>
+  <text class="sub" x="86" y="348">walks the kernel's page tables</text>
+  <rect class="badge amber" x="205" y="226" width="119" height="22" rx="11"/>
+  <text class="badge-text amber" x="264.5" y="241" text-anchor="middle">emulated + JIT</text>
+  <rect class="card" x="412" y="212" width="324" height="182" rx="12" filter="url(#shadow)"/>
+  <text class="tag blue" x="434" y="240">KERNEL</text>
+  <text class="title" x="434" y="264">Linux 7.x</text>
+  <rect class="badge green" x="622" y="226" width="98" height="22" rx="11"/>
+  <text class="badge-text green" x="671.0" y="241" text-anchor="middle">native wasm</text>
+  <rect class="pill" x="434" y="278" width="34" height="21" rx="6"/>
+  <text class="mono" x="451.0" y="292.5" font-size="11" text-anchor="middle">MMU</text>
+  <rect class="pill" x="474" y="278" width="60" height="21" rx="6"/>
+  <text class="mono" x="504.0" y="292.5" font-size="11" text-anchor="middle">cgroups</text>
+  <rect class="pill" x="540" y="278" width="80" height="21" rx="6"/>
+  <text class="mono" x="580.0" y="292.5" font-size="11" text-anchor="middle">namespaces</text>
+  <rect class="pill" x="626" y="278" width="87" height="21" rx="6"/>
+  <text class="mono" x="669.5" y="292.5" font-size="11" text-anchor="middle">userfaultfd</text>
+  <rect class="pill" x="434" y="305" width="40" height="21" rx="6"/>
+  <text class="mono" x="454.0" y="319.5" font-size="11" text-anchor="middle">ext4</text>
+  <rect class="pill" x="480" y="305" width="73" height="21" rx="6"/>
+  <text class="mono" x="516.5" y="319.5" font-size="11" text-anchor="middle">overlayfs</text>
+  <rect class="pill" x="559" y="305" width="47" height="21" rx="6"/>
+  <text class="mono" x="582.5" y="319.5" font-size="11" text-anchor="middle">tmpfs</text>
+  <rect class="pill" x="612" y="305" width="40" height="21" rx="6"/>
+  <text class="mono" x="632.0" y="319.5" font-size="11" text-anchor="middle">FUSE</text>
+  <rect class="pill" x="658" y="305" width="27" height="21" rx="6"/>
+  <text class="mono" x="671.5" y="319.5" font-size="11" text-anchor="middle">9p</text>
+  <rect class="pill" x="434" y="332" width="40" height="21" rx="6"/>
+  <text class="mono" x="454.0" y="346.5" font-size="11" text-anchor="middle">loop</text>
+  <rect class="pill" x="480" y="332" width="67" height="21" rx="6"/>
+  <text class="mono" x="513.5" y="346.5" font-size="11" text-anchor="middle">fanotify</text>
+  <rect class="pill" x="553" y="332" width="54" height="21" rx="6"/>
+  <text class="mono" x="580.0" y="346.5" font-size="11" text-anchor="middle">TCP/IP</text>
+  <rect class="pill" x="613" y="332" width="34" height="21" rx="6"/>
+  <text class="mono" x="630.0" y="346.5" font-size="11" text-anchor="middle">TUN</text>
+  <rect class="pill" x="434" y="359" width="47" height="21" rx="6"/>
+  <text class="mono" x="457.5" y="373.5" font-size="11" text-anchor="middle">vsock</text>
+  <rect class="pill" x="487" y="359" width="40" height="21" rx="6"/>
+  <text class="mono" x="507.0" y="373.5" font-size="11" text-anchor="middle">ALSA</text>
+  <rect class="pill" x="533" y="359" width="47" height="21" rx="6"/>
+  <text class="mono" x="556.5" y="373.5" font-size="11" text-anchor="middle">evdev</text>
+  <rect class="pill" x="586" y="359" width="47" height="21" rx="6"/>
+  <text class="mono" x="609.5" y="373.5" font-size="11" text-anchor="middle">fbdev</text>
+  <line class="wire" x1="348" y1="256" x2="404" y2="256" marker-end="url(#arrow)"/>
+  <text class="small" x="376.0" y="248" text-anchor="middle">syscalls</text>
+  <line class="wire" x1="404" y1="284" x2="348" y2="284" marker-end="url(#arrow)"/>
+  <text class="small" x="376.0" y="302" text-anchor="middle">return</text>
+  <line class="wire" x1="202.0" y1="108" x2="202.0" y2="209" marker-end="url(#arrow)"/>
+  <rect class="pill" x="171.0" y="115" width="62" height="22" rx="11"/>
+  <text class="small" x="202.0" y="130" text-anchor="middle">run on</text>
+  <line class="wire" x1="574.0" y1="397" x2="574.0" y2="453" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  <rect class="pill" x="500.5" y="425" width="147" height="22" rx="11"/>
+  <text class="small" x="574.0" y="440" text-anchor="middle">paravirtual devices</text>
+
+  <!-- SDK -->
+  <rect class="card" x="40" y="456" width="720" height="132" rx="14" filter="url(#shadow)"/>
+  <text class="title" x="400.0" y="488" text-anchor="middle">JavaScript SDK</text>
+  <rect class="pill" x="64.0" y="502" width="90.0" height="30" rx="8"/>
+  <text x="109.0" y="521" font-size="13" text-anchor="middle">console</text>
+  <rect class="pill" x="161.0" y="502" width="90.0" height="30" rx="8"/>
+  <text x="206.0" y="521" font-size="13" text-anchor="middle">terminals</text>
+  <rect class="pill" x="258.0" y="502" width="90.0" height="30" rx="8"/>
+  <text x="303.0" y="521" font-size="13" text-anchor="middle">exec</text>
+  <rect class="pill" x="355.0" y="502" width="90.0" height="30" rx="8"/>
+  <text x="400.0" y="521" font-size="13" text-anchor="middle">host files</text>
+  <rect class="pill" x="452.0" y="502" width="90.0" height="30" rx="8"/>
+  <text x="497.0" y="521" font-size="13" text-anchor="middle">disks</text>
+  <rect class="pill" x="549.0" y="502" width="90.0" height="30" rx="8"/>
+  <text x="594.0" y="521" font-size="13" text-anchor="middle">network</text>
+  <rect class="pill" x="646.0" y="502" width="90.0" height="30" rx="8"/>
+  <text x="691.0" y="521" font-size="13" text-anchor="middle">fetch</text>
+  <rect class="pill" x="64.0" y="540" width="90.0" height="30" rx="8"/>
+  <text x="109.0" y="559" font-size="13" text-anchor="middle">screen</text>
+  <rect class="pill" x="161.0" y="540" width="90.0" height="30" rx="8"/>
+  <text x="206.0" y="559" font-size="13" text-anchor="middle">input</text>
+  <rect class="pill" x="258.0" y="540" width="90.0" height="30" rx="8"/>
+  <text x="303.0" y="559" font-size="13" text-anchor="middle">sound</text>
+  <rect class="pill" x="355.0" y="540" width="90.0" height="30" rx="8"/>
+  <text x="400.0" y="559" font-size="13" text-anchor="middle">vsock</text>
+  <rect class="pill" x="452.0" y="540" width="90.0" height="30" rx="8"/>
+  <text x="497.0" y="559" font-size="13" text-anchor="middle">shm</text>
+  <rect class="pill" x="549.0" y="540" width="90.0" height="30" rx="8"/>
+  <text x="594.0" y="559" font-size="13" text-anchor="middle">snapshots</text>
+  <rect class="pill" x="646.0" y="540" width="90.0" height="30" rx="8"/>
+  <text x="691.0" y="559" font-size="13" text-anchor="middle">worker</text>
+
+  <!-- flow -->
+  <g class="dot" opacity="0">
+    <circle r="7" fill-opacity="0.22"/><circle r="3.5"/>
+    <animateMotion path="M202.0,110 L202.0,204" keyPoints="0;0;1;1" keyTimes="0;0.0;0.16;1" calcMode="linear" dur="4.5s" begin="0.5s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.0;0.02;0.14;0.16;1" dur="4.5s" begin="0.5s" repeatCount="indefinite"/>
+  </g>
+  <g class="dot" opacity="0">
+    <circle r="7" fill-opacity="0.22"/><circle r="3.5"/>
+    <animateMotion path="M350,256 L396,256" keyPoints="0;0;1;1" keyTimes="0;0.2;0.36;1" calcMode="linear" dur="4.5s" begin="0.5s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.2;0.22;0.34;0.36;1" dur="4.5s" begin="0.5s" repeatCount="indefinite"/>
+  </g>
+  <g class="dot" opacity="0">
+    <circle r="7" fill-opacity="0.22"/><circle r="3.5"/>
+    <animateMotion path="M574.0,402 L574.0,448" keyPoints="0;0;1;1" keyTimes="0;0.4;0.56;1" calcMode="linear" dur="4.5s" begin="0.5s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.4;0.42;0.54;0.56;1" dur="4.5s" begin="0.5s" repeatCount="indefinite"/>
+  </g>
+  <g class="dot" opacity="0">
+    <circle r="7" fill-opacity="0.22"/><circle r="3.5"/>
+    <animateMotion path="M574.0,448 L574.0,402" keyPoints="0;0;1;1" keyTimes="0;0.62;0.78;1" calcMode="linear" dur="4.5s" begin="0.5s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.62;0.64;0.76;0.78;1" dur="4.5s" begin="0.5s" repeatCount="indefinite"/>
+  </g>
+  <g class="dot" opacity="0">
+    <circle r="7" fill-opacity="0.22"/><circle r="3.5"/>
+    <animateMotion path="M402,284 L356,284" keyPoints="0;0;1;1" keyTimes="0;0.82;0.98;1" calcMode="linear" dur="4.5s" begin="0.5s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.82;0.84;0.96;0.98;1" dur="4.5s" begin="0.5s" repeatCount="indefinite"/>
+  </g>
+</svg>

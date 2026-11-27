@@ -14,8 +14,8 @@
 // KW_DISTROS give the base bundle and the images; else a local build
 // (vendor/build) when there is one and it may be used (not where CI or
 // VERCEL is set, unless KW_LOCAL=1; KW_LOCAL=0 never); else the newest
-// GitHub release (KW_KERNEL_RELEASE=<tag>: that one), downloaded into
-// web/kernel/release/; GITHUB_TOKEN for the API.
+// GitHub release (KW_KERNEL_RELEASE=<tag>: that one), whose files the page
+// loads from the release mirror (KW_MIRROR); GITHUB_TOKEN for the API.
 //
 // The guest GL renderer (virgl.mjs and virgl.wasm, scripts/kernel.ts; only
 // with the page's GL option are they fetched): the dev server answers
@@ -25,6 +25,10 @@
 // page's Vulkan option, on the guest's first Vulkan instance) the same way:
 // /_vk/kwvk-naga.wasm in dev (serveGl()), /assets/kwvk-naga-<sha256
 // prefix>.wasm in a build.
+//
+// A release is loaded from the release mirror instead (scripts/kernel.ts):
+// the kernels, the GL renderer, the Vulkan translator and the images are
+// the mirror's URLs, and nothing is emitted or copied.
 //
 // The images: the dev server answers /distros/<name>.erofs itself
 // (serveDistros(), revalidated: a local image is rebuilt in place); a build
@@ -169,7 +173,7 @@ export default defineConfig({
 		headers: { "cross-origin-opener-policy": "same-origin", "cross-origin-embedder-policy": "require-corp" },
 		// A page build's output (its index.html) and the kernel files: a change
 		// there must not reload an open dev page, which would end its VM.
-		watch: { ignored: ["**/.output/**", "**/.vercel/**", "**/kernel/release/**", "**/kernel/page/**"] },
+		watch: { ignored: ["**/.output/**", "**/.vercel/**", "**/kernel/page/**"] },
 	},
 	build: { target: "esnext" },
 	// profile.html: the defaults profiler (src/profile.ts), and smp-probe.html:
@@ -204,6 +208,7 @@ export default defineConfig({
 				// image (kernel/build.sh distro): the list is read again on the next
 				// page load.
 				void pageSource(true).then((s) => {
+					if (s.remote) return; // the mirror's files: nothing to watch
 					const images = s.distros.map((d) => d.file);
 					server.watcher.add([s.base, ...images]);
 					const onFile = (file: string) => {
@@ -237,7 +242,11 @@ export default defineConfig({
 				const dev = this.environment.mode === "dev";
 				const s = await pageSource(dev);
 				let up: string, smp: string;
-				if (dev) {
+				const abs = (u: string) => `new URL(${JSON.stringify(u)})`;
+				if (s.remote) {
+					up = abs(s.remote.kernel);
+					smp = s.remote.kernelSmp ? abs(s.remote.kernelSmp) : "null";
+				} else if (dev) {
 					const files = await splitBase(s.base);
 					up = `new URL(${JSON.stringify(`/@fs${files.up}`)}, import.meta.url)`;
 					smp = files.smp ? `new URL(${JSON.stringify(`/@fs${files.smp}`)}, import.meta.url)` : "null";
@@ -250,7 +259,8 @@ export default defineConfig({
 				}
 				let gl = "null";
 				// Against the location, not import.meta.url, which Vite would turn into an /@fs/ path.
-				if (s.gl && dev) gl = `new URL("/_gl/${GL_FILES[0]}", globalThis.location.href)`;
+				if (!s.gl && s.remote?.gl) gl = abs(s.remote.gl);
+				else if (s.gl && dev) gl = `new URL("/_gl/${GL_FILES[0]}", globalThis.location.href)`;
 				else if (s.gl) {
 					// Fixed names in a directory named by their content: virgl.mjs loads ./virgl.wasm.
 					const dir = `assets/virgl-${s.gl.sha256.slice(0, 16)}`;
@@ -259,7 +269,8 @@ export default defineConfig({
 					gl = `new URL(import.meta.ROLLUP_FILE_URL_${ref}, import.meta.url)`;
 				}
 				let vk = "null";
-				if (s.vk && dev) vk = `new URL("/_vk/${VK_FILE}", globalThis.location.href)`;
+				if (!s.vk && s.remote?.vk) vk = abs(s.remote.vk);
+				else if (s.vk && dev) vk = `new URL("/_vk/${VK_FILE}", globalThis.location.href)`;
 				else if (s.vk) {
 					const ref = this.emitFile({ type: "asset", fileName: `assets/kwvk-naga-${s.vk.sha256.slice(0, 16)}.wasm`, source: await readFile(s.vk.wasm) });
 					vk = `new URL(import.meta.ROLLUP_FILE_URL_${ref}, import.meta.url)`;
@@ -391,6 +402,7 @@ export default defineConfig({
 					if (!output) throw new Error("[kernel] Nitro gave no output directory for the images");
 					const dir = path.join(output.publicDir, "distros");
 					await rm(dir, { recursive: true, force: true });
+					if (s.remote) return console.log(`[kernel] distro images: on the release mirror, none in the output`);
 					await mkdir(dir, { recursive: true });
 					for (const d of s.distros) {
 						const to = path.join(dir, servedName(d));

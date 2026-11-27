@@ -1900,7 +1900,7 @@ export function start(): void {
 		if (e.stageId) ui.stage(e.stageId, "fail", e.message);
 		const titles: Record<string, string> = { fetch: "Download failed", compile: "Kernel failed to compile", memory: "Not enough memory", boot: "Boot failed", terminal: "The terminal failed to start",
 			worker: "Worker mode cannot run in this browser", distro: "The distro image could not be opened" };
-		const hint = e.kind === "distro" ? `The page reads ${cfg.distro?.url ?? "the image"} from its own server with Range requests (web/scripts/kernel.ts picks the images; kernel/build.sh distro builds them). ` +
+		const hint = e.kind === "distro" ? `The page reads ${cfg.distro?.url ?? "the image"} with Range requests, from its own server or the release mirror (web/scripts/kernel.ts picks the images; kernel/build.sh distro builds them). ` +
 			"Pick another distro under Options and Reboot, or boot with ?distro=none for the base shell." : undefined;
 		ui.fail(e.kind ?? "boot", e.message, (e.cause as Error | undefined)?.stack ?? e.stack, { title: titles[e.kind ?? ""] ?? "Boot failed", ...(hint ? { hint } : {}) });
 	});

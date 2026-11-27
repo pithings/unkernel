@@ -2,7 +2,9 @@
 // Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
 // The guest's WASI programs on Node (core/wasi-exec.ts): each in a
 // worker_threads Worker running wasi-entry.ts, started by the owner of
-// vm.vsock. serveWasiPrograms() is core's with this spawner.
+// vm.vsock. serveWasiPrograms() is core's with this spawner, which also
+// gives each worker's CPU time (worker.cpuUsage(), for threaded programs'
+// process clock).
 //
 // From source, Node starts the worker from wasi-entry.ts itself. `pnpm
 // build` (build.config.ts, WORKERS) replaces the URL below (it must appear
@@ -27,6 +29,8 @@ export function spawnNodeWasi(): WasiProgramEndpoint {
 			w.on("exit", () => h.exit());
 		},
 		terminate: () => void w.terminate(),
+		// Read on the worker's thread (an interrupt, also while it computes or waits); Node 24.6 and later.
+		...(typeof w.cpuUsage === "function" && { cpuUsage: () => w.cpuUsage().then((u) => u.user + u.system) }),
 	};
 }
 

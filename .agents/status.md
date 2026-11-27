@@ -34,8 +34,8 @@ layer has kwwasi and its rc registers it; `node test/wasi-binfmt.ts
 [--worker] [--messages]` (on Alpine) installs a fresh build through a
 mount and registers it by hand if needed. It passes inline, in
 a worker and with `UNKERNEL_TEST_CPUS=2`, on the shared path and with
-`--messages` (2026-11-19, aarch64; the snapshot part with one CPU only, from
-before SMP kernels had snapshots), and the built CLI (`pnpm build`,
+`--messages`, with its file-system, clock, socket and wasi-threads checks (2026-11-27, aarch64;
+the snapshot part with one CPU only, from before SMP kernels had snapshots), and the built CLI (`pnpm build`,
 `dist/cli.mjs --wasi`, inline and `--cpus 2`) ran programs on the shared
 path (a Ctrl-C through it was tried on the message path only). Preview 0
 modules (`wasi_unstable`) run adapted (js.md): wasienv's Lua 5.4 shell
@@ -126,8 +126,31 @@ Open:
 - wasi-libc's cwd is always "/" (`getcwd()`), so relative and absolute
   paths reach kwwasi alike and it guesses by what exists (js.md, Paths and
   the cwd; `KWWASI_CWD` overrides); the preopen replaces an inherited
-  descriptor 3. poll_oneoff's fd events come from a guest poll(); no
-  sockets, no `proc_raise`, no signals to the program.
+  descriptor 3. poll_oneoff's fd events come from a guest poll(); sockets
+  are only those the program inherits or `KWWASI_TCPLISTEN` opens
+  (preview 1 has no socket or connect); no `proc_raise`, no signals to the
+  program.
+- Clocks: a program's realtime and monotonic clocks are the guest's as of
+  its START (js.md, Clocks): a later `date -s`, or a guest monotonic clock
+  slewed by an NTP daemon, is not followed. Browsers have no thread CPU
+  clock: CPU time is the time since the start there. A threaded program's
+  process CPU clock read while other threads run is a round trip to the
+  owner that samples each of their workers (js.md, Clocks): medians of
+  90-155 us with two or four threads computing, 220-235 us with one,
+  120-155 us with two sleeping (inline and in a worker, Node 24.22,
+  2026-11-27), so a thread reuses the answer for 5 ms, by which the other
+  threads' share lags; a loop of reads with two threads computing took
+  0.49-0.62 us per read against 0.44-0.46 us with no other thread. `threads.wasm cpu 3` read 98% of the
+  threads' time (twice what clock 3 showed them half way) while they
+  waited and after the joins, `cpulive 2` 1.96-2.00 x the wall time.
+- wasi-threads: the test runs only Zig's std.Thread (`test/wasi/threads.zig`;
+  zig 0.16's wasi-libc has no pthreads). Rust 1.98 `wasm32-wasip1-threads`
+  programs ran by hand (std::thread and its sync types, rayon, tokio;
+  2026-11-27); wasi-sdk builds have not been tried, nor threads in a browser. A thread's
+  fd_close of the preopen or fd_renumber of it changes only that thread's
+  view of the preopens (each worker keeps its own list). A new worker per
+  thread beyond the idle ones costs a worker's start (about 20-40 ms on
+  Node).
 
 ## Roadmap
 

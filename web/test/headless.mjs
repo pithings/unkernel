@@ -144,9 +144,9 @@ const scenarios = {
 		if (!/Linux version/.test(await page.evaluate("KW.ui.diagText()"))) throw new Error("the kernel log has no \"Linux version\"");
 		console.log(`  ${s.match(/Booted in .*$/m)[0]}`);
 		const k = await page.evaluate("KW.config.kernelUrl");
-		if (!/\/unkernel(?!-smp)[^/]*\.wasm$/.test(k)) throw new Error(`the kernel is not the base bundle unkernel.wasm: ${k}`);
+		if (!/\/unkernel(?!-smp)[^/]*\.wasm(\.gz)?$/.test(k)) throw new Error(`the kernel is not the base bundle unkernel.wasm: ${k}`);
 		const distro = await page.evaluate("KW.config.distro?.url ?? ''");
-		if (!/^\/distros\/debian(-[0-9a-f]{16})?\.erofs$/.test(distro)) throw new Error(`the default distro is not the debian image: ${distro}`);
+		if (!/^(\/distros\/|https:\/\/\S+\/)debian(-[0-9a-f]{16})?\.erofs$/.test(distro)) throw new Error(`the default distro is not the debian image: ${distro}`);
 		console.log(`  kernel ${k}, distro ${distro}`);
 		// kwemu's JIT tier works here too (lowered kernel, page main thread): hot code gets compiled.
 		await page.evaluate(`globalThis.kernel.sendInput(${JSON.stringify("head -c 4000000 /dev/zero | sha256sum | cut -c1-16; echo jit-$((6*7))\r")})`);

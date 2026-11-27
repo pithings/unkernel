@@ -44,6 +44,11 @@ x86_64, riscv64, i386 and arm binaries also run, through qemu-user
 (installed the first time one starts). "kw-arch x86_64 CMD" makes
 uname report x86_64, for installers that pick their download by it.
 @end
+@if debian
+
+x86_64 and i386 binaries also run, through box64 (installed the first
+time one starts, which takes about a minute).
+@end
 
 Your changes
 ------------

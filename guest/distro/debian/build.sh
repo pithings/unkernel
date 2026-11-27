@@ -38,9 +38,15 @@
 #                             --network host; its runtime is
 #                             /usr/local/libexec/kw-docker-runtime (crun
 #                             without a device cgroup)
+#   /usr/local/libexec/kw-binfmt  binfmt_misc's interpreter for x86_64 and
+#                             i386 binaries (box64), which kw-init
+#                             registers; installs box64 on first use
 #   /usr/lib/kw/wlandr        wland's relay, a release binary pinned in
 #                             pins.sh, which the kw layer's bin/wland starts
 #                             (Wayland apps as windows in the page)
+#   /usr/lib/kw/xwayland-satellite  rootless Xwayland for wland (Fedora's
+#                             build, pinned in pins.sh), which the relay
+#                             starts for the first X client
 #   user                      the default user of the console and kwtty
 #                             sessions (uid 1000, bash, /home/user with
 #                             /etc/skel's files and the README), in sudo,
@@ -72,7 +78,7 @@ set -euo pipefail
 . "$(dirname "$0")/../../lib/env.sh"   # root, build, guest, dl, base_bundle, fetch_verified
 . "$guest/lib/stage.sh"                # distro_unpack, install_tree, install_common
 . "$guest/lib/image.sh"                # distro_images, distro_out
-. "$guest/distro/debian/pins.sh"       # DEBIAN_*, WLANDR_*
+. "$guest/distro/debian/pins.sh"       # DEBIAN_*, WLANDR_*, XWS_*
 umask 022
 here="$guest/distro/debian"
 
@@ -215,6 +221,11 @@ else
 	tar -xzf "$dl/$WLANDR_TARBALL" -O wlandr > "$stage/usr/lib/kw/wlandr"
 fi
 chmod 755 "$stage/usr/lib/kw/wlandr"
+# xwayland-satellite (pins.sh), out of Fedora's RPM: X apps as windows in
+# the page, through the relay.
+fetch_verified "$XWS_URL" "$dl/$XWS_RPM" "$XWS_SHA256"
+python3 -I "$here/tools/rpmfile.py" "$dl/$XWS_RPM" ./usr/bin/xwayland-satellite > "$stage/usr/lib/kw/xwayland-satellite"
+chmod 755 "$stage/usr/lib/kw/xwayland-satellite"
 
 # --- in the image: apt's source cache, the baked packages ----------------------------
 # The packages the image comes with, on top of the tarball's (with their
@@ -224,7 +235,9 @@ chmod 755 "$stage/usr/lib/kw/wlandr"
 # (below, and rootfs/usr/local/sbin/kw-init).
 # dbus-daemon: session buses for desktop apps (dbus-run-session); nothing
 # starts at boot (the system bus is the package dbus).
-DEBIAN_PACKAGES="curl wget ca-certificates unzip procps less vim-tiny xz-utils zstd iproute2 htop tmux sudo libatomic1 sysv-rc dbus-daemon"
+# libxcb-cursor0, libfontconfig1: xwayland-satellite's libraries (with
+# fontconfig's DejaVu fonts, about 7 MiB installed).
+DEBIAN_PACKAGES="curl wget ca-certificates unzip procps less vim-tiny xz-utils zstd iproute2 htop tmux sudo libatomic1 sysv-rc dbus-daemon libxcb-cursor0 libfontconfig1"
 # Both are made by the image's own programs: the tree as it is at that
 # point becomes a first image (erofs, uncompressed), which boots on the
 # distroless bundle (guest/tools/vm-run.ts); files come out over exec's

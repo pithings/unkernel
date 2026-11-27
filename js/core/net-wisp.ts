@@ -16,6 +16,9 @@
 //   * Wisp has no DNS. lookup() hands out stable fake addresses from
 //     198.18.0.0/15 and connect() maps them back to the name, so the server
 //     resolves it. Every name "resolves"; a bad one fails at connect time.
+//     The table keeps the most recently used names. The `lookup` option
+//     replaces all this with a real resolver (connect() sends an address
+//     it did not hand out as is).
 //   * There is no connect acknowledgement, so the guest's connect succeeds
 //     at once and a refused or unreachable host shows up as a reset.
 //   * There is no half-close: the guest's FIN is not forwarded (the stream
@@ -27,24 +30,21 @@
 
 import { UDP_QUEUE, type NetBackend, type NetConnection, type NetConnectionEvents, type NetDatagramSocket } from "./net.ts";
 
-/**
- * The default Wisp server: the project's own. Public alternatives (run by
- * third parties, who see the host names and ports the guest connects to and
- * plain-HTTP content; the guest's TLS is end to end): wss://anura.pro/,
- * wss://wisp.mercurywork.shop/. A ws:// server is blocked as mixed content
- * on an https page.
- */
-export const DEFAULT_WISP_SERVERS: readonly string[] = Object.freeze(["wss://wisp.pi0.io:6680/"]);
-
 export interface WispBackendOptions {
 	log?: (msg: string) => void;
 	/**
 	 * Extra handshake headers, e.g. `{ Origin: "http://localhost" }`. Only
 	 * runtimes whose WebSocket takes `{ headers }` (Node, Deno, Bun) send
 	 * them; in browsers, which set Origin themselves, the option is ignored.
-	 * The Node entry's wispBackend() defaults to NODE_WISP_HEADERS.
 	 */
 	headers?: Record<string, string>;
+	/**
+	 * Resolve names yourself (e.g. over DNS-over-HTTPS), with the contract of
+	 * NetBackend.lookup, instead of getting fake addresses: the guest sees
+	 * real addresses and unknown names, and connect() sends the address to
+	 * the server.
+	 */
+	lookup?: (name: string) => Promise<string[]>;
 }
 
 /** Browsers (window or worker) cannot set WebSocket handshake headers. */
@@ -98,13 +98,14 @@ interface Stream {
 
 /**
  * @param url  Wisp endpoint(s), e.g. "wss://wisp.example/" (trailing slash
- *   per the spec). Several are raced; the fastest handshake wins.
+ *   per the spec). Several are raced; the fastest handshake wins. The server
+ *   sees the host names and ports the guest connects to, and plain-HTTP
+ *   content (the guest's TLS is end to end). A ws:// server is blocked as
+ *   mixed content on an https page.
  */
 export function wispBackend(url: string | readonly string[], opts: WispBackendOptions = {}): WispBackend {
 	const urls = typeof url === "string" ? [url] : [...url];
 	const log = opts.log ?? (() => {});
-	// Logs name a default server, not its URL: logs end up in bug reports.
-	const name = (u: string) => (DEFAULT_WISP_SERVERS.includes(u) ? "the default server" : u);
 	// Node's WebSocket takes { protocols, headers } as its second argument.
 	const wsInit = opts.headers && !isBrowser() ? ({ headers: opts.headers } as unknown as string[]) : undefined;
 	let ws: WebSocket | null = null, ready: Promise<WebSocket> | null = null, failedAt = -Infinity, warned = false;
@@ -114,6 +115,8 @@ export function wispBackend(url: string | readonly string[], opts: WispBackendOp
 	const nameToIp = new Map<string, number>(), ipToName = new Map<number, string>();
 	let nextFake = 1;
 	let udpWarned = false;
+	// nameToIp is kept in order of last use (lookup or connect), oldest first.
+	const touch = (name: string, ip: number) => { nameToIp.delete(name); nameToIp.set(name, ip); };
 	let connecting: WebSocket[] = [];   // sockets racing for the handshake
 
 	// With several URLs, all are tried at once and the first to complete the
@@ -131,7 +134,7 @@ export function wispBackend(url: string | readonly string[], opts: WispBackendOp
 				clearTimeout(timer);
 				for (const s of sockets) s.close();
 				ready = null; failedAt = performance.now();
-				if (!warned) log(`[net] wisp ${urls.length > 1 ? "servers" : "server"} ${urls.map(name).join(", ")} unavailable; guest network offline`);
+				if (!warned) log(`[net] wisp ${urls.length > 1 ? "servers" : "server"} ${urls.join(", ")} unavailable; guest network offline`);
 				warned = true;
 				reject(new Error("wisp server unavailable"));
 			};
@@ -159,7 +162,7 @@ export function wispBackend(url: string | readonly string[], opts: WispBackendOp
 					initialCredit = new DataView(m.buffer).getUint32(5, true);
 					ws = s; warned = false;
 					for (const o of sockets) if (o !== s) o.close();
-					log(`[net] wisp connected: ${name(u)} (handshake ${Math.round(performance.now() - t0)} ms, buffer ${initialCredit} packets)`);
+					log(`[net] wisp connected: ${u} (handshake ${Math.round(performance.now() - t0)} ms, buffer ${initialCredit} packets)`);
 					resolve(s);
 				};
 			}
@@ -198,6 +201,7 @@ export function wispBackend(url: string | readonly string[], opts: WispBackendOp
 		const id = nextId++;
 		const udp = type === TYPE_UDP;
 		const name = isIPv4(host) ? ipToName.get(ip4(host)) ?? host : host;
+		if (name !== host) touch(name, ip4(host));
 		const st: Stream = {
 			ev, udp, credit: 0, out: [], outBytes: 0, done: false, scheduled: false, open: false,
 			closed(err) {
@@ -288,11 +292,17 @@ export function wispBackend(url: string | readonly string[], opts: WispBackendOp
 		},
 		lookup(name) {
 			if (isIPv4(name)) return Promise.resolve([name]);
+			if (opts.lookup) return opts.lookup(name);
 			let ip = nameToIp.get(name);
-			if (ip === undefined) {
-				ip = (FAKE_BASE + (nextFake++ % FAKE_SIZE)) >>> 0;
-				const old = ipToName.get(ip);
-				if (old !== undefined) nameToIp.delete(old);
+			if (ip !== undefined) touch(name, ip);
+			else {
+				// When the table is full, the least recently used name gives up its address.
+				if (nextFake < FAKE_SIZE) ip = (FAKE_BASE + nextFake++) >>> 0;
+				else {
+					const [old, oldIp] = nameToIp.entries().next().value!;
+					nameToIp.delete(old);
+					ip = oldIp;
+				}
 				nameToIp.set(name, ip);
 				ipToName.set(ip, name);
 			}

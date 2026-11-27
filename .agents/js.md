@@ -292,8 +292,9 @@ parts that are easy to get wrong.
   by path (`Session.restore()`) and sets `VsockDevice.keep`; other given
   mounts are mounted once the kernel runs. A file gone, another file now
   (another qid.path), unlinked or replaced by the guest while open
-  (`Fid.orphan`), or not opening within the request timeout leaves its fid
-  stale: its reads, writes, getattr, setattr and fsync answer ESTALE
+  (`Fid.orphan`; also when a hard link still names it, since the restore
+  opens by the fid's path), or not opening within the request timeout
+  leaves its fid stale: its reads, writes, getattr, setattr and fsync answer ESTALE
   ("Stale file handle" in the guest). A MemoryFs passed again keeps the
   guest's changes; a new one has its own content, which the guest sees
   within 1 s, as any host change. `test/9p.test.ts` saves and restores a
@@ -531,7 +532,7 @@ parts that are easy to get wrong.
   `:cpu*/`, `:webcpu*/`, `:wasi*/`, `:webwasi*/`).
   Vite's `?worker&inline` is not usable: plain Node cannot load it.
 - A worker's WebSocket sends the page's origin, so the Wisp allow list
-  works as inline; Node workers send `NODE_WISP_HEADERS`.
+  works as inline; Node sends no Origin unless the spec has `headers`.
 
 ## CPU threads (SMP kernels, `js/core/cpu.ts`)
 
@@ -744,9 +745,11 @@ parts that are easy to get wrong.
 - The owner (`wasi-exec.ts`) is wherever `vm.vsock`'s VsockHost runs: the
   kernel's thread inline, the owner's thread in worker mode and with
   several CPUs. It parses START, gets the module (below), checks its
-  imports and gives each running program a worker of its own, started by
-  the owner, not by the kernel worker, since the connection is the owner's
-  (one thread boundary per request, not two).
+  imports (WASI preview 1 and 0; for wasi-threads `wasi.thread-spawn` and
+  `env.memory`, nothing else) and gives each running program (each of its
+  threads, below) a worker of its own, started by the owner, not by the
+  kernel worker, since the connection is the owner's (one thread boundary
+  per request, not two).
   The worker (`wasi-program.ts`, `serveWasiProgram()`) gets the compiled
   `WebAssembly.Module` in its "start" message, so V8 compiles once and its
   tiered-up code serves every later run.
@@ -776,7 +779,7 @@ parts that are easy to get wrong.
   - Shared, chosen when `wasiSharedChannelAvailable()` (SharedArrayBuffer
     that can be posted, growable, and `Atomics.waitAsync`: Node; browsers
     only when cross-origin isolated): one growable SharedArrayBuffer per
-    program (`CH_*` in wasi-program.ts; 256 KiB, grown up to kwwasi's
+    program thread (`CH_*` in wasi-program.ts; 256 KiB, grown up to kwwasi's
     64 MiB frame limit). The import writes the frame there and bumps
     `CH_REQ`, spins up to 200 µs (`SPIN_MS`), then sleeps in `Atomics.wait`;
     the owner wakes on `Atomics.waitAsync` (it never blocks), writes the
@@ -795,6 +798,48 @@ parts that are easy to get wrong.
   kwwasi has read it all and replied), and reads a REPLY body straight
   into the channel, or hands the connection's own chunk on when it is
   exactly the body (messages).
+- Clocks are answered in the worker, no request each. Realtime and
+  monotonic are the guest's: START carries kwwasi's CLOCK_REALTIME and
+  CLOCK_MONOTONIC, read just before it is sent, and the owner keeps them as
+  offsets from the host's clock (`hostClockNs()`, timeOrigin + now, one
+  clock across Node's threads) that every thread of the program gets.
+  Each START arrives late by its delivery, and the guest's monotonic clock
+  is the host's plus an offset that only grows, so the owner keeps the
+  largest offset of the last 10 s per machine (`programClock()`); realtime
+  is that plus the guest's realtime minus monotonic. A running program
+  does not see a later `date -s`. Its monotonic clock lagged the guest's
+  (`clock.wasm lag`: /proc/timer_list's time between two of the program's
+  readings, so an upper bound up to 0.3 ms wide, 2026-11-27) by at most
+  0.11-0.36 ms for a first start and 0.07-0.26 ms after 20, in every mode;
+  up to 9 ms just after boot. CPU time (2, 3) is the worker
+  thread's since the program or thread started, from
+  `process.threadCpuUsage()` where the engine has it (Node; us), else the
+  time since the program (2) or the thread (3) started (browsers). A
+  threaded program's process clock adds its other threads': those that
+  returned (each sends its total with "done", which the owner adds to the
+  program's CPU words before it counts the thread out, so a join that
+  wakes before "done" still finds the thread running), and those running,
+  which the owner samples when a thread asks (H_CPU over its channel,
+  answered by the owner, not kwwasi; its answer is reused for 5 ms,
+  `CPU_ASK_MS`): `WasiProgramEndpoint.cpuUsage`, Node's
+  `worker.cpuUsage()` (24.6 and later), read on the worker's thread by an
+  interrupt, so also while it computes or waits (a wait counts nothing),
+  counted from that thread's start (`CH_CPU0`; a reused worker's earlier
+  programs do not count). A thread that is the only one running reads it
+  without asking, as a program without threads does; thread CPU time (3)
+  is always this thread's own. Without `cpuUsage` (Node before 24.6)
+  running threads count once they returned. `clock_res_get`:
+  the step performance.now() takes (sampled once per worker; browsers
+  coarsen it), 1 us for CPU time from threadCpuUsage. Unknown clock ids
+  give EINVAL in clock_time_get, clock_res_get and as poll_oneoff's event
+  error.
+- Files: `fd_allocate` is fallocate mode 0 in kwwasi (R_ALLOCATE);
+  `fd_fdstat_set_flags` changes APPEND and NONBLOCK and fails NOTSUP for a
+  DSYNC, RSYNC or SYNC state other than the descriptor's (Linux cannot
+  change them after open; wasi-libc's F_SETFL passes F_GETFL's flags
+  back, so `F_GETFL | O_NONBLOCK` works); `fd_advise` does nothing. Linux
+  errors map to WASI's (`wasiErrno()`), EIO where WASI has none. New files
+  and directories are 0666 and 0777 less the caller's umask (kwwasi's).
 - Paths and the cwd (kwwasi.c's top, `resolve()`): a WASI program has no
   cwd. wasi-libc's starts as "/" (no PWD; upstream main and zig 0.16's
   copy alike), a relative path is made absolute against it, the leading
@@ -808,7 +853,9 @@ parts that are easy to get wrong.
   whole path (else its parent) exists in only one; else the cwd. Such a
   collision, and creating an entry whose name exists only in "/" ("mkdir
   lib": "/lib", EEXIST), warn once per run on stderr. `KWWASI_CWD`: `auto`
-  (no warning), `root` (undecided collisions to "/"), `off` (descriptor 3
+  (no warning), `root` (undecided collisions to "/"), `cwd` (no guessing: "/x" absolute,
+  every other path the cwd's; for programs that keep the leading "/", as
+  Zig's std does), `off` (descriptor 3
   is "/", every path from "/"). Known wrong cases: `ls /` lists the cwd
   (the program's "/" and "." are one), a relative "tmp/x" in a cwd without
   `tmp` is "/tmp/x" (ENOENT on Linux), and an inherited descriptor 3 is
@@ -820,15 +867,49 @@ parts that are easy to get wrong.
   poll_oneoff's 56-byte subscriptions (a u64 `identifier` before the clock
   id); events, dirents, fdstat and errno are the same, and preview 0 has
   no sock_accept. `test/wasi/p0.c` (no libc) checks those three.
-- Ending: "exit" (proc_exit, return, trap 134, failed instantiation 126)
-  becomes kwwasi's EXIT; that worker is idle and is kept for the next
-  program (`idleWorkers`, default 2; a worker is reused only after its
-  program ended by itself). When the connection ends first (kwwasi killed,
-  the kernel exited or stopped) the worker is terminated at once, mid
-  computation or not. `stats`: `running` programs, live `workers` (Node:
-  until its exit event), `idle` ones, `channels` whose owner loop still
-  runs (shared path; 0 a task turn after the program ended). `close()`
-  stops listening and ends the idle workers.
+- Sockets are kwwasi's descriptors like files (kwwasi.c's top): ones the
+  program inherited (`nc -l -e` gives it a connection on 0 and 1) work with
+  sock_accept (its fdflags NONBLOCK is the new socket's), sock_recv (PEEK,
+  WAITALL, RECV_DATA_TRUNCATED), sock_send, sock_shutdown, fd_read,
+  fd_write, fd_close, poll_oneoff, fd_fdstat_set_flags, and fd_fdstat_get
+  (socket_stream or socket_dgram, from SO_TYPE, with socket rights).
+  Preview 1 has no socket, bind, listen or connect; `KWWASI_TCPLISTEN=
+  ADDR:PORT[,...]` makes kwwasi open listening TCP sockets at descriptors 4,
+  5, ... (as wasmtime's `--tcplisten`; exit 126 when one of those is already
+  open). A write to a socket whose peer went
+  away is EPIPE, not SIGPIPE.
+- Threads (wasi-threads: Rust `wasm32-wasip1-threads`, wasi-sdk
+  `wasm32-wasi-threads`, Zig's std.Thread with a shared memory): a module
+  importing `wasi.thread-spawn` must import a shared `env.memory` and export
+  `wasi_thread_start`. The owner makes the memory from the limits in the
+  module's import section (`importedMemory()`, read when it compiles: the
+  JS API reports none) and posts it to each thread's worker, which
+  instantiates the same compiled module on it; tids are kwwasi's pthreads'
+  Linux tids. Each thread has a worker, a channel and a kwwasi connection
+  of its own (`Link`; kwwasi serves each with a pthread sharing its
+  descriptors), so a thread blocked reading stdin holds up no other's
+  calls, and a program without threads pays nothing for them: thread-spawn
+  is a request (R_SPAWN) on the spawning thread's connection, kwwasi's new
+  pthread connects with THREAD (the program's token from MODULE), and the
+  owner hands that connection to its `Program`. Threads need
+  SharedArrayBuffer, so the shared path: on the message path such a module
+  (or any with a shared memory) exits 126 at its start. zig 0.16's
+  wasi-libc has only a thread stub (no C pthreads); `test/wasi/threads.zig`
+  uses std.Thread, with the no_panic handler (the default one does not
+  build for threaded wasm32-wasi) and a page-aligned allocator buffer
+  (std.Thread aligns relative to its allocation's start).
+- Ending: "exit" (proc_exit, return, trap 134, failed instantiation 126,
+  from any thread) becomes kwwasi's EXIT; that worker is idle and is kept
+  for the next program (`idleWorkers`, default 2; a worker is reused only
+  after its program or thread ended by itself), and the program's other
+  threads' workers are terminated. A thread that returned ("done") has its
+  connection closed (its pthread ends) and its worker released the same
+  way. When a connection ends first (kwwasi killed, the kernel exited or
+  stopped) every worker of the program is terminated at once, mid
+  computation or not. `stats`: `running` programs, `threads` running
+  besides them, live `workers` (Node: until its exit event), `idle` ones,
+  `channels` whose owner loop still runs (shared path; 0 a task turn after
+  the program ended). `close()` stops listening and ends the idle workers.
 - Snapshots: programs are not in them and do not hold the snapshot point
   up (no `hostBusy`, no `keep`), so the restored kernel resets kwwasi's
   connection and kwwasi exits 126 ("lost the connection to the host"); it
@@ -1154,15 +1235,22 @@ parts that are easy to get wrong.
   fid's I/O until it is clunked, so it must keep working after the path is
   renamed or removed (MemoryFs holds the node, nodeFs the FileHandle).
   Optional `create` (returns the file open), `mkdir`, `symlink`,
-  `readlink`, `remove`, `rename`, `setattr` (by path: chmod, utimes,
-  truncate by name), `statfs`, `close`. An FsError or an error with a Node
-  errno `code` answers that errno, anything else EIO plus one log line.
-  Missing methods: EROFS for changes, EOPNOTSUPP for `symlink`, mknod and
-  xattrs (kw9p mounts with `noxattr`); Tlink is always EPERM (no hard
-  links); a file without `write` is not opened for writing (EACCES);
-  Tfsync without `fsync` (a directory) succeeds. Tlcreate without O_EXCL
-  of a name that exists (the host made it after the guest's lookup) opens
-  it, honouring O_TRUNC. Writes, truncation, fsync and clunk through one
+  `readlink`, `remove`, `rename`, `link` (a hard link: a second name for a
+  regular file), `setattr` (by path: chmod, utimes, truncate by name),
+  `statfs`, `close`. An FsError or an error with a Node errno `code`
+  answers that errno, anything else EIO plus one log line. Missing
+  methods: EROFS for changes, EOPNOTSUPP for `symlink`, mknod and xattrs
+  (kw9p mounts with `noxattr`); EPERM for `link`, and for a hard link to
+  a fid walked as anything but a regular file (MemoryFs has no `link`).
+  nodeFs's `link` checks the source again itself (Darwin's link(2)
+  follows a symlink), and that every directory on both paths is one
+  (ESTALE if not), and runs alone against renames, removes and symlinks in the
+  same host directory, so the guest cannot swap a symlink in meanwhile;
+  a wait for that lock, or a link holding it, past 10 s answers EAGAIN.
+  A file without `write` is not opened for writing (EACCES); Tfsync
+  without `fsync` (a directory) succeeds. Tlcreate without O_EXCL of a
+  name that exists (the host made it after the guest's lookup) opens it,
+  honouring O_TRUNC. Writes, truncation, fsync and clunk through one
   fid run in order; everything else concurrently. A rename moves the fids
   below it. Names are made only below directory fids,
   and walks never pass a non-directory, so no path goes through a symlink.
@@ -1661,19 +1749,32 @@ parts that are easy to get wrong.
   connected `dgram` socket per UDP flow) and `dns.lookup`. With
   `hostLoopback`, 10.0.2.2 goes to the host's 127.0.0.1.
 - `wispBackend()` multiplexes connections and UDP flows (stream type 2,
-  one DATA packet per datagram, no credit) over one WebSocket to a Wisp
-  v1 server; the project's server carries UDP (2026-11-25).
-  `DEFAULT_WISP_SERVERS` is the project's `wss://wisp.pi0.io:6680/`. With several URLs, all are opened at once and
-  the first handshake wins.
-- The project's Wisp server has an allow list of Origins
-  (`http://localhost` is on it) and answers anything else, including no
-  Origin, with 404. Node's WebSocket sends no Origin, so the Node entry
-  and the CLI's `--net-wisp` send `Origin: http://localhost`
-  (`NODE_WISP_HEADERS`, overridable with `headers`; browsers ignore it).
+  one DATA packet per datagram, no credit; dropped while the WebSocket
+  buffers more than 1 MiB) over one WebSocket to a Wisp v1 server. The
+  SDK names no server: the caller passes one (the page's is
+  `web/src/net.ts` DEFAULT_WISP_SERVERS, web.md). With several URLs, all
+  are opened at once and the first handshake wins. Logs carry the URLs.
+- `headers` are sent with the handshake where the WebSocket takes them
+  (Node, Deno, Bun; browsers ignore it). Node's WebSocket sends no Origin
+  of its own, and the SDK adds none.
+- The project's Wisp server, `wss://wisp.unkernel.dev:6680/` (port 443
+  does not answer), has an allow list of Origins (the page's, and
+  `http://localhost` for the dev server) and answers anything else,
+  including no Origin, with 404. It does not carry UDP, so the page's
+  guest has none beyond DHCP and DNS.
 - Wisp has no DNS, so the guest gets stable fake addresses from
-  198.18.0.0/15 and a bad name fails at connect time. It also has no
-  connect acknowledgement (a refused connect becomes a reset), no
-  half-close, and flow control in one direction only.
+  198.18.0.0/15 and a bad name fails at connect time. The table holds
+  2^17 - 1 names and, when full, gives the least recently used name's
+  address (by lookup or connect) to the new one. The `lookup` option
+  replaces the fake table with a real resolver; connect() sends an address
+  it did not hand out to the server as is. The option is a function, so
+  the worker's `wisp` spec cannot carry it.
+- Wisp v1 also has no connect acknowledgement (a refused connect becomes
+  a reset; v2 has an extension for one), no half-close (in v2 neither;
+  CLOSE ends both directions, so
+  `end()` sends nothing: closing on the guest's FIN would lose the replies
+  of clients that read after `shutdown(SHUT_WR)`), and flow control in one
+  direction only.
 - `fetchRoutes(inner, routes)` (`net-fetch.ts`) wraps a backend: the host
   names in `routes` resolve to reserved addresses in 198.51.100.0/24, and
   port 80 on them is a minimal HTTP/1.1 server (GET and HEAD, keep-alive,
