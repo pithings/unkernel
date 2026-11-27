@@ -617,7 +617,7 @@ describe("api", { concurrency: CONCURRENCY }, () => {
 		await waitFor(PROMPT);
 		const at = s.text.length;
 		vm.write("/usr/lib/kw/net wait; wget -q -O - http://example.com/ | grep -o '<title>.*</title>'; echo wisp-done\n");
-		await waitFor(/wisp-done/, at, 90000);
+		await waitFor(/^wisp-done/m, at, 90000);
 		assert.match(s.text.slice(at), /<title>Example Domain<\/title>/, logs.join("\n"));
 		vm.write("poweroff\n");
 		assert.equal((await vm.exited).code, 0);

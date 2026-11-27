@@ -1733,7 +1733,7 @@ parts that are easy to get wrong.
   `dns.lookup`. With `hostLoopback`, 10.0.2.2 goes to the host's 127.0.0.1.
 - `wispBackend()` multiplexes connections over one WebSocket to a Wisp v1
   server. `DEFAULT_WISP_SERVERS` is the project's
-  `wss://wisp.pi0.io:6680/`. With several URLs, all are opened at once and
+  `wss://wisp.unkernel.dev:6680/` (port 443 does not answer). With several URLs, all are opened at once and
   the first handshake wins.
 - The project's Wisp server has an allow list of Origins
   (`http://localhost` is on it) and answers anything else, including no
@@ -1741,9 +1741,18 @@ parts that are easy to get wrong.
   and the CLI's `--net-wisp` send `Origin: http://localhost`
   (`NODE_WISP_HEADERS`, overridable with `headers`; browsers ignore it).
 - Wisp has no DNS, so the guest gets stable fake addresses from
-  198.18.0.0/15 and a bad name fails at connect time. It also has no
-  connect acknowledgement (a refused connect becomes a reset), no
-  half-close, and flow control in one direction only.
+  198.18.0.0/15 and a bad name fails at connect time. The table holds
+  2^17 - 1 names and, when full, gives the least recently used name's
+  address (by lookup or connect) to the new one. The `lookup` option
+  replaces the fake table with a real resolver; connect() sends an address
+  it did not hand out to the server as is. The option is a function, so
+  the worker's `wisp` spec cannot carry it.
+- Wisp v1 also has no connect acknowledgement (a refused connect becomes
+  a reset; v2 has an extension for one), no half-close (in v2 neither;
+  CLOSE ends both directions, so
+  `end()` sends nothing: closing on the guest's FIN would lose the replies
+  of clients that read after `shutdown(SHUT_WR)`), and flow control in one
+  direction only.
 - `fetchRoutes(inner, routes)` (`net-fetch.ts`) wraps a backend: the host
   names in `routes` resolve to reserved addresses in 198.51.100.0/24, and
   port 80 on them is a minimal HTTP/1.1 server (GET and HEAD, keep-alive,

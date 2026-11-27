@@ -152,6 +152,26 @@ test("Wisp backend: fake DNS, flow-controlled writes, clean and refused closes",
 	});
 });
 
+test("Wisp backend: the fake address table evicts the least recently used name; a lookup option replaces it", async () => {
+	const b = wispBackend("ws://127.0.0.1:1/");
+	const [first] = await b.lookup("n0.test");
+	const [second] = await b.lookup("n1.test");
+	for (let i = 2; i < (1 << 17) - 1; i++) await b.lookup(`n${i}.test`);   // the table is full
+	assert.deepEqual(await b.lookup("n0.test"), [first], "used again: kept");
+	assert.deepEqual(await b.lookup("new.test"), [second], "n1, the oldest, gives up its address");
+	assert.deepEqual(await b.lookup("n0.test"), [first]);
+	assert.notDeepEqual(await b.lookup("n1.test"), [second]);
+	b.close();
+
+	const real = wispBackend("ws://127.0.0.1:1/", {
+		lookup: async (n) => { if (n === "known.test") return ["192.0.2.7"]; throw Object.assign(new Error(n), { code: "ENOTFOUND" }); },
+	});
+	assert.deepEqual(await real.lookup("known.test"), ["192.0.2.7"]);
+	assert.deepEqual(await real.lookup("1.2.3.4"), ["1.2.3.4"]);
+	await assert.rejects(real.lookup("nope.test"), { code: "ENOTFOUND" });
+	real.close();
+});
+
 test("no Wisp server: TCP is reset", async () => {
 	const b = wispBackend("ws://127.0.0.1:1/");
 	const { stack, out } = mkStack(b);
