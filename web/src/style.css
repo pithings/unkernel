@@ -128,6 +128,11 @@
 	--launcher-dim: rgb(0 0 0 / 55%);
 	--launcher-panel: --alpha(var(--color-neutral-900) / 60%);
 	--launcher-panel-shadow: 0 24px 80px rgb(0 0 0 / 60%), inset 0 1px 0 rgb(255 255 255 / 6%);
+	--tone-mem: #b28cff;
+	--tone-disk: #3fcfb4;
+	--tone-net: #ff8ac6;
+	--tone-gpu: #e6c84f;
+	--tone-vk: #f0905a;
 }
 :root[data-theme="light"] {
 	color-scheme: light;
@@ -173,6 +178,11 @@
 	--launcher-dim: rgb(255 255 255 / 78%);
 	--launcher-panel: rgb(255 255 255 / 60%);
 	--launcher-panel-shadow: 0 24px 80px rgb(0 0 0 / 16%), inset 0 1px 0 rgb(255 255 255 / 70%);
+	--tone-mem: #7c3aed;
+	--tone-disk: #0f766e;
+	--tone-net: #db2777;
+	--tone-gpu: #a16207;
+	--tone-vk: #c2410c;
 }
 /* No backdrop blur: the tints alone, nearly opaque. */
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
@@ -518,6 +528,7 @@
 :root[data-term-glass="off"] #app:not(.compact) .wm-win:not([data-max]) > .wm-body[data-app="terminal"] .wterm { background: var(--term-app-bg, var(--term-bg)); }
 /* Docs: less see-through than a terminal, for its prose. */
 #app:not(.compact) .wm-win:not([data-max]) > .wm-body[data-app="docs"] { background: rgb(8 8 8 / 84%); }
+:root[data-theme="light"] #app:not(.compact) .wm-win:not([data-max]) > .wm-body[data-app="docs"] { background: rgb(255 255 255 / 88%); }
 .wm-win, .wm-title, .wm-strip, .wm-body { transition: background-color 0.18s; }
 @media (prefers-reduced-motion: reduce) { .wm-win, .wm-title, .wm-strip, .wm-body { transition: none; } }
 /* iOS zooms the page when a field under 16 px takes focus: wterm's hidden input inherits the terminal font. */

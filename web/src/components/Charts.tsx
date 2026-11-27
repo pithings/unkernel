@@ -34,14 +34,14 @@ export interface Series {
 	area?: boolean;
 }
 
-/** Each resource's colour (its charts' main series), on the black theme. */
+/** Each resource's colour (its charts' main series). */
 export const TONE = {
 	cpu: "var(--color-accent)",
-	mem: "#b28cff",
-	disk: "#3fcfb4",
-	net: "#ff8ac6",
-	gpu: "#e6c84f",
-	vk: "#f0905a",
+	mem: "var(--tone-mem)",
+	disk: "var(--tone-disk)",
+	net: "var(--tone-net)",
+	gpu: "var(--tone-gpu)",
+	vk: "var(--tone-vk)",
 } as const;
 /** The second series of a chart (out, write). */
 export const SECOND = "var(--color-muted)";

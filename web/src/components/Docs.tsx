@@ -11,7 +11,7 @@
 //   raises and focuses the window; the WM's focus moves the DOM focus to the
 //   root, and losing it gives it up, so keys reach no terminal under it.
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { DOCS_EMBED_URL, DOCS_URL, docsHome, docsNav$ } from "../docs.ts";
+import { DOCS_EMBED_URL, DOCS_URL, docsHome, docsNav$, onPageTheme, pageTheme } from "../docs.ts";
 import { useWm, wm } from "../wm.ts";
 import { DocsIcon, ExternalIcon } from "./icons.tsx";
 
@@ -24,6 +24,7 @@ const CREDENTIALLESS = { credentialless: "" } as Record<string, string>;
 
 export function Docs({ id }: { id: string }) {
 	const { nav } = useSyncExternalStore(docsNav$.subscribe, docsNav$.get);
+	const theme = useSyncExternalStore(onPageTheme, pageTheme);
 	const focused = useWm((s) => s.focused === id);
 	const [loading, setLoading] = useState(true);
 	const root = useRef<HTMLDivElement>(null);
@@ -51,7 +52,7 @@ export function Docs({ id }: { id: string }) {
 		return () => removeEventListener("blur", onBlur);
 	}, [id]);
 
-	useEffect(() => { setLoading(true); }, [nav]);
+	useEffect(() => { setLoading(true); }, [nav, theme]);
 
 	return (
 		<div id={id} ref={root} tabIndex={-1} aria-label="unkernel's documentation" className="absolute inset-0 flex flex-col outline-none">
@@ -67,7 +68,7 @@ export function Docs({ id }: { id: string }) {
 				{loading && <span aria-hidden="true" className="absolute inset-x-0 -bottom-px h-px animate-pulse bg-accent" />}
 			</div>
 			<div className="relative min-h-0 flex-1">
-				<iframe key={nav} ref={frame} id={`${id}-frame`} src={DOCS_EMBED_URL} title="unkernel's documentation" {...CREDENTIALLESS}
+				<iframe key={`${nav}-${theme}`} ref={frame} id={`${id}-frame`} src={DOCS_EMBED_URL[theme]} title="unkernel's documentation" {...CREDENTIALLESS}
 					className="absolute inset-0 h-full w-full border-0" onLoad={() => setLoading(false)} />
 			</div>
 		</div>

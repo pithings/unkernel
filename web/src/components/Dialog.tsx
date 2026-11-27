@@ -41,9 +41,9 @@ const SIZE: Record<AlertSize, string> = { alert: "", wide: "alert-wide", sheet: 
 
 const BADGES: Record<Exclude<AlertIcon, "mark">, ReactNode> = {
 	caution: <>
-		<path d="M12 2.6 22.8 21.2H1.2Z" fill="#f5a524" stroke="var(--alert-bg)" strokeWidth="1.6" strokeLinejoin="round" />
-		<path d="M12 9.2v5.2" stroke="#000" strokeWidth="2.2" strokeLinecap="round" />
-		<circle cx="12" cy="17.7" r="1.3" fill="#000" />
+		<path d="M12 2.6 22.8 21.2H1.2Z" fill="var(--color-warn)" stroke="var(--alert-bg)" strokeWidth="1.6" strokeLinejoin="round" />
+		<path d="M12 9.2v5.2" stroke="var(--color-bg)" strokeWidth="2.2" strokeLinecap="round" />
+		<circle cx="12" cy="17.7" r="1.3" fill="var(--color-bg)" />
 	</>,
 	error: <>
 		<circle cx="12" cy="12" r="10.2" fill="#e5484d" stroke="var(--alert-bg)" strokeWidth="1.6" />

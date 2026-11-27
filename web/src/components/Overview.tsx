@@ -182,8 +182,8 @@ function StateLine({ st }: { st: StatsState }) {
 // ---- boot ------------------------------------------------------------------------------------
 /** A stage's tone on the timeline: steps of the foreground, adjacent ones apart. */
 const STAGE_TONE: Record<string, string> = {
-	preflight: "rgb(237 237 237 / 30%)", kernel: "rgb(237 237 237 / 90%)", compile: "rgb(237 237 237 / 55%)",
-	memory: "rgb(237 237 237 / 35%)", boot: "rgb(237 237 237 / 75%)", userspace: "rgb(237 237 237 / 48%)",
+	preflight: faded("var(--color-fg)", 30), kernel: faded("var(--color-fg)", 90), compile: faded("var(--color-fg)", 55),
+	memory: faded("var(--color-fg)", 35), boot: faded("var(--color-fg)", 75), userspace: faded("var(--color-fg)", 48),
 };
 const STATE_WORD: Record<string, string> = { done: "", fail: "failed", active: "running", pending: "pending", skip: "skipped" };
 

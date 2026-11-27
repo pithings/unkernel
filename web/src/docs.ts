@@ -15,8 +15,8 @@
 //   so Home goes back to DOCS_URL and the new tab opens there.
 // - Theme: the iframe's URL carries an undocs theme fragment (`#~` and
 //   base64url JSON of design tokens, https://undocs.unjs.io/guide/embedding),
-//   THEME: the page's dark colours (style.css) on a transparent background,
-//   so the window is glass like a terminal, the colour mode pinned to dark.
+//   THEME: the page's colours (style.css) on a transparent background,
+//   so the window is glass like a terminal, the colour mode pinned to the page's.
 //   The new tab gets the site as it is.
 import { createElement } from "react";
 import type { AppMeta } from "./apps/types.ts";
@@ -30,14 +30,24 @@ import { wm, wm$ } from "./wm.ts";
 export const DOCS_URL = "https://docs.unkernel.dev/";
 /**
  * The page's look as undocs tokens (style.css: fg, hover, muted, line,
- * accent); the colour mode pinned to dark (`m`). The background and cards
+ * accent); the colour mode pinned to the page's (`m`). The background and cards
  * are transparent: the window's glass (style.css) shows through, which
- * works because the page and the site are both dark (`color-scheme`), else
+ * works because the page and the site are both dark or both light (`color-scheme`), else
  * the browser paints the iframe opaque.
  */
-const THEME = { m: "d", bg: "transparent", fg: "#ededed", c: "rgb(255 255 255 / 4%)", mu: "#1a1a1a", muf: "#a1a1a1", bd: "#242424", p: "#52a8ff", pf: "#000000", br: "#52a8ff", r: "0.5rem" };
+const THEME = {
+	dark: { m: "d", bg: "transparent", fg: "#ededed", c: "rgb(255 255 255 / 4%)", mu: "#1a1a1a", muf: "#a1a1a1", bd: "#242424", p: "#52a8ff", pf: "#000000", br: "#52a8ff", r: "0.5rem" },
+	light: { m: "l", bg: "transparent", fg: "#171717", c: "rgb(0 0 0 / 4%)", mu: "#f2f2f2", muf: "#525252", bd: "#ebebeb", p: "#0068d6", pf: "#ffffff", br: "#0068d6", r: "0.5rem" },
+};
+const embedUrl = (theme: object) => `${DOCS_URL}#~${btoa(JSON.stringify(theme)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")}`;
 /** DOCS_URL with THEME as its fragment: what the iframe loads. */
-export const DOCS_EMBED_URL = `${DOCS_URL}#~${btoa(JSON.stringify(THEME)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")}`;
+export const DOCS_EMBED_URL = { dark: embedUrl(THEME.dark), light: embedUrl(THEME.light) };
+export const pageTheme = (): "dark" | "light" => (document.documentElement.dataset.theme === "light" ? "light" : "dark");
+export function onPageTheme(cb: () => void): () => void {
+	const o = new MutationObserver(cb);
+	o.observe(document.documentElement, { attributeFilter: ["data-theme"] });
+	return () => o.disconnect();
+}
 /** The window's WM id (its body's root is #docs). */
 export const DOCS_WIN = "docs";
 /** Its Dock tile's element id while it is open. */
