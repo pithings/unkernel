@@ -1662,8 +1662,8 @@ parts that are easy to get wrong.
   `hostLoopback`, 10.0.2.2 goes to the host's 127.0.0.1.
 - `wispBackend()` multiplexes connections and UDP flows (stream type 2,
   one DATA packet per datagram, no credit) over one WebSocket to a Wisp
-  v1 server; the project's server carries UDP (2026-11-25). `DEFAULT_WISP_SERVERS` is the project's
-  `wss://wisp.pi0.io:6680/`. With several URLs, all are opened at once and
+  v1 server; the project's server carries UDP (2026-11-25).
+  `DEFAULT_WISP_SERVERS` is the project's `wss://wisp.pi0.io:6680/`. With several URLs, all are opened at once and
   the first handshake wins.
 - The project's Wisp server has an allow list of Origins
   (`http://localhost` is on it) and answers anything else, including no

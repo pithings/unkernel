@@ -5,9 +5,8 @@
 // glewInit() reports no GLX display, which it does under SDL's Wayland
 // driver (fixed after 2.4.30). Fixed-function OpenGL through Mesa's virgl
 // driver with guest GL on (Options); without it, X has no DRM device to
-// start on. Online servers need UDP, which the page's network does not
-// carry: play.sh runs a server (bzfs) on the guest's loopback and joins it
-// with robots (-solo), in a window the size of X's screen. About 320 MiB
+// start on. play.sh runs a server (bzfs) on the guest's loopback and joins
+// it with robots (-solo), in a window the size of X's screen. About 320 MiB
 // installed, 84 MiB to download, Mesa, LLVM and X about 284 MiB of that (the
 // image's package lists, 2026-11-22).
 import type { TerminalApp } from "../types.ts";
@@ -35,9 +34,9 @@ export default {
 	files: {
 		"x.sh": { content: X_KMS_SH, mode: 0o755 },
 		"play.sh": { content: PLAY, mode: 0o755 },
-		README: "BZFlag on X in the Display window (guest GL on: Options). Online servers need\n" +
-			"UDP, which the page's network does not carry: ./play.sh runs a server here\n" +
-			"(bzfs.log) and joins it with robots (ROBOTS=8 ./x.sh ./play.sh for more).\n" +
+		README: "BZFlag on X in the Display window (guest GL on: Options). ./play.sh runs a\n" +
+			"server here (bzfs.log) and joins it with robots (ROBOTS=8 ./x.sh ./play.sh\n" +
+			"for more).\n" +
 			"The mouse steers, its button fires, Tab jumps, Esc is the menu.\n",
 	},
 	commands: ["cat README", "./x.sh ./play.sh"],

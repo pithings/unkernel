@@ -185,6 +185,8 @@ const RTO_MS = 1000, RTO_MAX_MS = 8000, MAX_RETRIES = 8;
 export const UDP_IDLE_MS = 60_000;
 /** At most this many UDP flows; a new one closes the least recently used. */
 const UDP_MAX_FLOWS = 256;
+/** Datagrams a backend queues for a UDP flow until it can send them (more are dropped). */
+export const UDP_QUEUE = 64;
 
 interface Segment {
 	sport: number;
@@ -691,45 +693,54 @@ export class NetStack implements NetDevice {
 
 	/** A datagram from guest port `sport` to `dst`:`dport`, through its flow (opened if new). */
 	udpForward(quote: Uint8Array, sport: number, dst: number, dport: number, host: string, payload: Uint8Array): void {
-		const key = `${sport}/${dst}/${dport}`;
-		let fl = this.udp.get(key);
-		if (fl) {
-			this.udp.delete(key); // re-insert: the map stays in least recently used order
-		} else {
-			if (this.udp.size >= UDP_MAX_FLOWS) this.udpClose(this.udp.values().next().value!);
-			const flow: UdpFlow = fl = { key, gport: sport, ip: dst, port: dport, sock: undefined, quote, lastActive: 0, closed: false };
-			this.stats.udpOpened++;
-			flow.sock = this.backend.udp!({ host, port: dport }, {
-				onMessage: (u8) => {
-					if (flow.closed) return;
-					flow.lastActive = performance.now();
-					this.sendUdp(flow.ip, flow.port, this.guest, flow.gport, u8);
-				},
-				onClose: (err) => {
-					if (flow.closed) return;
-					this.udpClose(flow);
-					if ((err as { code?: string } | null)?.code === "ECONNREFUSED") {
-						this.icmpUnreachable(flow.quote, this.guest, flow.ip, 3);
-					} else if (err) {
-						this.log?.(`[net] udp ${ip4str(flow.ip)}:${flow.port}: ${err.message ?? err}`);
-					}
-				},
-			});
-			if (flow.closed) return; // the backend refused it at once
-			if (!this.udpSweep) {
-				this.udpSweep = setInterval(() => this.udpExpire(), UDP_IDLE_MS / 4);
-				(this.udpSweep as { unref?: () => void }).unref?.();
-			}
-		}
-		this.udp.set(key, fl);
+		const fl = this.udp.get(`${sport}/${dst}/${dport}`) ?? this.udpOpen(sport, dst, dport, host, quote);
+		if (!fl) return; // the backend refused it at once
 		fl.quote = quote;
-		fl.lastActive = performance.now();
+		this.udpTouch(fl);
 		fl.sock!.send(payload);
+	}
+
+	udpOpen(gport: number, ip: number, port: number, host: string, quote: Uint8Array): UdpFlow | undefined {
+		if (this.udp.size >= UDP_MAX_FLOWS) this.udpClose(this.udp.values().next().value!);
+		const flow: UdpFlow = { key: `${gport}/${ip}/${port}`, gport, ip, port, sock: undefined, quote, lastActive: 0, closed: false };
+		this.stats.udpOpened++;
+		flow.sock = this.backend.udp!({ host, port }, {
+			onMessage: (u8) => {
+				if (flow.closed) return;
+				this.udpTouch(flow);
+				this.sendUdp(ip, port, this.guest, gport, u8);
+			},
+			onClose: (err) => {
+				if (flow.closed) return;
+				this.udpClose(flow);
+				if ((err as { code?: string } | null)?.code === "ECONNREFUSED") {
+					this.icmpUnreachable(flow.quote, this.guest, ip, 3);
+				} else if (err) {
+					this.log?.(`[net] udp ${ip4str(ip)}:${port}: ${err.message ?? err}`);
+				}
+			},
+		});
+		if (flow.closed) return undefined;
+		if (!this.udpSweep) {
+			this.udpSweep = setInterval(() => this.udpExpire(), UDP_IDLE_MS / 4);
+			(this.udpSweep as { unref?: () => void }).unref?.();
+		}
+		return flow;
+	}
+
+	/** A datagram either way: the flow moves to the end of the map, which stays in least recently used order. */
+	udpTouch(fl: UdpFlow): void {
+		this.udp.delete(fl.key);
+		this.udp.set(fl.key, fl);
+		fl.lastActive = performance.now();
 	}
 
 	udpExpire(): void {
 		const old = performance.now() - UDP_IDLE_MS;
-		for (const fl of [...this.udp.values()]) if (fl.lastActive < old) this.udpClose(fl);
+		for (const fl of this.udp.values()) {
+			if (fl.lastActive >= old) break;
+			this.udpClose(fl);
+		}
 	}
 
 	udpClose(fl: UdpFlow): void {

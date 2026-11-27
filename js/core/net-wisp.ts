@@ -25,7 +25,7 @@
 //   * A UDP flow is a stream to one host and port. A server without UDP
 //     closes it (reason 0x41 or 0x48), and the guest's datagrams are lost.
 
-import type { NetBackend, NetConnection, NetConnectionEvents, NetDatagramSocket } from "./net.ts";
+import { UDP_QUEUE, type NetBackend, type NetConnection, type NetConnectionEvents, type NetDatagramSocket } from "./net.ts";
 
 /**
  * The default Wisp server: the project's own. Public alternatives (run by
@@ -60,7 +60,6 @@ export interface WispBackend extends NetBackend {
 const RETRY_MS = 5000;
 const HANDSHAKE_TIMEOUT_MS = 10000;
 const MAX_PACKET = 64 * 1024;          // coalesce guest segments up to this size
-const UDP_QUEUE = 64;                  // datagrams a UDP stream queues until the WebSocket is up
 const TYPE_TCP = 0x01, TYPE_UDP = 0x02;
 const FAKE_BASE = (198 << 24 | 18 << 16) >>> 0, FAKE_SIZE = 1 << 17;
 const enc = new TextEncoder();
@@ -210,10 +209,11 @@ export function wispBackend(url: string | readonly string[], opts: WispBackendOp
 			pump() {
 				st.scheduled = false;
 				if (!st.open || st.done || !ws) return;
+				if (udp) { for (const d of st.out.splice(0)) ws.send(packet(0x02, id, d)); return; }
 				const before = st.outBytes;
-				while (st.out.length && (udp || st.credit > 0)) {
+				while (st.out.length && st.credit > 0) {
 					let n = 0, k = 0;
-					if (!udp) while (k < st.out.length && n + st.out[k]!.length <= MAX_PACKET) n += st.out[k++]!.length;
+					while (k < st.out.length && n + st.out[k]!.length <= MAX_PACKET) n += st.out[k++]!.length;
 					if (k === 0) { n = st.out[0]!.length; k = 1; }
 					const p = new Uint8Array(5 + n);
 					p[0] = 0x02;
@@ -221,7 +221,7 @@ export function wispBackend(url: string | readonly string[], opts: WispBackendOp
 					let o = 5;
 					for (const c of st.out.splice(0, k)) { p.set(c, o); o += c.length; }
 					ws.send(p);
-					if (!udp) st.credit--;
+					st.credit--;
 					st.outBytes -= n;
 				}
 				if (st.outBytes < before) ev.onDrain();
@@ -277,10 +277,9 @@ export function wispBackend(url: string | readonly string[], opts: WispBackendOp
 			});
 			return {
 				send(data) {
-					if (st.done || (!st.open && st.out.length >= UDP_QUEUE)) return;
-					st.out.push(data);
-					st.outBytes += data.length;
-					if (!st.scheduled) { st.scheduled = true; queueMicrotask(st.pump); }
+					if (st.done) return;
+					if (st.open && ws) ws.send(packet(0x02, id, data));
+					else if (st.out.length < UDP_QUEUE) st.out.push(data);
 				},
 				close() { drop(id, st); },
 			};

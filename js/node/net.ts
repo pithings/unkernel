@@ -8,7 +8,7 @@
 import net from "node:net";
 import dgram from "node:dgram";
 import dns from "node:dns";
-import type { NetBackend } from "../core/net.ts";
+import { UDP_QUEUE, type NetBackend } from "../core/net.ts";
 import { wispBackend as coreWispBackend, type WispBackend, type WispBackendOptions } from "../core/net-wisp.ts";
 
 /**
@@ -24,8 +24,6 @@ export function wispBackend(url: string | readonly string[], opts: WispBackendOp
 }
 
 const CONNECT_TIMEOUT_MS = 20000;
-/** Datagrams a UDP flow queues while its socket binds. */
-const UDP_QUEUE = 64;
 
 export function directBackend(): NetBackend {
 	const sockets = new Set<net.Socket>();

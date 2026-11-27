@@ -162,10 +162,12 @@ test("UDP flows: idle ones expire, the least recently used goes past the limit",
 	for (let p = 6002; p < 6002 + 255; p++) stack.send(udp(p, ip4("8.8.8.8"), 53, x));
 	assert.equal(stack.udp.size, 256);
 	stack.send(udp(6001, ip4("8.8.8.8"), 53, x)); // touch the oldest: now the newest
+	flows[2]!.ev.onMessage(x); // a reply counts too: port 6002 is the newest
 	stack.send(udp(7000, ip4("8.8.8.8"), 53, x));
 	assert.equal(stack.udp.size, 256);
 	assert.equal(flows[1]!.closed, false);
-	assert.equal(flows[2]!.closed, true, "port 6002 was the least recently used");
+	assert.equal(flows[2]!.closed, false);
+	assert.equal(flows[3]!.closed, true, "port 6003 was the least recently used");
 	stack.close();
 });
 
