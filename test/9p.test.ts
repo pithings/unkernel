@@ -14,7 +14,7 @@ import { P9FrameAssembler, serve9p } from "../js/core/9p.ts";
 import { FsError, type Fs, type FsAttr, type FsFile } from "../js/core/fs.ts";
 import { MemoryFs, type MemoryFsChange } from "../js/core/memfs.ts";
 import { nodeFs } from "../js/node/nodefs.ts";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
@@ -489,6 +489,241 @@ test("nodeFs: a hung rename holds back links in its own host directory only", as
 	assert.equal(statSync(joinPath(free, "f3")).ino, statSync(joinPath(free, "f")).ino);
 });
 
+test("a fid kept past its directory's removal answers ESTALE for every path operation (its name could be a symlink out of the tree now)", async (t) => {
+	const { mount } = setup();
+	const dir = mkdtempSync(joinPath(tmpdir(), "unkernel-9p-stale-")), outside = mkdtempSync(joinPath(tmpdir(), "unkernel-9p-beyond-"));
+	t.after(() => {
+		rmSync(dir, { recursive: true, force: true });
+		rmSync(outside, { recursive: true, force: true });
+	});
+	writeFileSync(joinPath(outside, "secret"), "host-only\n");
+	mkdirSync(joinPath(dir, "a"));
+	writeFileSync(joinPath(dir, "a", "secret"), "guest\n");
+	const { c } = await mount(nodeFs(dir));
+	// The guest keeps a fid on the directory and on a file under it, then removes the subtree and puts a
+	// symlink out of the tree in its place: the kept fids' stored paths now run through that symlink.
+	const sfid = (await c.walk(0, ["a", "secret"])).fid;
+	const dfid = (await c.walk(0, ["a"])).fid;
+	await c.unlinkat(dfid, "secret");
+	await c.unlinkat(0, "a", 0x200);
+	await c.symlink(0, "a", outside);
+
+	await assert.rejects(c.getattr(sfid), errno(116), "getattr through a stale file fid");
+	await assert.rejects(c.lopen(sfid, O_RDONLY), errno(116), "open through a stale file fid");
+	await assert.rejects(c.lopen(dfid, O_RDONLY), errno(116), "open through a stale directory fid");
+	await assert.rejects(c.walk(dfid, ["secret"]), errno(116), "walk below a stale directory fid");
+	await assert.rejects(c.readdir(dfid), errno(116), "readdir of a stale directory fid");
+	await assert.rejects(c.lcreate(dfid, "planted"), errno(116), "create below a stale directory fid");
+	await assert.rejects(c.mkdir(dfid, "planted-dir"), errno(116), "mkdir below a stale directory fid");
+	await assert.rejects(c.symlink(dfid, "planted-link", "/etc"), errno(116), "symlink below a stale directory fid");
+	await assert.rejects(c.unlinkat(dfid, "secret"), errno(116), "unlink below a stale directory fid");
+	await assert.rejects(c.renameat(dfid, "secret", 0, "pulled"), errno(116), "rename out of a stale directory fid");
+
+	assert.equal(readFileSync(joinPath(outside, "secret"), "utf8"), "host-only\n", "the outside file was neither read-opened nor changed");
+	assert.deepEqual(readdirSync(outside).sort(), ["secret"], "nothing was created outside the tree");
+});
+
+test("a remove or rename waits for the path requests in flight, and they for it: none resolves a name while it is swapped", async (t) => {
+	const { mount } = setup();
+	const dir = mkdtempSync(joinPath(tmpdir(), "unkernel-9p-gate-")), outside = mkdtempSync(joinPath(tmpdir(), "unkernel-9p-beyond-"));
+	t.after(() => {
+		rmSync(dir, { recursive: true, force: true });
+		rmSync(outside, { recursive: true, force: true });
+	});
+	writeFileSync(joinPath(outside, "secret"), "host-only\n");
+	mkdirSync(joinPath(dir, "a"));
+	writeFileSync(joinPath(dir, "a", "secret"), "guest\n");
+	mkdirSync(joinPath(dir, "b"));
+	// A backend that holds chosen calls until released, as a busy host would.
+	const inner = nodeFs(dir);
+	const held = new Map<string, { reached: () => void; release: Promise<void> }>();
+	const hold = (key: string) => {
+		let reached!: () => void, open!: () => void;
+		const at = new Promise<void>((r) => (reached = r));
+		held.set(key, { reached, release: new Promise<void>((r) => (open = r)) });
+		return { at, open };
+	};
+	const pass = async (key: string) => {
+		const h = held.get(key);
+		if (!h) return;
+		held.delete(key);
+		h.reached();
+		await h.release;
+	};
+	const fs: Fs = {
+		...inner,
+		getattr: async (p) => (await pass(`getattr ${p}`), inner.getattr(p)),
+		mkdir: async (p, mode) => (await pass(`mkdir ${p}`), inner.mkdir!(p, mode)),
+		rename: async (from, to) => (await pass(`rename ${from}`), inner.rename!(from, to)),
+	};
+	const { c } = await mount(fs);
+	const afid = (await c.walk(0, ["a"])).fid, bfid = (await c.walk(0, ["b"])).fid;
+
+	// A walk is between its two names when the guest swaps the first for a symlink out of the tree.
+	let h = hold("getattr /a/secret");
+	const walked = c.walk(0, ["a", "secret"]);
+	await h.at;
+	const order: string[] = [];
+	const swap = (async () => {
+		await c.unlinkat(afid, "secret");
+		order.push("removed");
+		await c.unlinkat(0, "a", 0x200);
+		await c.symlink(0, "a", outside);
+	})();
+	await tick(20);
+	assert.deepEqual(order, [], "the remove waits for the walk");
+	h.open();
+	const sfid = (await walked).fid;
+	(order as string[]).push("walked");
+	await swap;
+	assert.deepEqual(order, ["walked", "removed"]);
+	await assert.rejects(c.lopen(sfid, O_RDONLY), errno(116), "the walked fid is stale once its directory is gone");
+
+	// A mkdir is on its way to the backend when the guest swaps its directory.
+	h = hold("mkdir /b/planted");
+	const made = c.mkdir(bfid, "planted");
+	await h.at;
+	const swapped = (async () => {
+		await c.unlinkat(0, "b", 0x200);
+		await c.symlink(0, "b", outside);
+	})();
+	await tick(20);
+	h.open();
+	await made;
+	await assert.rejects(swapped, errno(39), "the rmdir ran after the mkdir, and found its directory");
+	assert.ok(statSync(joinPath(dir, "b", "planted")).isDirectory());
+
+	// A rename is in the backend: path requests wait for it, and then see where things went.
+	h = hold("rename /b");
+	const renamed = c.renameat(0, "b", 0, "c");
+	await h.at;
+	const through = c.walk(bfid, ["planted"]);
+	await tick(20);
+	h.open();
+	await renamed;
+	const pfid = (await through).fid;
+	assert.equal((await c.getattr(pfid)).mode & 0o170000, 0o040000, "the walk ran after the rename, below the directory's new name");
+
+	assert.deepEqual(readdirSync(outside).sort(), ["secret"], "nothing was created outside the tree");
+});
+
+test("a directory the backend knows by several names: a fid that reached it under another spelling is stale once it is removed or renamed", async (t) => {
+	const { mount } = setup();
+	const dir = mkdtempSync(joinPath(tmpdir(), "unkernel-9p-fold-")), outside = mkdtempSync(joinPath(tmpdir(), "unkernel-9p-beyond-"));
+	t.after(() => {
+		rmSync(dir, { recursive: true, force: true });
+		rmSync(outside, { recursive: true, force: true });
+	});
+	writeFileSync(joinPath(outside, "secret"), "host-only\n");
+	for (const d of ["a", "b"]) {
+		mkdirSync(joinPath(dir, d));
+		writeFileSync(joinPath(dir, d, "secret"), "guest\n");
+	}
+	// A host file system that ignores case, as far as the server can tell.
+	const inner = nodeFs(dir);
+	const lc = (p: string) => p.toLowerCase();
+	const fs: Fs = {
+		getattr: (p) => inner.getattr(lc(p)), readdir: (p) => inner.readdir(lc(p)), open: (p, f) => inner.open(lc(p), f),
+		remove: (p, d) => inner.remove!(lc(p), d), symlink: (p, target) => inner.symlink!(lc(p), target),
+		rename: (from, to) => inner.rename!(lc(from), lc(to)), mkdir: (p, mode) => inner.mkdir!(lc(p), mode),
+	};
+	const { c } = await mount(fs);
+	// Removed under another spelling.
+	const kept = (await c.walk(0, ["a", "secret"])).fid, keptDir = (await c.walk(0, ["a"])).fid;
+	const A = (await c.walk(0, ["A"])).fid;
+	await c.unlinkat(A, "secret");
+	await c.unlinkat(0, "A", 0x200);
+	await c.symlink(0, "a", outside);
+	await assert.rejects(c.lopen(kept, O_RDONLY), errno(116));
+	await assert.rejects(c.getattr(kept), errno(116));
+	await assert.rejects(c.walk(keptDir, ["secret"]), errno(116));
+	await assert.rejects(c.mkdir(keptDir, "planted"), errno(116));
+	// Renamed under another spelling: the fid's path cannot follow, so it is stale; one under the spelling used follows.
+	const other = (await c.walk(0, ["b", "secret"])).fid, used = (await c.walk(0, ["B", "secret"])).fid;
+	await c.renameat(0, "B", 0, "moved");
+	await c.symlink(0, "b", outside);
+	await assert.rejects(c.lopen(other, O_RDONLY), errno(116));
+	await c.lopen(used, O_RDONLY);
+	assert.equal(dec.decode(await c.read(used, 0, 100)), "guest\n");
+	// A rename to another spelling of the same name replaces nothing.
+	const inMoved = (await c.walk(0, ["moved", "secret"])).fid;
+	await c.renameat(0, "moved", 0, "MOVED");
+	assert.equal((await c.getattr(inMoved)).size, 6);
+	// A fid moved by a rename is found under its new directories: one of them renamed under another spelling.
+	mkdirSync(joinPath(outside, "x"));
+	writeFileSync(joinPath(outside, "x", "secret"), "host-only\n");
+	for (const d of ["p", "p/x", "q"]) await c.mkdir((await c.walk(0, d.split("/").slice(0, -1))).fid, d.split("/").at(-1)!);
+	writeFileSync(joinPath(dir, "p", "x", "secret"), "guest\n");
+	const deep = (await c.walk(0, ["p", "x", "secret"])).fid, deepDir = (await c.walk(0, ["p", "x"])).fid;
+	await c.renameat((await c.walk(0, ["p"])).fid, "x", (await c.walk(0, ["q"])).fid, "x");
+	assert.equal((await c.getattr(deep)).size, 6);
+	await c.renameat(0, "Q", 0, "r");
+	await c.symlink(0, "q", outside);
+	await assert.rejects(c.lopen(deep, O_RDWR), errno(116));
+	await assert.rejects(c.mkdir(deepDir, "planted"), errno(116));
+	// A file fid whose name the guest makes a directory under another spelling never becomes a directory fid.
+	writeFileSync(joinPath(dir, "f"), "file\n");
+	const ffid = (await c.walk(0, ["f"])).fid;
+	await c.unlinkat(0, "F");
+	await c.mkdir(0, "F");
+	await assert.rejects(c.lopen(ffid, O_RDONLY), errno(116));
+	await c.unlinkat(0, "F", 0x200);
+	await c.symlink(0, "f", outside);
+	await assert.rejects(c.readdir(ffid), errno(20));
+	await assert.rejects(c.walk(ffid, ["secret"]), errno(20));
+	assert.deepEqual(readdirSync(outside).sort(), ["secret", "x"]);
+	assert.deepEqual(readdirSync(joinPath(outside, "x")), ["secret"]);
+	assert.equal(readFileSync(joinPath(outside, "x", "secret"), "utf8"), "host-only\n");
+});
+
+test("fids moved out of a directory stay good when it is then removed or renamed", async (t) => {
+	const { mount } = setup();
+	const dir = mkdtempSync(joinPath(tmpdir(), "unkernel-9p-moved-"));
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	for (const d of ["a", "a/sub", "b", "c", "c/sub"]) mkdirSync(joinPath(dir, d));
+	writeFileSync(joinPath(dir, "a", "f"), "data\n");
+	writeFileSync(joinPath(dir, "c", "f"), "data\n");
+	const { c } = await mount(nodeFs(dir));
+	const a = (await c.walk(0, ["a"])).fid, b = (await c.walk(0, ["b"])).fid, cd = (await c.walk(0, ["c"])).fid;
+	for (const [from, how] of [[a, "removed"], [cd, "renamed"]] as const) {
+		const f = (await c.walk(from, ["f"])).fid, sub = (await c.walk(from, ["sub"])).fid;
+		await c.renameat(from, "f", b, `f-${how}`);
+		await c.renameat(from, "sub", b, `sub-${how}`);
+		if (how === "removed") await c.unlinkat(0, "a", 0x200);
+		else await c.renameat(0, "c", 0, "elsewhere");
+		assert.equal((await c.getattr(f)).size, 5, how);
+		await c.lopen(f, O_RDONLY);
+		assert.equal(dec.decode(await c.read(f, 0, 10)), "data\n");
+		await c.mkdir(sub, "x");
+		assert.ok(statSync(joinPath(dir, "b", `sub-${how}`, "x")).isDirectory());
+	}
+});
+
+test("the path gate with a hung backend: waiting requests answer ETIMEDOUT and never run late; open files go on", async () => {
+	const { mount } = setup();
+	const fs = new MemoryFs({ f: "data", g: "x", d: {} });
+	let hang: (() => void) | undefined;
+	const hung: Fs = {
+		getattr: (p) => (p === "/hang" ? new Promise<FsAttr>((_, rej) => (hang = () => rej(new FsError("ENOENT")))) : fs.getattr(p)),
+		readdir: (p) => fs.readdir(p),
+		open: (p, flags) => fs.open(p, flags),
+		remove: (p, isDir) => fs.remove(p, isDir),
+	};
+	const { c } = await mount(hung, { timeout: 50 });
+	const f = await c.open("f");
+	await assert.rejects(c.walk(0, ["hang"]), errno(110));
+	// The walk's handler is still in the backend: a remove must not run beside it.
+	await assert.rejects(c.unlinkat(0, "g"), errno(110), "the remove waits for the hung walk");
+	assert.equal(fs.readText("/g"), "x");
+	assert.equal(dec.decode(await c.read(f, 0, 4)), "data", "an open file reads meanwhile");
+	assert.equal((await c.walk(0, ["d"])).qids.length, 1, "other path requests go on once the remove gave up");
+	hang!();
+	await tick(5);
+	assert.equal(fs.readText("/g"), "x", "the remove that timed out did not run late");
+	await c.unlinkat(0, "g");
+	await assert.rejects(c.walk(0, ["g"]), errno(2));
+});
+
 test("create, mkdir, symlink, readlink, readdir in pieces, unlinkat, rmdir, rename over, truncate on open; changes reported; Tlcreate without O_EXCL opens what exists", async () => {
 	const { mount } = setup();
 	const fs = new MemoryFs();
@@ -812,7 +1047,7 @@ function hostFor(g: GuestVsock, more?: Map<number, GuestVsock>): VsockHost {
 
 test("snapshot of an export: the session and its connection are saved when quiet and restored on a new host; open files reopen by path; gone, replaced or orphaned ones answer ESTALE", async () => {
 	const ESTALE = 116;
-	const fs = new MemoryFs({ "keep.txt": "kept", "gone.txt": "g", "replaced.txt": "old", "orphan.txt": "o", dir: { a: "1", b: "2", c: "3", d: "4" } });
+	const fs = new MemoryFs({ "keep.txt": "kept", "gone.txt": "g", "replaced.txt": "old", "orphan.txt": "o", dir: { a: "1", b: "2", c: "3", d: "4" }, was: {}, swapped: { f: "1" } });
 	const g = new GuestVsock(4000);
 	const host1Guests = new Map<number, GuestVsock>([[4000, g]]);
 	const host1 = hostFor(g, host1Guests);
@@ -826,6 +1061,12 @@ test("snapshot of an export: the session and its connection are saved when quiet
 	const replaced = await c.open("replaced.txt");
 	const orphan = await c.open("orphan.txt", O_RDWR);
 	await c.unlinkat(0, "orphan.txt"); // unlinked by the guest while open
+	// A directory the guest removed while it kept a fid there, and then made again.
+	const removed = (await c.walk(0, ["was"])).fid;
+	await c.unlinkat(0, "was", 0x200);
+	await c.mkdir(0, "was");
+	await assert.rejects(c.walk(removed, []), errno(ESTALE));
+	const inSwapped = (await c.walk(0, ["swapped", "f"])).fid;
 	const dir = await c.open("dir");
 	const first = await c.readdir(dir, 0, 70); // part of the listing
 	assert.ok(first.length >= 2 && first.length < 6, `${first.length} entries in the first part`);
@@ -855,6 +1096,8 @@ test("snapshot of an export: the session and its connection are saved when quiet
 	assert.ok(saved.fids.find((f: { path: string; orphan?: boolean }) => f.path === "/orphan.txt" && f.orphan));
 
 	// While suspended, the host deletes one file and puts another file under a name.
+	fs.rm("/swapped", { recursive: true });
+	fs.writeFile("/swapped", "a file now");
 	fs.rm("/gone.txt");
 	fs.rm("/replaced.txt");
 	fs.writeFile("/replaced.txt", "new");
@@ -873,6 +1116,9 @@ test("snapshot of an export: the session and its connection are saved when quiet
 	await assert.rejects(c.write(orphan, 0, "x"), errno(ESTALE), "unlinked by the guest while open");
 	await assert.rejects(c.getattr(orphan), errno(ESTALE));
 	await c.clunk(orphan);
+	await assert.rejects(c.walk(removed, []), errno(ESTALE), "a fid on a path the guest removed stays stale");
+	await assert.rejects(c.mkdir(removed, "x"), errno(ESTALE));
+	await assert.rejects(c.walk(inSwapped, []), errno(ESTALE), "a directory on its path is none now");
 	const rest = await c.readdir(dir, first.at(-1)!.offset, 8192);
 	assert.deepEqual([...first, ...rest].map((e) => e.name), [".", "..", "a", "b", "c", "d"], "the listing goes on where it was");
 	assert.equal((await c.attach(exp.name, 60)).type, 0x80, "the guest attaches again by the same name");

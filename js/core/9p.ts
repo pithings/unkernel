@@ -32,6 +32,22 @@
 // - Inode numbers (qid.path) are the backend's (dev, ino), else a hash of
 //   the path. qid.version is the backend's `version`, else from mtime and
 //   size; 0 makes the guest read the file uncached (computed files).
+// - A fid holds the path it was walked to, and the backend resolves that
+//   path one name at a time. A name is only below the export while every
+//   directory on it stays a directory, so once the guest removes a fid's
+//   path or a directory above it (unlink, rmdir, rename), that fid is
+//   marked (#invalidate) and its path operations answer ESTALE (#fresh):
+//   the guest cannot then make the removed name a symlink and reach through
+//   the kept fid out of the export. Reads and writes of an already-open
+//   file keep working on its handle, which the unlink does not invalidate.
+//   Fids are found by path and also by the directories on their path
+//   (Fid.ids, the backend's inode numbers), since a backend may know one
+//   directory by several names (a host that ignores case); a fid found
+//   only that way is marked too when its directory is renamed.
+//   A remove or rename runs alone among the requests that resolve a path
+//   (PathGate), until its backend call has really returned, so none of
+//   them resolves a name while it is being swapped; a snapshot keeps the
+//   mark.
 // - Snapshots (mounts.ts): at the snapshot point a quiet session (nothing
 //   in flight) is saved as its fids (path, type, how a file was opened and
 //   its inode number, a directory listing being read); a restore opens the
@@ -101,6 +117,8 @@ export interface P9FidSnapshot {
 	open?: { read: boolean; write: boolean; append: boolean; ino: string };
 	/** The guest unlinked or replaced it while open: ESTALE after a restore. */
 	orphan?: true;
+	/** The guest removed or replaced its path or a directory above it: its path operations answer ESTALE. */
+	gone?: true;
 	/** A directory listing being read (readdir past offset 0). */
 	dir?: Array<{ name: string; type: FsFileType; ino?: string; dev?: string }>;
 }
@@ -634,10 +652,27 @@ interface Fid {
 	orphan?: boolean;
 	/** Restored without its file (gone, another file now, or orphaned): its file operations answer ESTALE. */
 	stale?: boolean;
+	/**
+	 * The guest removed or replaced this path or an ancestor since the fid was walked, so the name may now
+	 * lead out of the tree (a directory swapped for a symlink). Operations that resolve by path answer
+	 * ESTALE; an already-open file keeps working on its handle (which survives the unlink).
+	 */
+	pathGone?: boolean;
+	/**
+	 * The directories on the path, from the root down to the fid's own (a directory) or its parent's (anything
+	 * else): each one's dirId(), "" where the backend has no inode numbers. A removed or renamed directory is
+	 * looked up here as well as by path, which finds the fids that reached it under another spelling.
+	 */
+	ids: string[];
 	/** Directory listing taken at readdir offset 0 (with . and ..). */
 	dir?: FsDirEntry[];
 	/** Writes, truncation, fsync and clunk through this fid run in order. */
 	chain: Promise<unknown>;
+}
+
+/** What names a directory apart from its path: the backend's (dev, ino); "" without one (0 counts as none) or for anything else. */
+function dirId(a: FsAttr | undefined): string {
+	return a?.type === "dir" && a.ino !== undefined && a.ino !== 0 && a.ino !== 0n ? `${a.dev ?? 0}:${a.ino}` : "";
 }
 
 /** A restored fid's file operations: ESTALE once its file could not be opened again. */
@@ -654,6 +689,63 @@ interface Pending {
 	dead: boolean;
 	resolve: (r: Uint8Array | null) => void;
 	timer?: ReturnType<typeof setTimeout>;
+	/** Waiting for the path gate: leave its queue (the request died). */
+	cancel?: () => void;
+}
+
+/** Requests that resolve a path through the backend, and of those the ones that remove or replace a name. */
+const PATH_OPS = new Set([Twalk, Tlopen, Tlcreate, Tmkdir, Tsymlink, Tlink, Treadlink, Tgetattr, Tsetattr, Treaddir, Tremove, Tunlinkat, Trename, Trenameat]);
+const SWAP_OPS = new Set([Tremove, Tunlinkat, Trename, Trenameat]);
+
+/**
+ * A session's path operations against its removes and renames: those run one at a time and alone,
+ * the others together, in arrival order. A fid's check that its path is still there (#fresh) and the
+ * backend's resolving of that path are then one step as far as the guest's own swaps go. The gate is
+ * held until the handler has really finished, also past its timeout (a backend call that answers late
+ * still resolves a name then), so a hung handler holds back the swaps, or a hung swap every path
+ * operation; those wait at most their own timeout and answer ETIMEDOUT. Reads and writes of open
+ * files do not pass here.
+ */
+class PathGate {
+	#shared = 0;
+	#alone = false;
+	#waiting: Array<{ alone: boolean; go: (entered: boolean) => void }> = [];
+
+	/** True once entered (at once when nothing is in the way); false if `state` died while waiting. */
+	enter(alone: boolean, state: Pending): true | Promise<boolean> {
+		if (!this.#waiting.length && !this.#alone && !(alone && this.#shared)) {
+			if (alone) this.#alone = true;
+			else this.#shared++;
+			return true;
+		}
+		return new Promise((go) => {
+			const w = { alone, go };
+			this.#waiting.push(w);
+			state.cancel = () => {
+				state.cancel = undefined;
+				const i = this.#waiting.indexOf(w);
+				if (i < 0) return;
+				this.#waiting.splice(i, 1);
+				go(false);
+				this.#wake();
+			};
+		});
+	}
+
+	leave(alone: boolean): void {
+		if (alone) this.#alone = false;
+		else this.#shared--;
+		this.#wake();
+	}
+
+	#wake(): void {
+		for (let w = this.#waiting[0]; w && !this.#alone && !(w.alone && this.#shared); w = this.#waiting[0]) {
+			this.#waiting.shift();
+			if (w.alone) this.#alone = true;
+			else this.#shared++;
+			w.go(true);
+		}
+	}
 }
 
 class Session {
@@ -662,6 +754,7 @@ class Session {
 	#fids = new Map<number, Fid>();
 	#msize: number;
 	#pending = new Map<number, Pending>();
+	#gate = new PathGate();
 	#destroyed = false;
 
 	constructor(exp: Export, msize: number) {
@@ -685,6 +778,7 @@ class Session {
 			fid, path: f.path, type: f.type,
 			...(f.file && f.open && !f.orphan ? { open: { read: f.open.read, write: f.open.write, append: f.open.append, ino: String(f.open.ino) } } : {}),
 			...((f.file && (f.orphan || !f.open)) || f.stale ? { orphan: true as const } : {}),
+			...(f.pathGone ? { gone: true as const } : {}),
 			...(f.dir ? { dir: f.dir.map((e) => ({ name: e.name, type: e.type, ino: big(e.ino), dev: big(e.dev) })) } : {}),
 		}));
 	}
@@ -693,16 +787,44 @@ class Session {
 	 * A restore: the saved fids, with open files opened again by path. A
 	 * file that is gone, is another file now (another inode number), was
 	 * orphaned, or does not open within the timeout leaves its fid stale.
+	 * A fid whose path the guest had removed stays so, and is not opened;
+	 * so does one with a directory on its path that is none now.
 	 */
 	async restore(saved: P9FidSnapshot[]): Promise<void> {
+		// Each directory's dirId() as it is now; undefined when it is no longer a directory.
+		const seen = new Map<string, Promise<string | undefined>>();
+		const idAt = (p: string): Promise<string | undefined> => {
+			let id = seen.get(p);
+			if (!id) seen.set(p, (id = (async () => this.#fs.getattr(p))().then((a) => (a.type === "dir" ? dirId(a) : undefined), () => undefined)));
+			return id;
+		};
+		const idsOf = async (s: P9FidSnapshot): Promise<string[] | undefined> => {
+			const dirs = ["/"];
+			const end = s.type === "dir" ? s.path.length : s.path.lastIndexOf("/");
+			for (let at = s.path.indexOf("/", 1); at > 0 && at < end; at = s.path.indexOf("/", at + 1)) dirs.push(s.path.slice(0, at));
+			if (end > 0 && s.path !== "/") dirs.push(s.path.slice(0, end));
+			const ids = await Promise.all(dirs.map(idAt));
+			return ids.every((id) => id !== undefined) ? (ids as string[]) : undefined;
+		};
 		await Promise.all(saved.map(async (s) => {
 			const f: Fid = {
-				path: s.path, type: s.type, chain: Promise.resolve(),
+				path: s.path, type: s.type, chain: Promise.resolve(), ids: [],
 				...(s.dir ? { dir: s.dir.map((e) => ({ name: e.name, type: e.type, ino: unbig(e.ino), dev: unbig(e.dev) })) } : {}),
 			};
 			this.#fids.set(s.fid, f);
 			if (s.orphan) f.stale = true;
-			if (!s.open) return;
+			if (s.gone) f.pathGone = true;
+			else {
+				// The directories on its path, as they are now; one that is gone or no directory leaves the fid without its path.
+				const t = this.exp.timeout;
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				const ids = await (t > 0 ? Promise.race([idsOf(s), new Promise<undefined>((r) => (timer = setTimeout(() => r(undefined), t)))]) : idsOf(s));
+				clearTimeout(timer);
+				if (ids) f.ids = ids;
+				else f.pathGone = true;
+			}
+			if (s.open && f.pathGone) f.stale = true;
+			if (!s.open || f.pathGone) return;
 			const o = s.open;
 			let file: FsFile | undefined;
 			let late = false;
@@ -739,6 +861,31 @@ class Session {
 		for (const f of this.#fids.values()) if (f.file && f.path === path) f.orphan = true;
 	}
 
+	/**
+	 * The guest removed `path` or put something else there (unlink, rmdir, or the target a rename replaced):
+	 * every fid at that path or below it is marked, because the guest may now make `path` a symlink out of the
+	 * tree, and a backend that resolves a fid's stored path one component at a time would follow it. Their path
+	 * operations then answer ESTALE (#fresh); reads and writes through an already-open file keep working on its
+	 * handle. Only called with the path gate held alone, so no request is resolving a path meanwhile.
+	 */
+	#invalidate(path: string, id = ""): void {
+		for (const f of this.#fids.values()) if (under(f.path, path) || (id && f.ids.includes(id))) f.pathGone = true;
+	}
+
+	/** Remove `path`, then mark the fids there: by path, and by the directory it was (its other spellings). */
+	async #remove(path: string, isDir: boolean): Promise<void> {
+		const remove = this.#need("remove");
+		const id = dirId(await this.#fs.getattr(path));
+		await remove(path, isDir);
+		this.#orphan(path);
+		this.#invalidate(path, id);
+	}
+
+	/** Throw ESTALE when the guest removed or replaced this fid's path or an ancestor since it was walked. */
+	#fresh(f: Fid): void {
+		if (f.pathGone) throw new FsError("ESTALE", `${f.path}: the directory it named is gone`);
+	}
+
 	#log(msg: string): void {
 		this.exp.server.log(`[9p] ${this.exp.name}: ${msg}`);
 	}
@@ -747,7 +894,9 @@ class Session {
 		if (this.#destroyed) return;
 		this.#destroyed = true;
 		for (const p of this.#pending.values()) {
+			p.dead = true;
 			clearTimeout(p.timer);
+			p.cancel?.();
 			p.resolve(null);
 		}
 		this.#pending.clear();
@@ -762,6 +911,7 @@ class Session {
 		p.dead = true;
 		clearTimeout(p.timer);
 		this.#pending.delete(tag);
+		p.cancel?.();
 		p.resolve(null);
 	}
 
@@ -790,6 +940,7 @@ class Session {
 				if (state.dead) return;
 				state.dead = true;
 				this.#pending.delete(tag);
+				state.cancel?.();
 				this.#log(`${MSG_NAMES[type] ?? type}: the handler did not answer within ${timeout} ms; the guest gets ETIMEDOUT`);
 				resolve(errorReply(tag, ERRNO.ETIMEDOUT!));
 			}, timeout);
@@ -813,9 +964,10 @@ class Session {
 		return f;
 	}
 
-	/** A fid that must be a directory (names are made below it, so never below a symlink). */
+	/** A fid that must be a directory the guest has not since removed (names are made below it, so never below a symlink). */
 	#dir(n: number): Fid {
 		const f = this.#fid(n);
+		this.#fresh(f);
 		if (f.type !== "dir") throw new FsError("ENOTDIR");
 		return f;
 	}
@@ -848,12 +1000,37 @@ class Session {
 		return opened;
 	}
 
-	/** A rename in this tree: fids below `from` follow it. */
-	#renamed(from: string, to: string): void {
-		for (const f of this.#fids.values()) if (under(f.path, from)) f.path = to + f.path.slice(from.length);
+	/**
+	 * A rename in this tree: fids below `from` follow it, with the directories of the new parent (`above`)
+	 * in place of the old one's. One that reached the renamed directory (`id`) under another spelling has a
+	 * path this cannot follow, and is marked instead.
+	 */
+	#renamed(from: string, to: string, id: string, above: string[]): void {
+		const depth = from.split("/").length - 1;
+		for (const f of this.#fids.values()) {
+			if (under(f.path, from)) {
+				f.path = to + f.path.slice(from.length);
+				f.ids = [...above, ...f.ids.slice(depth)];
+			} else if (id && f.ids.includes(id)) f.pathGone = true;
+		}
 	}
 
+	/** Run a request, the ones that resolve a path inside the path gate (a remove or rename alone). */
 	async #handle(type: number, r: Reader, state: Pending): Promise<Writer> {
+		if (!PATH_OPS.has(type)) return this.#run(type, r, state);
+		const alone = SWAP_OPS.has(type);
+		const entered = this.#gate.enter(alone, state);
+		// Flushed or timed out while waiting: it was answered already, and must not run now.
+		if (entered !== true && !(await entered)) throw new FsError("EINTR");
+		state.cancel = undefined;
+		try {
+			return await this.#run(type, r, state);
+		} finally {
+			this.#gate.leave(alone);
+		}
+	}
+
+	async #run(type: number, r: Reader, state: Pending): Promise<Writer> {
 		const fs = this.#fs;
 		if (this.exp.readOnly) {
 			const flags = type === Tlopen ? new DataView(r.buf.buffer, r.buf.byteOffset).getUint32(HDR + 4, true) : 0;
@@ -886,13 +1063,15 @@ class Session {
 			if (r.str() !== this.exp.name) throw new FsError("ENOENT", "an attach to another file system on this connection");
 			const a = await fs.getattr("/");
 			if (a.type !== "dir") throw new FsError("ENOTDIR", "the file system's root is not a directory");
-			if (!state.dead) this.#fids.set(fid, { path: "/", type: "dir", chain: Promise.resolve() });
+			if (!state.dead) this.#fids.set(fid, { path: "/", type: "dir", chain: Promise.resolve(), ids: [dirId(a)] });
 			return new Writer(HDR + 13).qid(qidOf("/", a));
 		}
 		case Twalk: {
 			const fid = r.u32(), newfid = r.u32(), n = r.u16();
 			const f = this.#fid(fid);
+			this.#fresh(f);
 			let path = f.path, ftype = f.type;
+			const ids = [...f.ids];
 			const qids: Qid[] = [];
 			for (let i = 0; i < n; i++) {
 				let a: FsAttr;
@@ -901,6 +1080,8 @@ class Session {
 					if (ftype !== "dir") throw new FsError("ENOTDIR");
 					const next = name === ".." ? parent(path) : (checkName(name), join(path, name));
 					a = await fs.getattr(next);
+					if (name !== "..") a.type === "dir" && ids.push(dirId(a));
+					else if (path !== "/") ids.pop();
 					path = next;
 				} catch (e) {
 					if (i === 0) throw e;
@@ -913,7 +1094,7 @@ class Session {
 				// A fid replaced here (newfid in use, or walked in place) closes its open file.
 				const old = this.#fids.get(newfid);
 				if (old) this.#closeFile(old);
-				this.#fids.set(newfid, { path, type: ftype, chain: old?.chain ?? Promise.resolve() });
+				this.#fids.set(newfid, { path, type: ftype, chain: old?.chain ?? Promise.resolve(), ids });
 			}
 			const w = new Writer(HDR + 2 + 13 * qids.length).u16(qids.length);
 			for (const q of qids) w.qid(q);
@@ -928,9 +1109,10 @@ class Session {
 			f.file = undefined;
 			await this.#ordered(f, () => file?.close?.());
 			if (type === Tremove) {
+				// The fid is already dropped above (Tremove clunks it either way); refuse only the name resolution.
 				if (f.path === "/") throw new FsError("EBUSY");
-				await this.#need("remove")(f.path, f.type === "dir");
-				this.#orphan(f.path);
+				this.#fresh(f);
+				await this.#remove(f.path, f.type === "dir");
 			}
 			return new Writer(HDR);
 		}
@@ -942,9 +1124,13 @@ class Session {
 		}
 		case Tlopen: {
 			const f = this.#fid(r.u32());
+			this.#fresh(f);
 			const flags = r.u32();
 			const write = (flags & O_ACCMODE) !== 0;
 			let a = await fs.getattr(f.path);
+			// A fid is a directory from its walk on (Fid.ids has it), or never: a name that changed between the two
+			// was changed on the host, or by the guest under another spelling of it.
+			if ((a.type === "dir") !== (f.type === "dir")) throw new FsError("ESTALE", `${f.path}: ${a.type === "dir" ? "a directory now" : "no longer a directory"}`);
 			f.type = a.type;
 			if (a.type === "file") {
 				const truncate = (flags & O_TRUNC) !== 0;
@@ -1000,6 +1186,7 @@ class Session {
 			const name = r.name();
 			checkName(name);
 			if (f.stale) throw new FsError("ESTALE", `${f.path}: the file open before the snapshot is gone`);
+			this.#fresh(f);
 			// Regular files only: a hard link to a symlink is one that some hosts' link(2) follows (Darwin's).
 			if (f.type !== "file") throw new FsError("EPERM", `a hard link to a ${f.type}`);
 			await this.#need("link", "EPERM")(f.path, join(d.path, name));
@@ -1012,40 +1199,52 @@ class Session {
 			const name = r.name();
 			const flags = r.u32();
 			checkName(name);
-			await this.#need("remove")(join(f.path, name), !!(flags & AT_REMOVEDIR));
-			this.#orphan(join(f.path, name));
+			await this.#remove(join(f.path, name), !!(flags & AT_REMOVEDIR));
 			return new Writer(HDR);
 		}
 		case Trenameat:
 		case Trename: {
-			let from: string, to: string;
+			let from: string, to: string, above: string[];
 			if (type === Trenameat) {
 				const od = this.#dir(r.u32()), oname = r.name(), nd = this.#dir(r.u32()), nname = r.name();
 				checkName(oname);
 				checkName(nname);
 				from = join(od.path, oname);
 				to = join(nd.path, nname);
+				above = [...nd.ids];
 			} else {
 				const f = this.#fid(r.u32()), d = this.#dir(r.u32()), name = r.name();
 				checkName(name);
+				this.#fresh(f);
 				from = f.path;
 				to = join(d.path, name);
+				above = [...d.ids];
 			}
 			if (from === "/" || (under(to, from) && to !== from)) throw new FsError(from === "/" ? "EBUSY" : "EINVAL");
 			if (from !== to) {
-				await this.#need("rename")(from, to);
-				this.#orphan(to);
-				this.#renamed(from, to);
+				const rename = this.#need("rename");
+				const was = await fs.getattr(from);
+				const over = await (async () => fs.getattr(to))().catch(() => undefined);
+				await rename(from, to);
+				// Two names of one file or directory (a hard link, or another spelling of the name): nothing was replaced.
+				const same = was.ino !== undefined && was.ino === over?.ino && was.dev === over.dev;
+				if (!same) {
+					this.#orphan(to);
+					this.#invalidate(to, dirId(over));
+				}
+				this.#renamed(from, to, dirId(was), above);
 			}
 			return new Writer(HDR);
 		}
 		case Treadlink: {
 			const f = this.#fid(r.u32());
+			this.#fresh(f);
 			return new Writer().str(await this.#need("readlink", "EINVAL")(f.path));
 		}
 		case Tgetattr: {
 			const f = this.#fid(r.u32());
 			const file = fileOf(f);
+			if (!file?.getattr) this.#fresh(f);
 			const a = file?.getattr ? await file.getattr() : await fs.getattr(f.path);
 			const size = a.size ?? 0;
 			const perm = a.mode ?? (a.type === "dir" ? 0o755 : a.type === "symlink" ? 0o777 : 0o644);
@@ -1072,6 +1271,7 @@ class Session {
 			if (valid & 16) attr.atimeMs = valid & 128 ? as * 1000 + an / 1e6 : Date.now();
 			if (valid & 32) attr.mtimeMs = valid & 256 ? ms * 1000 + mn / 1e6 : Date.now();
 			const file = fileOf(f);
+			if (!file?.setattr) this.#fresh(f);
 			if (Object.keys(attr).length) await this.#ordered(f, () => (file?.setattr ? file.setattr(attr) : this.#need("setattr")(f.path, attr)));
 			return new Writer(HDR);
 		}
@@ -1079,6 +1279,7 @@ class Session {
 			const f = this.#fid(r.u32());
 			const offset = r.u64(), count = r.u32();
 			if (f.type !== "dir") throw new FsError("ENOTDIR");
+			this.#fresh(f);
 			if (offset === 0 || !f.dir) f.dir = [{ name: ".", type: "dir" }, { name: "..", type: "dir" }, ...(await fs.readdir(f.path))];
 			const max = Math.min(count, this.#msize - HDR - 4);
 			const w = new Writer(Math.min(max, 65536) + HDR + 4);

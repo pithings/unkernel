@@ -15,9 +15,18 @@
 // refuses to open). A hard link checks every directory on both its paths
 // and that its source is a regular file (Darwin's link(2) follows a
 // symlink), and no rename, remove or symlink in the directory runs during
-// it (SwapLock). Not covered: the host swapping a directory for a symlink
-// between the guest's walk and its next request (that request could then
-// reach outside `dir`; Node has no openat2 RESOLVE_BENEATH).
+// it (SwapLock).
+//
+// A path is only below `dir` if no directory on it is a symlink. The guest
+// could otherwise keep a fid, remove its directory, and put a symlink out
+// of the tree in its place, so that the fid's stored path runs through it
+// (lstat/O_NOFOLLOW guard only the final component); the 9p server closes
+// that by answering ESTALE for a fid whose directory it removed (9p.ts,
+// #invalidate), which it knows by inode number too, as a host that ignores
+// case has several names for one directory. Still not covered here: a swap the server cannot see,
+// i.e. one made on the host, or by the guest through a second mount of the
+// same `dir` (Node has no openat2 RESOLVE_BENEATH to resolve atomically
+// below `dir`).
 //
 // Owners: every file shows uid and gid 1000 (FS_DEFAULT_OWNER: the distro
 // images' user, the guest's default), and chown is accepted and ignored,
@@ -35,6 +44,7 @@ const { O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_EXCL, O_TRUNC } = constants;
 const O_NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 const O_NONBLOCK = constants.O_NONBLOCK ?? 0;
 const utf8 = new TextDecoder("utf-8", { fatal: true });
+const WINDOWS = path.sep === "\\";
 
 type BigStats = Awaited<ReturnType<typeof fsp.lstat>> & { ino: bigint; dev: bigint; mtimeNs: bigint; atimeNs: bigint; ctimeNs: bigint; size: bigint; nlink: bigint; mode: bigint };
 
@@ -184,6 +194,8 @@ export function nodeFs(dir: string): Fs {
 	const lock = swapLockOf(root);
 	const real = (p: string): string => {
 		if (!p.startsWith("/") || p.includes("\0") || p.split("/").some((c) => c === ".." || c === ".")) throw new FsError("EINVAL", `bad path ${JSON.stringify(p)}`);
+		// On Windows a guest's name may hold what the host reads as a separator, a drive or a stream.
+		if (WINDOWS && /[\\:]/.test(p)) throw new FsError("EINVAL", `bad path ${JSON.stringify(p)}`);
 		return p === "/" ? root : root + p;
 	};
 	return {
