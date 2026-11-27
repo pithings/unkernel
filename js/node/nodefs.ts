@@ -161,6 +161,20 @@ export function nodeFs(dir: string): Fs {
 		async rename(from, to) {
 			await fsp.rename(real(from), real(to));
 		},
+		async link(target, p) {
+			// link(2) follows a symlink in the source on some hosts (Darwin), which would make a second name,
+			// inside this directory, for a file outside it. So the source must be a regular file, and the new
+			// name must be that file: a symlink renamed into place between the two calls is undone.
+			const from = real(target), to = real(p);
+			const want = await fsp.lstat(from);
+			if (!want.isFile()) throw new FsError("EPERM", `a hard link to something that is not a regular file: ${target}`);
+			await fsp.link(from, to);
+			const made = await fsp.lstat(to);
+			if (made.ino !== want.ino || made.dev !== want.dev) {
+				await fsp.unlink(to).catch(() => {});
+				throw new FsError("EPERM", `${target} changed while it was linked`);
+			}
+		},
 		async setattr(p, attr) {
 			const rp = real(p);
 			const st = await fsp.lstat(rp);

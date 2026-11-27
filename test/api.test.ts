@@ -1283,6 +1283,20 @@ describe("api", { concurrency: CONCURRENCY }, () => {
 			assert.equal(r.out, "read only");
 		});
 
+		test("hard links on nodeFs: ln in the guest makes a second name for the host file (one inode); a directory is refused", async () => {
+			const dir = path.join(scratch, "hard");
+			mkdirSync(dir);
+			writeFileSync(path.join(dir, "a.txt"), "same\n");
+			const m = await k.vm.mount("/hard", nodeFs(dir));
+			const r = await sh("ln /hard/a.txt /hard/b.txt && stat -c %h /hard/b.txt && cat /hard/b.txt; mkdir /hard/d; ln /hard/d /hard/d2 2>&1 || true");
+			assert.equal(r.code, 0, r.err);
+			const lines = r.out.split("\n");
+			assert.deepEqual(lines.slice(0, 2), ["2", "same"], "the guest sees one file with two names");
+			assert.match(lines[2] ?? "", /not permitted|hard link not allowed for directory/, "no hard links to directories");
+			assert.equal(lstatSync(path.join(dir, "b.txt")).ino, lstatSync(path.join(dir, "a.txt")).ino, "one inode on the host");
+			await m.unmount();
+		});
+
 		test("vm.mount() and unmount() at runtime: nodeFs (symlinks stay links, ls -i matches stat, names that are not UTF-8 left out), busy paths", async () => {
 			mkdirSync(path.join(scratch, "sub"));
 			writeFileSync(path.join(scratch, "sub", "h.txt"), "host file\n");

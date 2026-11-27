@@ -1154,12 +1154,15 @@ parts that are easy to get wrong.
   fid's I/O until it is clunked, so it must keep working after the path is
   renamed or removed (MemoryFs holds the node, nodeFs the FileHandle).
   Optional `create` (returns the file open), `mkdir`, `symlink`,
-  `readlink`, `remove`, `rename`, `setattr` (by path: chmod, utimes,
-  truncate by name), `statfs`, `close`. An FsError or an error with a Node
+  `readlink`, `remove`, `rename`, `link` (a hard link: a second name for a
+  regular file), `setattr` (by path: chmod, utimes, truncate by name),
+  `statfs`, `close`. An FsError or an error with a Node
   errno `code` answers that errno, anything else EIO plus one log line.
   Missing methods: EROFS for changes, EOPNOTSUPP for `symlink`, mknod and
-  xattrs (kw9p mounts with `noxattr`); Tlink is always EPERM (no hard
-  links); a file without `write` is not opened for writing (EACCES);
+  xattrs (kw9p mounts with `noxattr`); EPERM for `link`, and for a hard
+  link to anything but a regular file (nodeFs has `link`, and refuses a
+  symlink source itself, since Darwin's link(2) follows one; MemoryFs has
+  no `link`); a file without `write` is not opened for writing (EACCES);
   Tfsync without `fsync` (a directory) succeeds. Tlcreate without O_EXCL
   of a name that exists (the host made it after the guest's lookup) opens
   it, honouring O_TRUNC. Writes, truncation, fsync and clunk through one

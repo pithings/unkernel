@@ -13,6 +13,10 @@ import assert from "node:assert/strict";
 import { P9FrameAssembler, serve9p } from "../js/core/9p.ts";
 import { FsError, type Fs, type FsAttr, type FsFile } from "../js/core/fs.ts";
 import { MemoryFs, type MemoryFsChange } from "../js/core/memfs.ts";
+import { nodeFs } from "../js/node/nodefs.ts";
+import { mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as joinPath } from "node:path";
 import { MountError, normalizeMountPath, parseMounts, snapshotMountMismatch, toFs } from "../js/core/mounts.ts";
 import { VSOCK_HEADER_SIZE, VSOCK_OP_CREDIT_REQUEST, VSOCK_OP_CREDIT_UPDATE, VSOCK_OP_REQUEST, VSOCK_OP_RESPONSE, VSOCK_OP_RST, VSOCK_OP_RW, VsockHost,
 	decodeVsockHeader, encodeVsockPacket, type Vsock, type VsockConnection, type VsockListener } from "../js/core/vsock.ts";
@@ -399,6 +403,35 @@ test("a computed file is evaluated once per open: its reads and getattr see that
 	assert.equal(dec.decode(await c.read(again, 0, 1000)), `${n}\n`.repeat(n));
 	assert.equal(dec.decode(await c.read(fid, 0, 1000)), got, "the first open file keeps its result");
 	await assert.rejects(c.open("count", O_RDWR), errno(13));
+});
+
+test("Tlink: a hard link through an Fs with link (nodeFs); EPERM without it, for a directory, and on a read-only mount", async () => {
+	const { mount } = setup();
+	const dir = mkdtempSync(joinPath(tmpdir(), "unkernel-9p-link-"));
+	writeFileSync(joinPath(dir, "a.txt"), "same");
+	const { c } = await mount(nodeFs(dir));
+	const a = await c.walk(0, ["a.txt"]);
+	await c.link(0, a.fid, "b.txt");
+	assert.equal(statSync(joinPath(dir, "b.txt")).ino, statSync(joinPath(dir, "a.txt")).ino, "one inode, two names");
+	assert.equal(readFileSync(joinPath(dir, "b.txt"), "utf8"), "same");
+	assert.equal((await c.getattr((await c.walk(0, ["b.txt"])).fid)).nlink, 2);
+	await assert.rejects(c.link(0, (await c.walk(0, ["a.txt"])).fid, "b.txt"), errno(17), "EEXIST: the new name is taken");
+	await c.mkdir(0, "d");
+	await assert.rejects(c.link(0, (await c.walk(0, ["d"])).fid, "d2"), errno(1), "EPERM: no hard links to directories");
+
+	// A symlink to a file outside the export: on Darwin, link(2) would follow it and give the guest a name
+	// for the outside file. Refused both by the 9p server (the fid is a symlink) and by nodeFs itself.
+	const outside = mkdtempSync(joinPath(tmpdir(), "unkernel-9p-outside-"));
+	writeFileSync(joinPath(outside, "secret"), "host");
+	symlinkSync(joinPath(outside, "secret"), joinPath(dir, "evil"));
+	await assert.rejects(c.link(0, (await c.walk(0, ["evil"])).fid, "copy"), errno(1), "EPERM: a hard link to a symlink");
+	await assert.rejects(Promise.resolve(nodeFs(dir).link!("/evil", "/copy2")), (e: { code?: string }) => e.code === "EPERM", "nodeFs refuses a symlink source");
+	assert.equal(statSync(joinPath(outside, "secret")).nlink, 1, "the outside file got no second name");
+
+	const mem = await mount(new MemoryFs({ "x.txt": "x" }));
+	await assert.rejects(mem.c.link(0, (await mem.c.walk(0, ["x.txt"])).fid, "y.txt"), errno(1), "EPERM: an Fs without link");
+	const ro = await mount(nodeFs(dir), { readOnly: true });
+	await assert.rejects(ro.c.link(0, (await ro.c.walk(0, ["a.txt"])).fid, "c.txt"), errno(30), "EROFS: a read-only mount");
 });
 
 test("create, mkdir, symlink, readlink, readdir in pieces, unlinkat, rmdir, rename over, truncate on open; changes reported; Tlcreate without O_EXCL opens what exists", async () => {

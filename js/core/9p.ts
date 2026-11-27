@@ -993,8 +993,18 @@ class Session {
 			else await this.#need("symlink", "EOPNOTSUPP")(path, r.name());
 			return new Writer(HDR + 13).qid(qidOf(path, await fs.getattr(path)));
 		}
-		case Tlink:
-			throw new FsError("EPERM", "no hard links");
+		case Tlink: {
+			// Tlink dfid fid name: a new name in the directory dfid for the file fid.
+			const d = this.#dir(r.u32());
+			const f = this.#fid(r.u32());
+			const name = r.name();
+			checkName(name);
+			if (f.stale) throw new FsError("ESTALE", `${f.path}: the file open before the snapshot is gone`);
+			// Regular files only: a hard link to a symlink is one that some hosts' link(2) follows (Darwin's).
+			if (f.type !== "file") throw new FsError("EPERM", `a hard link to a ${f.type}`);
+			await this.#need("link", "EPERM")(f.path, join(d.path, name));
+			return new Writer(HDR);
+		}
 		case Tmknod:
 			throw new FsError("EOPNOTSUPP");
 		case Tunlinkat: {
