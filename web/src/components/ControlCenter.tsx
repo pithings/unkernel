@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
-// The top bar's two popovers, macOS menu-bar extras: plain black panels
+// The top bar's two popovers, macOS menu-bar extras: plain panels
 // (style.css .popover) under the bar's right side.
 // - The Control Center (#tb-cc), opened by the bar's last item (TopBar.tsx
 //   #tb-status, two switches). Top to bottom:

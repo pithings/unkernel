@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
-// The page's alerts, sheets and cards, in the manner of macOS alerts on the
-// dark theme (style.css .alert, .btn): a flat near-black surface with a thin
+// The page's alerts, sheets and cards, in the manner of macOS alerts
+// (style.css .alert, .btn): a flat surface with a thin
 // even edge, a soft shadow and a 16 px radius; the unkernel mark on top (with
 // a caution, error or pause badge), a semibold centred title, a smaller muted
 // message, an optional detail line (a URL, in mono), an optional body, and
@@ -68,7 +68,7 @@ export function AlertIconView({ icon, size = 48 }: { icon: AlertIcon; size?: num
 	);
 }
 
-/** A button of an alert or card: primary (white), danger (red) or secondary (quiet). */
+/** A button of an alert or card: primary (white, or black), danger (red) or secondary (quiet). */
 export function AlertButton({ kind = "secondary", className = "", ...rest }: ComponentProps<"button"> & { kind?: "primary" | "danger" | "secondary" }) {
 	const tone = kind === "primary" ? "btn-primary" : kind === "danger" ? "btn-danger" : "";
 	return <button type="button" {...rest} className={`btn btn-alert ${tone} ${className}`} />;

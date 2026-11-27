@@ -53,12 +53,12 @@
 .sk-win { position: relative; width: min(clamp(720px, 74vw, 1180px), 100%); height: min(max(420px, calc((100dvh - 64px) * .84)), 100%); }
 @media (max-width: 639.98px), (pointer: coarse) {
 	.sk-win { width: 100%; height: 100%; border-width: 0 !important; border-radius: 0 !important; box-shadow: none !important; }
-	.sk-win > .wm-title { height: var(--wm-strip, 30px); border-radius: 0; border-bottom-color: var(--color-line, #242424); background: #0a0a0a !important; }
+	.sk-win > .wm-title { height: var(--wm-strip, 30px); border-radius: 0; border-bottom-color: var(--color-line, #242424); background: var(--color-surface, #0a0a0a) !important; }
 	.sk-win > .wm-body { border-radius: 0; }
 }
 @media (pointer: coarse) { .sk-win > .wm-title { height: 40px; } }
 :root.kw-mobile .sk-win { width: 100%; height: 100%; border-width: 0 !important; border-radius: 0 !important; box-shadow: none !important; }
-:root.kw-mobile .sk-win > .wm-title { height: 40px; border-radius: 0; border-bottom-color: var(--color-line, #242424); background: #0a0a0a !important; }
+:root.kw-mobile .sk-win > .wm-title { height: 40px; border-radius: 0; border-bottom-color: var(--color-line, #242424); background: var(--color-surface, #0a0a0a) !important; }
 :root.kw-mobile .sk-win > .wm-body { border-radius: 0; }
 
 #app[data-blank] #win-terminal-1 > .wm-body::after {
@@ -73,7 +73,7 @@
 .tb-boot[data-hide] { opacity: 0; pointer-events: none; }
 .tb-boot-btn { flex: 0 1 auto; min-width: 0; justify-content: flex-start; gap: 7px; padding: 0 8px; }
 .tb-boot-ring { flex: none; }
-.tb-boot-track { stroke: rgb(255 255 255 / 26%); }
+.tb-boot-track { stroke: color-mix(in srgb, var(--color-ink, #fff) 26%, transparent); }
 .tb-boot-arc {
 	stroke: currentColor; stroke-dasharray: 100px; stroke-dashoffset: calc((1 - var(--p, 0)) * 100px);
 	transition: stroke-dashoffset .25s ease-out;
@@ -82,8 +82,8 @@
 }
 @keyframes tb-boot-breathe { to { opacity: .45; } }
 .tb-boot-msg, .tb-boot-title { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.tb-boot-msg { color: rgb(237 237 237 / 72%); }
-.tb-boot-detail { color: rgb(237 237 237 / 45%); font-variant-numeric: tabular-nums; }
+.tb-boot-msg { color: color-mix(in srgb, var(--color-fg, #ededed) 72%, transparent); }
+.tb-boot-detail { color: color-mix(in srgb, var(--color-fg, #ededed) 45%, transparent); font-variant-numeric: tabular-nums; }
 .tb-boot-title { font-weight: 600; }
 #tb-boot[data-error] { color: var(--color-err, #ff6166); }
 #tb-boot[data-error] .tb-boot-arc { stroke-dashoffset: 0; animation: none; }

@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
 // The top bar (#topbar), macOS's menu bar: a thin strip across the top of
 // the page (style.css: --tb-h, over the top safe area), with no background
-// over the wallpaper, nearly black while a maximized window is shown (wm.ts
+// over the wallpaper, nearly opaque while a maximized window is shown (wm.ts
 // dockHides(): data-dark) and in compact mode. The workspace (#workspace, Workspace.tsx) starts below
 // it (--tb-space). Left to right:
 // - the current app, one control (what macOS's Apple menu has is in the
