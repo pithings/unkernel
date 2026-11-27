@@ -285,7 +285,8 @@ well behind native.
 - The SDK and CLI boot one CPU by default; the page boots several where
   it can (`?cpus=`). A snapshot of several CPUs (SMP), and so a session
   suspended on the page, resumes only on as many.
-- No IPv6, no UDP beyond DHCP and DNS, no inbound network connections
+- No IPv6, no ICMP beyond the gateway, no UDP on the page beyond DHCP and
+  DNS (its Wisp server carries none), no inbound network connections
   ([`vm.connect()`, `vm.fetch()`](#talk-over-vsock) and `--forward` reach
   guest servers over vsock instead).
 - Over `wispBackend()`, a guest's half-close (`shutdown(SHUT_WR)`) does
@@ -354,10 +355,11 @@ await createKernel({ net: wispBackend("wss://wisp.example/") });    // anywhere:
 ```
 
 Networking is off unless you pass `net`. Any object with `connect` and
-`lookup` methods can carry the guest's TCP and DNS, so you can write your
-own backend. Wisp carries no DNS and no half-close
-([Known limits](#-known-limits)); `wispBackend(servers, { lookup })` takes a
-resolver of your own, such as DNS over HTTPS, for real addresses.
+`lookup` methods can carry the guest's TCP and DNS (and with a `udp`
+method its UDP), so you can write your own backend. Wisp carries no DNS and
+no half-close ([Known limits](#-known-limits)); `wispBackend(servers, {
+lookup })` takes a resolver of your own, such as DNS over HTTPS, for real
+addresses.
 
 ### Add disks
 

@@ -1734,13 +1734,24 @@ parts that are easy to get wrong.
 - `NetStack` is a user-mode stack that terminates the guest's frames:
   guest 10.0.2.15/24, gateway 10.0.2.2, DNS 10.0.2.3. It handles ARP,
   DHCP, DNS A (AAAA gets an empty answer), ping to the gateway and DNS
-  addresses, and TCP (MSS, window scaling, flow control, go-back-N
-  retransmit, FIN, RST). Each TCP connection goes to a backend (any object
-  with `connect` and `lookup`). `net` may also be a spec (Worker mode).
-- `directBackend()` (Node only, the CLI's default) uses host sockets and
-  `dns.lookup`. With `hostLoopback`, 10.0.2.2 goes to the host's 127.0.0.1.
-- `wispBackend()` multiplexes connections over one WebSocket to a Wisp v1
-  server. The SDK names no server: the caller passes one (the page's is
+  addresses, TCP (MSS, window scaling, flow control, go-back-N
+  retransmit, FIN, RST) and UDP flows. Each TCP connection goes to a
+  backend (any object with `connect` and `lookup`), each UDP flow to its
+  optional `udp`. `net` may also be a spec (Worker mode).
+- A UDP flow is a guest port and one remote address and port (replies
+  from anywhere else are not delivered); it closes after `UDP_IDLE_MS`
+  (60 s) idle, and past 256 flows the least recently used one goes. A
+  backend's ECONNREFUSED reaches the guest as ICMP port unreachable, and
+  so does UDP with no `udp` or to the subnet. Datagrams from the host may
+  exceed the MTU (kwnet takes any frame); the guest's may not (no IP
+  fragments).
+- `directBackend()` (Node only, the CLI's default) uses host sockets (a
+  connected `dgram` socket per UDP flow) and `dns.lookup`. With
+  `hostLoopback`, 10.0.2.2 goes to the host's 127.0.0.1.
+- `wispBackend()` multiplexes connections and UDP flows (stream type 2,
+  one DATA packet per datagram, no credit; dropped while the WebSocket
+  buffers more than 1 MiB) over one WebSocket to a Wisp v1 server. The
+  SDK names no server: the caller passes one (the page's is
   `web/src/net.ts` DEFAULT_WISP_SERVERS, web.md). With several URLs, all
   are opened at once and the first handshake wins. Logs carry the URLs.
 - `headers` are sent with the handshake where the WebSocket takes them
@@ -1749,7 +1760,8 @@ parts that are easy to get wrong.
 - The project's Wisp server, `wss://wisp.unkernel.dev:6680/` (port 443
   does not answer), has an allow list of Origins (the page's, and
   `http://localhost` for the dev server) and answers anything else,
-  including no Origin, with 404.
+  including no Origin, with 404. It does not carry UDP, so the page's
+  guest has none beyond DHCP and DNS.
 - Wisp has no DNS, so the guest gets stable fake addresses from
   198.18.0.0/15 and a bad name fails at connect time. The table holds
   2^17 - 1 names and, when full, gives the least recently used name's
@@ -1769,15 +1781,16 @@ parts that are easy to get wrong.
   pipelined requests answered in order) that answers with `fetch()`: a
   string route rewrites the prefix (`http://HOST/p` to `BASE/p`) and
   forwards only Range, If-Range, If-Modified-Since and If-None-Match, a
-  function route gets a `Request`. Other ports on those addresses are refused; everything else
-  goes to `inner`. In a browser the target's CORS must allow those
+  function route gets a `Request`. Other ports on those addresses, and UDP
+  to them, are refused; everything else goes to `inner` (`udp` only when
+  `inner` has it). In a browser the target's CORS must allow those
   four headers, and one that
   compresses must expose Content-Encoding (the answer is then chunked;
   unseen, the decoded body goes out with the encoded length). The wisp spec
   takes the string form as `routes` (`buildNet()`). The page routes
   `deb.debian.org` to a CORS mirror (`web/src/config.ts` DEFAULT_ROUTES,
   `?routes=0` turns it off).
-- Not implemented: IPv6, IP fragments, UDP beyond DHCP and DNS, ICMP beyond
-  10.0.2.2/3, SACK, timestamps and inbound connections. A raw-Ethernet
+- Not implemented: IPv6, IP fragments, ICMP beyond 10.0.2.2/3, SACK,
+  timestamps and inbound connections and datagrams. A raw-Ethernet
   relay backend is not useful: v86's relay gave DHCP but no upstream DNS
   or TCP.

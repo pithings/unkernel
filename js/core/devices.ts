@@ -94,7 +94,7 @@ export interface NetSpec extends SpecCommon {
 			/** Plain HTTP to these host names is answered with fetch() from these base URLs (net-fetch.ts fetchRoutes()). */
 			routes?: Record<string, string>;
 		};
-	/** TCP to the gateway (10.0.2.2) goes to the host's 127.0.0.1 (direct only). */
+	/** TCP and UDP to the gateway (10.0.2.2) go to the host's 127.0.0.1 (direct only). */
 	hostLoopback?: boolean;
 	mtu?: number;
 	mac?: string;

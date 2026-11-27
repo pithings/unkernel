@@ -8,8 +8,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type AddressInfo } from "node:net";
 import { createServer as createHttpServer } from "node:http";
-import { ip4, ip4str, type NetBackend, type NetConnectionEvents } from "../js/core/net.ts";
+import dgram from "node:dgram";
+import { NetStack, UDP_IDLE_MS, ip4, ip4str, type NetBackend, type NetConnectionEvents, type NetDatagramEvents } from "../js/core/net.ts";
 import { wispBackend } from "../js/core/net-wisp.ts";
+import { fetchRoutes } from "../js/core/net-fetch.ts";
 import { directBackend } from "../js/node/net.ts";
 import { acceptWebSocket } from "./ws-server.ts";
 import { GUEST, GUEST_MAC, collect, csum, echoTest, eth, ipv4, mkStack, tcp, udp, until, withWisp } from "./net-helpers.ts";
@@ -72,7 +74,7 @@ test("DNS A query is answered from the backend, AAAA is empty, failures map to r
 	assert.equal(byId[9]!.payload[3]! & 15, 3);
 });
 
-test("ping the gateway; UDP elsewhere gets port unreachable", () => {
+test("ping the gateway; UDP elsewhere gets port unreachable without a backend udp()", () => {
 	const { stack, out } = mkStack({});
 	const icmp = Uint8Array.from([8, 0, 0, 0, 0, 1, 0, 1, 1, 2, 3, 4]);
 	new DataView(icmp.buffer).setUint16(2, csum(icmp, 0, icmp.length));
@@ -81,6 +83,172 @@ test("ping the gateway; UDP elsewhere gets port unreachable", () => {
 	assert.equal(out.length, 2);
 	assert.equal(out[0]!.icmpType, 0);
 	assert.equal(out[1]!.icmpType, 3);
+});
+
+/** A backend whose udp() records flows; `reply(i, data)` answers on flow i. */
+function fakeUdp() {
+	const flows: { host: string; port: number; sent: string[]; closed: boolean; ev: NetDatagramEvents }[] = [];
+	const backend: Partial<NetBackend> = {
+		udp({ host, port }, ev) {
+			const fl = { host, port, sent: [] as string[], closed: false, ev };
+			flows.push(fl);
+			return { send: (d) => fl.sent.push(Buffer.from(d).toString()), close: () => { fl.closed = true; } };
+		},
+	};
+	return { flows, backend };
+}
+
+test("UDP flows: one per guest port and remote, replies from the remote, local and broadcast destinations stay local", () => {
+	const { flows, backend } = fakeUdp();
+	const { stack, out } = mkStack(backend);
+	const enc = (s: string) => new TextEncoder().encode(s);
+	stack.send(udp(5000, ip4("1.1.1.1"), 123, enc("a")));
+	stack.send(udp(5000, ip4("1.1.1.1"), 123, enc("b")));
+	stack.send(udp(5001, ip4("1.1.1.1"), 123, enc("c")));
+	stack.send(udp(5000, ip4("10.0.2.2"), 9999, enc("d"))); // the gateway: 127.0.0.1 (hostLoopback)
+	assert.deepEqual(flows.map((f) => `${f.host}:${f.port} ${f.sent.join("")}`),
+		["1.1.1.1:123 ab", "1.1.1.1:123 c", "127.0.0.1:9999 d"]);
+	assert.equal(stack.stats.udpOpened, 3);
+	assert.equal(out.length, 0);
+
+	flows[0]!.ev.onMessage(enc("pong"));
+	assert.equal(out.length, 1);
+	const r = out.shift()!;
+	assert.equal(r.proto, 17);
+	assert.equal(ip4str(r.src!), "1.1.1.1");
+	assert.equal(r.sport, 123);
+	assert.equal(r.dst, GUEST);
+	assert.equal(r.dport, 5000);
+	assert.equal(Buffer.from(r.payload).toString(), "pong");
+
+	// The subnet and the DNS address on another port: port unreachable, not the backend.
+	stack.send(udp(5000, ip4("10.0.2.9"), 7, enc("x")));
+	stack.send(udp(5000, ip4("10.0.2.3"), 7, enc("x")));
+	assert.deepEqual(out.splice(0).map((p) => p.icmpType), [3, 3]);
+	// Broadcast and multicast: dropped.
+	stack.send(udp(5000, 0xffffffff, 7, enc("x")));
+	stack.send(udp(5000, ip4("224.0.0.251"), 5353, enc("x")));
+	assert.equal(out.length, 0);
+	assert.equal(flows.length, 3);
+
+	// A refused flow reaches the guest as ICMP port unreachable quoting its datagram.
+	flows[1]!.ev.onClose(Object.assign(new Error("refused"), { code: "ECONNREFUSED" }));
+	const u = out.shift()!;
+	assert.equal(u.icmpType, 3);
+	assert.equal(u.f[35], 3, "port unreachable");
+	assert.equal(ip4str(u.src!), "1.1.1.1");
+	assert.equal(u.dv.getUint16(42 + 20), 5001, "quotes the guest's UDP header");
+	assert.equal(stack.udp.size, 2);
+	// The next datagram on that flow opens a new one.
+	stack.send(udp(5001, ip4("1.1.1.1"), 123, enc("e")));
+	assert.equal(flows.length, 4);
+
+	stack.close();
+	assert.ok(flows.every((f) => f.closed || f === flows[1]));
+	assert.equal(stack.udp.size, 0);
+	assert.equal(stack.udpSweep, null);
+});
+
+test("UDP flows: idle ones expire, the least recently used goes past the limit", () => {
+	const { flows, backend } = fakeUdp();
+	const { stack } = mkStack(backend);
+	const x = new Uint8Array(1);
+	stack.send(udp(6000, ip4("8.8.8.8"), 53, x));
+	stack.send(udp(6001, ip4("8.8.8.8"), 53, x));
+	stack.udp.get(`6000/${ip4("8.8.8.8")}/53`)!.lastActive -= UDP_IDLE_MS + 1;
+	stack.udpExpire();
+	assert.deepEqual(flows.map((f) => f.closed), [true, false]);
+
+	for (let p = 6002; p < 6002 + 255; p++) stack.send(udp(p, ip4("8.8.8.8"), 53, x));
+	assert.equal(stack.udp.size, 256);
+	stack.send(udp(6001, ip4("8.8.8.8"), 53, x)); // touch the oldest: now the newest
+	flows[2]!.ev.onMessage(x); // a reply counts too: port 6002 is the newest
+	stack.send(udp(7000, ip4("8.8.8.8"), 53, x));
+	assert.equal(stack.udp.size, 256);
+	assert.equal(flows[1]!.closed, false);
+	assert.equal(flows[2]!.closed, false);
+	assert.equal(flows[3]!.closed, true, "port 6003 was the least recently used");
+	stack.close();
+});
+
+test("UDP through the direct backend: an echo via the gateway, port unreachable from a closed port", async () => {
+	const srv = dgram.createSocket("udp4");
+	srv.on("message", (m, rinfo) => srv.send(m, rinfo.port, rinfo.address));
+	await new Promise<void>((r) => srv.bind(0, "127.0.0.1", r));
+	const port = srv.address().port;
+	const b = directBackend();
+	const { stack, out } = mkStack(b);
+	const gw = ip4("10.0.2.2");
+	const big = new Uint8Array(4000).map((_, i) => i & 255); // more than an MTU: one frame to the guest
+	stack.send(udp(5353, gw, port, new TextEncoder().encode("hello")));
+	stack.send(udp(5353, gw, port, big));
+	await until(() => out.length === 2);
+	assert.equal(Buffer.from(out[0]!.payload).toString(), "hello");
+	assert.deepEqual(out[1]!.payload, big);
+	assert.ok(out.every((r) => r.src === gw && r.sport === port && r.dport === 5353));
+
+	const closed = dgram.createSocket("udp4");
+	await new Promise<void>((r) => closed.bind(0, "127.0.0.1", r));
+	const dead = closed.address().port;
+	await new Promise<void>((r) => closed.close(r));
+	// The host reports the refusal once a datagram has drawn the ICMP error.
+	for (let i = 0; i < 20 && !out.some((r) => r.icmpType === 3); i++) {
+		stack.send(udp(5354, gw, dead, new Uint8Array(1)));
+		await new Promise((r) => setTimeout(r, 25));
+	}
+	const u = out.find((r) => r.icmpType === 3);
+	assert.ok(u, "ICMP port unreachable");
+	assert.equal(u.f[35], 3);
+
+	// Node's connect() throws for port 0: the flow closes with the error instead.
+	let err: Error | null = null;
+	b.udp!({ host: "127.0.0.1", port: 0 }, { onMessage() {}, onClose(e) { err = e; } }).send(new Uint8Array(1));
+	assert.equal((err as { code?: string } | null)?.code, "ERR_SOCKET_BAD_PORT");
+	stack.close();
+	b.close!();
+	srv.close();
+});
+
+test("UDP through Wisp: a stream per flow, a packet per datagram, a refused one is port unreachable", async () => {
+	await withWisp(async (b, seen) => {
+		const { stack, out } = mkStack(b);
+		const [ip] = await b.lookup("echo.test");
+		const enc = (s: string) => new TextEncoder().encode(s);
+		// More datagrams than the TCP credit (2), in one tick: no coalescing, no waiting for CONTINUE.
+		for (const s of ["one", "two", "three", "four"]) stack.send(udp(4000, ip4(ip!), 4242, enc(s)));
+		await until(() => out.length === 4);
+		assert.deepEqual(out.map((r) => Buffer.from(r.payload).toString()), ["one", "two", "three", "four"]);
+		assert.deepEqual(seen.hosts, ["udp:echo.test:4242"]);
+		assert.equal(seen.packets, 4);
+
+		out.length = 0;
+		stack.send(udp(4001, ip4("192.0.2.1"), 53, enc("q")));
+		await until(() => out.length === 1);
+		assert.equal(out[0]!.icmpType, 3);
+		stack.close();
+	});
+});
+
+test("fetchRoutes: UDP to a routed name is refused, other UDP goes to the inner backend", async () => {
+	const { flows, backend } = fakeUdp();
+	const fr = fetchRoutes(backend as NetBackend, { "mirror.test": "https://example.invalid/" });
+	assert.ok(fr.udp);
+	const [routed] = await fr.lookup("mirror.test");
+	const err = await new Promise<Error | null>((res) => fr.udp!({ host: routed!, port: 80 }, { onMessage() {}, onClose: res }));
+	assert.equal((err as Error & { code?: string }).code, "ECONNREFUSED");
+	fr.udp({ host: "1.1.1.1", port: 53 }, { onMessage() {}, onClose() {} });
+	assert.deepEqual(flows.map((f) => `${f.host}:${f.port}`), ["1.1.1.1:53"]);
+	assert.equal(fetchRoutes(undefined, {}).udp, undefined, "no inner udp(), no udp()");
+});
+
+test("UDP flows that fail the same way are logged once", () => {
+	const logs: string[] = [];
+	const backend: Partial<NetBackend> = { udp(_a, ev) { ev.onClose(new Error("down")); return { send() {}, close() {} }; } };
+	const stack = new NetStack({ backend: backend as NetBackend, log: (m) => logs.push(m) });
+	stack.output = () => {};
+	for (let p = 5000; p < 5010; p++) stack.send(udp(p, ip4("1.1.1.1"), 53, new Uint8Array(1)));
+	assert.deepEqual(logs, ["[net] udp 1.1.1.1:53: down"]);
+	assert.equal(stack.udp.size, 0);
 });
 
 test("TCP to a refused port gets RST; unknown segment gets RST", async () => {
