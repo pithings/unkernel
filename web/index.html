@@ -9,7 +9,7 @@
 <!-- Added to the home screen, iOS opens the page without Safari's bars (it has no element full screen on iPhone). -->
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<!-- Not black-translucent: iOS 26+ then gives the page a viewport short of the screen by the status bar and leaves a black band at the bottom (WebKit bug 301108). The page is black, so the status bar matches. -->
+<!-- Not black-translucent: iOS 26+ then gives the page a viewport short of the screen by the status bar and leaves a black band at the bottom (WebKit bug 301108). The page is black in the dark theme, so the status bar matches. -->
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
 <meta name="apple-mobile-web-app-title" content="unkernel">
 <meta name="color-scheme" content="dark">
@@ -105,15 +105,20 @@
 // still ends up on screen: on the static desktop below (the markup React
 // replaces once src/main.tsx runs) the boot indicator turns red and the
 // failure card shows the message; src/ui.ts shows everything recorded here
-// once it runs. Also what the first paint needs from storage: the saved
-// wallpaper's hint (desktop.ts HINT_KEY) and compact mode for a mobile
+// once it runs. Also what the first paint needs from storage: the colour
+// themes, the saved wallpaper's hint (desktop.ts HINT_KEY) and compact mode for a mobile
 // user agent without a touch screen (config.ts mobile).
 (() => {
 	const KW = window.KW = { t0: Date.now(), errors: [], ui: null, started: false };
 	const root = document.documentElement;
 	try {
+		const p = localStorage.getItem("kw.theme");
+		const theme = p === "light" || (p !== "dark" && matchMedia("(prefers-color-scheme: light)").matches) ? "light" : "dark";
+		root.setAttribute("data-theme", theme);
+		document.querySelector('meta[name="theme-color"]').setAttribute("content", theme === "light" ? "#ffffff" : "#000000");
+		document.querySelector('meta[name="color-scheme"]').setAttribute("content", theme);
 		const t = localStorage.getItem("kw.termtheme");
-		root.setAttribute("data-term-theme", t === "light" || (t !== "dark" && matchMedia("(prefers-color-scheme: light)").matches) ? "light" : "dark");
+		root.setAttribute("data-term-theme", t === "light" || t === "dark" ? t : theme);
 		root.setAttribute("data-term-glass", localStorage.getItem("kw.termglass") === "off" ? "off" : "on");
 		const h = JSON.parse(localStorage.getItem("kw.wallpaper-hint") || "null");
 		if (h && typeof h.css === "string") {

@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /* Copyright (C) 2026 Pooya Parsa <pooya@pi0.io> */
-/* The page's styles: Tailwind, with a black, minimal theme in the manner of
-   Vercel's Geist (Geist Sans and Geist Mono, a gray scale on black, one
+/* The page's styles: Tailwind, with a minimal theme, dark or light, in the manner of
+   Vercel's Geist (Geist Sans and Geist Mono, a gray scale on black or white, one
    accent per state): a desktop of slightly rounded windows on a dark
    wallpaper with a translucent Dock, plain black menus and popovers
    (.popover), macOS-like alerts, cards and toast on a flat near-black
@@ -109,6 +109,22 @@
 	--alert-border: rgb(255 255 255 / 11%);
 	--alert-shadow: 0 24px 64px rgb(0 0 0 / 60%), 0 4px 14px rgb(0 0 0 / 40%);
 	--alert-dim: rgb(0 0 0 / 32%);
+}
+:root[data-theme="light"] {
+	color-scheme: light;
+	--color-bg: #fff;
+	--color-surface: #fafafa;
+	--color-hover: #f2f2f2;
+	--color-line: #ebebeb;
+	--color-line-strong: #d4d4d4;
+	--color-fg: #171717;
+	--color-muted: #525252;
+	--color-faint: #6b6b6b;
+	--color-ok: #107d32;
+	--color-warn: #a35200;
+	--color-err: #d8262b;
+	--color-off: #737373;
+	--color-accent: #0068d6;
 }
 /* No backdrop blur: the tints alone, nearly opaque. */
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {

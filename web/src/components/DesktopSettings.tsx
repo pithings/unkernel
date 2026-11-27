@@ -26,6 +26,7 @@ import {
 import { useAppVisible } from "../sysapps.ts";
 import { H3, useSection } from "./AppShell.tsx";
 import { PinIcon, ShuffleIcon } from "./icons.tsx";
+import { Theme } from "./Options.tsx";
 
 /** The default wallpaper in a thumbnail: style.css's #app gradient and #desktop mark. */
 const DEFAULT_THUMB = {
@@ -36,6 +37,7 @@ const Spinner = () => <span className="size-4 animate-spin rounded-full border-2
 export function DesktopSettings() {
 	return (
 		<>
+			<Theme />
 			<H3>Wallpaper</H3>
 			<Builtins />
 			<H3>Photos</H3>

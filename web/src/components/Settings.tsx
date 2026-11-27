@@ -41,7 +41,7 @@ const SECTIONS: SectionDef[] = [
 	{ id: "storage", name: "Storage", icon: <DiskIcon size={14} />, desc: "The data disk: /data and your changes to the root, kept in this browser." },
 	{ id: "network", name: "Network", icon: <PreviewIcon size={14} />, desc: "The guest's internet, and its web servers in a browser window." },
 	{ id: "display", name: "Display and sound", icon: <DisplayIcon size={14} />, desc: "The guest's devices (applied when you reboot) and the terminal's font and colours." },
-	{ id: "desktop", name: "Desktop", icon: <WallpaperIcon size={14} />, desc: "The wallpaper and the console after boot. Applied at once." },
+	{ id: "desktop", name: "Desktop", icon: <WallpaperIcon size={14} />, desc: "The theme, the wallpaper and the console after boot. Applied at once." },
 	{ id: "session", name: "Session", icon: <PauseIcon size={14} />, desc: "Saving the running system when the tab is hidden or closed." },
 	{ id: "keys", name: "Keyboard", icon: <KeysIcon />, desc: <>Shortcuts work anywhere: {PREFIX}, then a key.</> },
 	{ id: "about", name: "About", icon: <Triangle size={12} /> },

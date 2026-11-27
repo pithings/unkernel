@@ -8,7 +8,7 @@ terminals ([wterm](https://wterm.dev/); more sessions over vsock) are
 tabs of Terminal windows; the guest's display, the guest preview
 (Browser), Settings and System, an app's installer and the guest's
 Wayland apps are windows too. Built with React and Tailwind (v4, a dark
-theme after Vercel's Geist), Vite (client) and Nitro (server and route
+and a light theme after Vercel's Geist), Vite (client) and Nitro (server and route
 rules), on the SDK from source. The top-level README.md describes it for
 users.
 

@@ -56,6 +56,7 @@ function openStop(t: HTMLInputElement, i: number): number {
 }
 
 const pick = (name: string, v: string) => (name === "font" ? KW.ui!.setFont(v)
+	: name === "theme" ? KW.ui!.setTheme(v)
 	: name === "termtheme" ? KW.ui!.setTermTheme(v)
 	: name === "termglass" ? KW.ui!.setTermGlass(v)
 	: KW.ui!.setOption(name as keyof Opts, v as never));
@@ -383,6 +384,20 @@ export function FontSize() {
 		<div className="max-w-sm">
 			<Slider id="opt-font" name="font" label="Font size" value={fontValue} stops={fonts} />
 		</div>
+	);
+}
+
+export function Theme() {
+	const theme = useStore((s) => s.theme);
+	return (
+		<fieldset className="flex max-w-sm flex-col gap-1.5">
+			<legend className="mb-1.5 text-[11.5px] text-faint">Theme</legend>
+			<div className="flex flex-wrap gap-x-5 gap-y-1" role="radiogroup" id="opt-theme">
+				<Radio id="opt-theme-auto" name="theme" value="auto" current={theme} label="Auto" />
+				<Radio id="opt-theme-dark" name="theme" value="dark" current={theme} label="Dark" />
+				<Radio id="opt-theme-light" name="theme" value="light" current={theme} label="Light" />
+			</div>
+		</fieldset>
 	);
 }
 
