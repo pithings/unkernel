@@ -62,7 +62,7 @@ function reloadToResume(auto: boolean): void {
 const SUSPEND_TOAST_MS = 20000;
 
 const padLayout = (v: string | null): PadLayout => (v === "keys" ? v : "gamepad");
-const termThemePref = (v: string | null): UiState["termTheme"] => (v === "auto" || v === "light" ? v : "dark");
+const termThemePref = (v: string | null): UiState["termTheme"] => (v === "dark" || v === "light" ? v : "auto");
 const termGlassPref = (v: string | null): UiState["termGlass"] => (v === "off" ? v : "on");
 
 interface BrowserInfo { name: string; v: number; ios?: boolean }
