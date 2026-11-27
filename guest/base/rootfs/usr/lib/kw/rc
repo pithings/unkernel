@@ -16,7 +16,9 @@
 # without that group (the base shell) the device stays root's. The drivers
 # make these devices at boot; none comes later. It also makes udev's
 # links /dev/fd, /dev/stdin, /dev/stdout and /dev/stderr (bash's <(...)
-# needs /dev/fd), and has DRM's vblank timer stop 100 ms after its last use
+# needs /dev/fd). As systemd's sysctl defaults do, it lets every group open
+# ICMP echo sockets (net.ipv4.ping_group_range): Debian's ping has no file
+# capability or setuid bit and needs them as a user. It also has DRM's vblank timer stop 100 ms after its last use
 # instead of 5 s (drm.vblankoffdelay): the timer wakes the host about 120
 # times a second while it runs. With kw.wayland=1 on the kernel command
 # line (the page adds it when it shows Wayland windows) it starts wland's
@@ -36,6 +38,7 @@ h=
 IFS= read -r h 2>/dev/null < /etc/hostname
 case $h in '' | localhost | localhost.*) h=unkernel ;; esac
 hostname "$h"
+echo '0 2147483647' > /proc/sys/net/ipv4/ping_group_range
 d=/proc/sys/fs/binfmt_misc
 if [ -d $d ] && { mountpoint -q $d || mount -t binfmt_misc binfmt_misc $d 2>/dev/null; } &&
 	[ -x /usr/lib/kw/kwwasi ] && [ ! -e $d/wasi ]; then
