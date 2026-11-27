@@ -14,7 +14,7 @@ import { P9FrameAssembler, serve9p } from "../js/core/9p.ts";
 import { FsError, type Fs, type FsAttr, type FsFile } from "../js/core/fs.ts";
 import { MemoryFs, type MemoryFsChange } from "../js/core/memfs.ts";
 import { nodeFs } from "../js/node/nodefs.ts";
-import { mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { MountError, normalizeMountPath, parseMounts, snapshotMountMismatch, toFs } from "../js/core/mounts.ts";
@@ -405,9 +405,10 @@ test("a computed file is evaluated once per open: its reads and getattr see that
 	await assert.rejects(c.open("count", O_RDWR), errno(13));
 });
 
-test("Tlink: a hard link through an Fs with link (nodeFs); EPERM without it, for a directory, and on a read-only mount", async () => {
+test("Tlink: a hard link through an Fs with link (nodeFs); EPERM without it, for a directory, and on a read-only mount; a link and a rename never overlap", async (t) => {
 	const { mount } = setup();
 	const dir = mkdtempSync(joinPath(tmpdir(), "unkernel-9p-link-"));
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
 	writeFileSync(joinPath(dir, "a.txt"), "same");
 	const { c } = await mount(nodeFs(dir));
 	const a = await c.walk(0, ["a.txt"]);
@@ -422,6 +423,7 @@ test("Tlink: a hard link through an Fs with link (nodeFs); EPERM without it, for
 	// A symlink to a file outside the export: on Darwin, link(2) would follow it and give the guest a name
 	// for the outside file. Refused both by the 9p server (the fid is a symlink) and by nodeFs itself.
 	const outside = mkdtempSync(joinPath(tmpdir(), "unkernel-9p-outside-"));
+	t.after(() => rmSync(outside, { recursive: true, force: true }));
 	writeFileSync(joinPath(outside, "secret"), "host");
 	symlinkSync(joinPath(outside, "secret"), joinPath(dir, "evil"));
 	await assert.rejects(c.link(0, (await c.walk(0, ["evil"])).fid, "copy"), errno(1), "EPERM: a hard link to a symlink");
@@ -432,6 +434,15 @@ test("Tlink: a hard link through an Fs with link (nodeFs); EPERM without it, for
 	await assert.rejects(mem.c.link(0, (await mem.c.walk(0, ["x.txt"])).fid, "y.txt"), errno(1), "EPERM: an Fs without link");
 	const ro = await mount(nodeFs(dir), { readOnly: true });
 	await assert.rejects(ro.c.link(0, (await ro.c.walk(0, ["a.txt"])).fid, "c.txt"), errno(30), "EROFS: a read-only mount");
+
+	// A link and a rename never overlap, so neither path can be swapped during the link: a rename in
+	// flight finishes first (the link then finds no source), and a link in flight holds the rename back.
+	const fs = nodeFs(dir), other = nodeFs(dir);
+	const [renamed, linked] = await Promise.allSettled([fs.rename!("/a.txt", "/r.txt"), other.link!("/a.txt", "/l.txt")]);
+	assert.equal(renamed.status, "fulfilled");
+	assert.equal(linked.status === "rejected" && (linked.reason as { code?: string }).code, "ENOENT", "the link ran after the rename");
+	await Promise.all([fs.link!("/r.txt", "/l.txt"), other.rename!("/r.txt", "/a.txt")]);
+	assert.equal(statSync(joinPath(dir, "l.txt")).ino, statSync(joinPath(dir, "a.txt")).ino, "the rename ran after the link");
 });
 
 test("create, mkdir, symlink, readlink, readdir in pieces, unlinkat, rmdir, rename over, truncate on open; changes reported; Tlcreate without O_EXCL opens what exists", async () => {

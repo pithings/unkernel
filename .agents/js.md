@@ -292,8 +292,9 @@ parts that are easy to get wrong.
   by path (`Session.restore()`) and sets `VsockDevice.keep`; other given
   mounts are mounted once the kernel runs. A file gone, another file now
   (another qid.path), unlinked or replaced by the guest while open
-  (`Fid.orphan`), or not opening within the request timeout leaves its fid
-  stale: its reads, writes, getattr, setattr and fsync answer ESTALE
+  (`Fid.orphan`; also when a hard link still names it, since the restore
+  opens by the fid's path), or not opening within the request timeout
+  leaves its fid stale: its reads, writes, getattr, setattr and fsync answer ESTALE
   ("Stale file handle" in the guest). A MemoryFs passed again keeps the
   guest's changes; a new one has its own content, which the guest sees
   within 1 s, as any host change. `test/9p.test.ts` saves and restores a
@@ -1161,9 +1162,10 @@ parts that are easy to get wrong.
   Missing methods: EROFS for changes, EOPNOTSUPP for `symlink`, mknod and
   xattrs (kw9p mounts with `noxattr`); EPERM for `link`, and for a hard
   link to anything but a regular file (nodeFs has `link`, and refuses a
-  symlink source itself, since Darwin's link(2) follows one; MemoryFs has
-  no `link`); a file without `write` is not opened for writing (EACCES);
-  Tfsync without `fsync` (a directory) succeeds. Tlcreate without O_EXCL
+  symlink source itself, since Darwin's link(2) follows one, and runs no
+  rename, remove or symlink during a link, so the guest cannot swap one
+  in; MemoryFs has no `link`); a file without `write` is not opened for
+  writing (EACCES); Tfsync without `fsync` (a directory) succeeds. Tlcreate without O_EXCL
   of a name that exists (the host made it after the guest's lookup) opens
   it, honouring O_TRUNC. Writes, truncation, fsync and clunk through one
   fid run in order; everything else concurrently. A rename moves the fids

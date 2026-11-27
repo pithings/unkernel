@@ -1283,16 +1283,15 @@ describe("api", { concurrency: CONCURRENCY }, () => {
 			assert.equal(r.out, "read only");
 		});
 
-		test("hard links on nodeFs: ln in the guest makes a second name for the host file (one inode); a directory is refused", async () => {
-			const dir = path.join(scratch, "hard");
-			mkdirSync(dir);
+		test("hard links on nodeFs: ln in the guest makes a second name for the host file (one inode)", async (t) => {
+			// Not below scratch: the next test lists all of it.
+			const dir = mkdtempSync(path.join(tmpdir(), "unkernel-api-hard-"));
+			t.after(() => rmSync(dir, { recursive: true, force: true }));
 			writeFileSync(path.join(dir, "a.txt"), "same\n");
 			const m = await k.vm.mount("/hard", nodeFs(dir));
-			const r = await sh("ln /hard/a.txt /hard/b.txt && stat -c %h /hard/b.txt && cat /hard/b.txt; mkdir /hard/d; ln /hard/d /hard/d2 2>&1 || true");
+			const r = await sh("ln /hard/a.txt /hard/b.txt && stat -c %h /hard/b.txt && cat /hard/b.txt");
 			assert.equal(r.code, 0, r.err);
-			const lines = r.out.split("\n");
-			assert.deepEqual(lines.slice(0, 2), ["2", "same"], "the guest sees one file with two names");
-			assert.match(lines[2] ?? "", /not permitted|hard link not allowed for directory/, "no hard links to directories");
+			assert.deepEqual(r.out.split("\n").slice(0, 2), ["2", "same"], "the guest sees one file with two names");
 			assert.equal(lstatSync(path.join(dir, "b.txt")).ino, lstatSync(path.join(dir, "a.txt")).ino, "one inode on the host");
 			await m.unmount();
 		});

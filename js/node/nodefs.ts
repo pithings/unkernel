@@ -12,9 +12,12 @@
 // and never followed here: the guest resolves them itself, inside its own
 // tree. Opens use O_NOFOLLOW, and O_NONBLOCK so that a FIFO in the tree
 // cannot block a libuv thread (anything but a regular file refuses to
-// open). Not covered: the host swapping a directory for a symlink between
-// the guest's walk and its next request (that request could then reach
-// outside `dir`; Node has no openat2 RESOLVE_BENEATH).
+// open). A hard link's source must be a regular file (Darwin's link(2)
+// follows a symlink), and no guest rename, remove or symlink runs during
+// a link, so the guest cannot swap one in. Not covered: the host
+// swapping a directory for a symlink between the guest's walk and its
+// next request (that request could then reach outside `dir`; Node has no
+// openat2 RESOLVE_BENEATH).
 //
 // Owners: every file shows uid and gid 1000 (FS_DEFAULT_OWNER: the distro
 // images' user, the guest's default), and chown is accepted and ignored,
@@ -50,6 +53,36 @@ function attrOf(st: BigStats): FsAttr {
 }
 
 const lstat = (p: string) => fsp.lstat(p, { bigint: true }) as Promise<BigStats>;
+
+// A hard link runs alone; renames, removes and symlinks run together (swap()) but never while a link runs
+// (nodeFs's link). Module-wide, since two mounts can serve one host directory.
+let linking: Promise<void> | undefined;
+let swapping = 0;
+let drained: (() => void) | undefined;
+
+async function swap<T>(op: () => Promise<T>): Promise<T> {
+	while (linking) await linking;
+	swapping++;
+	try {
+		return await op();
+	} finally {
+		if (--swapping === 0) drained?.();
+	}
+}
+
+async function alone<T>(op: () => Promise<T>): Promise<T> {
+	while (linking) await linking;
+	let release!: () => void;
+	linking = new Promise((r) => (release = r));
+	try {
+		if (swapping) await new Promise<void>((r) => (drained = r));
+		return await op();
+	} finally {
+		drained = undefined;
+		linking = undefined;
+		release();
+	}
+}
 
 /** An open host file for the guest: positional reads and writes on one FileHandle (it survives renames and unlink). */
 function openFile(fh: fsp.FileHandle, writable: boolean): FsFile {
@@ -152,28 +185,30 @@ export function nodeFs(dir: string): Fs {
 			await fsp.mkdir(real(p), { mode });
 		},
 		async symlink(p, target) {
-			await fsp.symlink(target, real(p));
+			await swap(() => fsp.symlink(target, real(p)));
 		},
 		async remove(p, isDir) {
-			if (isDir) await fsp.rmdir(real(p));
-			else await fsp.unlink(real(p));
+			await swap(() => (isDir ? fsp.rmdir(real(p)) : fsp.unlink(real(p))));
 		},
 		async rename(from, to) {
-			await fsp.rename(real(from), real(to));
+			await swap(() => fsp.rename(real(from), real(to)));
 		},
 		async link(target, p) {
 			// link(2) follows a symlink in the source on some hosts (Darwin), which would make a second name,
 			// inside this directory, for a file outside it. So the source must be a regular file, and the new
-			// name must be that file: a symlink renamed into place between the two calls is undone.
-			const from = real(target), to = real(p);
-			const want = await fsp.lstat(from);
-			if (!want.isFile()) throw new FsError("EPERM", `a hard link to something that is not a regular file: ${target}`);
-			await fsp.link(from, to);
-			const made = await fsp.lstat(to);
-			if (made.ino !== want.ino || made.dev !== want.dev) {
-				await fsp.unlink(to).catch(() => {});
-				throw new FsError("EPERM", `${target} changed while it was linked`);
-			}
+			// name must be that file. The guest cannot swap either path meanwhile (alone(): no rename, remove
+			// or symlink runs), and a swap by the host between the two calls is undone.
+			await alone(async () => {
+				const from = real(target), to = real(p);
+				const want = await lstat(from);
+				if (!want.isFile()) throw new FsError("EPERM", `a hard link to something that is not a regular file: ${target}`);
+				await fsp.link(from, to);
+				const made = await lstat(to);
+				if (made.ino !== want.ino || made.dev !== want.dev) {
+					await fsp.unlink(to).catch(() => {});
+					throw new FsError("EPERM", `${target} changed while it was linked`);
+				}
+			});
 		},
 		async setattr(p, attr) {
 			const rp = real(p);
