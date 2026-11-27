@@ -60,6 +60,7 @@ export interface WispBackend extends NetBackend {
 const RETRY_MS = 5000;
 const HANDSHAKE_TIMEOUT_MS = 10000;
 const MAX_PACKET = 64 * 1024;          // coalesce guest segments up to this size
+const UDP_WS_HIGH = 1 << 20;           // WebSocket bytes buffered past which UDP datagrams are dropped
 const TYPE_TCP = 0x01, TYPE_UDP = 0x02;
 const FAKE_BASE = (198 << 24 | 18 << 16) >>> 0, FAKE_SIZE = 1 << 17;
 const enc = new TextEncoder();
@@ -278,7 +279,8 @@ export function wispBackend(url: string | readonly string[], opts: WispBackendOp
 			return {
 				send(data) {
 					if (st.done) return;
-					if (st.open && ws) ws.send(packet(0x02, id, data));
+					// No credit on UDP streams: drop when the WebSocket is backed up, as a NAT would.
+					if (st.open && ws) { if (ws.bufferedAmount < UDP_WS_HIGH) ws.send(packet(0x02, id, data)); }
 					else if (st.out.length < UDP_QUEUE) st.out.push(data);
 				},
 				close() { drop(id, st); },

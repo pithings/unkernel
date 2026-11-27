@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { createServer, type AddressInfo } from "node:net";
 import { createServer as createHttpServer } from "node:http";
 import dgram from "node:dgram";
-import { UDP_IDLE_MS, ip4, ip4str, type NetBackend, type NetConnectionEvents, type NetDatagramEvents } from "../js/core/net.ts";
+import { NetStack, UDP_IDLE_MS, ip4, ip4str, type NetBackend, type NetConnectionEvents, type NetDatagramEvents } from "../js/core/net.ts";
 import { wispBackend } from "../js/core/net-wisp.ts";
 import { fetchRoutes } from "../js/core/net-fetch.ts";
 import { directBackend, wispBackend as nodeWispBackend } from "../js/node/net.ts";
@@ -239,6 +239,16 @@ test("fetchRoutes: UDP to a routed name is refused, other UDP goes to the inner 
 	fr.udp({ host: "1.1.1.1", port: 53 }, { onMessage() {}, onClose() {} });
 	assert.deepEqual(flows.map((f) => `${f.host}:${f.port}`), ["1.1.1.1:53"]);
 	assert.equal(fetchRoutes(undefined, {}).udp, undefined, "no inner udp(), no udp()");
+});
+
+test("UDP flows that fail the same way are logged once", () => {
+	const logs: string[] = [];
+	const backend: Partial<NetBackend> = { udp(_a, ev) { ev.onClose(new Error("down")); return { send() {}, close() {} }; } };
+	const stack = new NetStack({ backend: backend as NetBackend, log: (m) => logs.push(m) });
+	stack.output = () => {};
+	for (let p = 5000; p < 5010; p++) stack.send(udp(p, ip4("1.1.1.1"), 53, new Uint8Array(1)));
+	assert.deepEqual(logs, ["[net] udp 1.1.1.1:53: down"]);
+	assert.equal(stack.udp.size, 0);
 });
 
 test("TCP to a refused port gets RST; unknown segment gets RST", async () => {

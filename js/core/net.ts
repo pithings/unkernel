@@ -61,9 +61,9 @@ export interface NetDatagramEvents {
 	/** One datagram from the flow's remote address and port. */
 	onMessage(data: Uint8Array): void;
 	/**
-	 * Called once, last; the flow is gone. An error whose `code` is
-	 * "ECONNREFUSED" (the remote port is closed) reaches the guest as ICMP
-	 * port unreachable.
+	 * Called once, last (possibly during udp()); the flow is gone. An error
+	 * whose `code` is "ECONNREFUSED" (the remote port is closed) reaches the
+	 * guest as ICMP port unreachable.
 	 */
 	onClose(error: Error | null): void;
 }
@@ -505,6 +505,8 @@ export class NetStack implements NetDevice {
 	/** UDP flows, least recently used first. */
 	udp: Map<string, UdpFlow>;
 	udpSweep: ReturnType<typeof setInterval> | null;
+	/** The last UDP error logged; the same one again is not (each datagram may open a flow that fails). */
+	udpError: string | null;
 	ipId: number;
 	/** Where frames for the guest go (set by attach()). */
 	output: (frame: Uint8Array) => void;
@@ -526,6 +528,7 @@ export class NetStack implements NetDevice {
 		this.tcp = new Map();
 		this.udp = new Map();
 		this.udpSweep = null;
+		this.udpError = null;
 		this.ipId = 1;
 		this.output = () => {};
 		this.stats = { rx: 0, tx: 0, tcpOpened: 0, udpOpened: 0, dns: 0 };
@@ -707,6 +710,7 @@ export class NetStack implements NetDevice {
 		flow.sock = this.backend.udp!({ host, port }, {
 			onMessage: (u8) => {
 				if (flow.closed) return;
+				this.udpError = null;
 				this.udpTouch(flow);
 				this.sendUdp(ip, port, this.guest, gport, u8);
 			},
@@ -715,8 +719,9 @@ export class NetStack implements NetDevice {
 				this.udpClose(flow);
 				if ((err as { code?: string } | null)?.code === "ECONNREFUSED") {
 					this.icmpUnreachable(flow.quote, this.guest, ip, 3);
-				} else if (err) {
-					this.log?.(`[net] udp ${ip4str(ip)}:${port}: ${err.message ?? err}`);
+				} else if (err && (err.message ?? String(err)) !== this.udpError) {
+					this.udpError = err.message ?? String(err);
+					this.log?.(`[net] udp ${ip4str(ip)}:${port}: ${this.udpError}`);
 				}
 			},
 		});

@@ -80,7 +80,9 @@ export function directBackend(): NetBackend {
 			s.on("message", (b: Buffer) => { if (!closed) ev.onMessage(new Uint8Array(b.buffer, b.byteOffset, b.byteLength)); });
 			s.on("error", fail);
 			try {
-				s.connect(port, host, () => {
+				// A failed connect is reported only here, not as an "error" event.
+				s.connect(port, host, (err?: Error) => {
+					if (err) return fail(err);
 					ready = true;
 					for (const d of queue.splice(0)) if (!closed) send(d);
 				});

@@ -33,7 +33,7 @@
   exists at boot); together +64 KB raw, +24 KB gzip, 20 KiB RAM, no new
   imports (2026-11-17). tailscaled runs on `/dev/net/tun` with
   `tailscale up --netfilter-mode=off` (no netfilter) over relayed (DERP)
-  connections.
+  connections; direct connections over UDP are untested.
 - OVERLAY_FS without optional features (data-disk.md; +116 KiB, 43 KiB
   gzip), the devices (devices.md), 9p (devices.md).
 - kwvirtio with DRM, DRM_VIRTIO_GPU and DRM_VIRTIO_GPU_KMS (devices.md),

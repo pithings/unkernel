@@ -263,11 +263,10 @@ export function fetchRoutes(inner: NetBackend | undefined, routes: Record<string
 		};
 	}
 
-	/** UDP to a routed address: port unreachable, asynchronously. */
+	/** UDP to a routed address: port unreachable. */
 	function refusedUdp(ev: NetDatagramEvents): NetDatagramSocket {
-		let dead = false;
-		queueMicrotask(() => { if (!dead) ev.onClose(Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" })); });
-		return { send() {}, close() { dead = true; } };
+		ev.onClose(Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" }));
+		return { send() {}, close() {} };
 	}
 	const innerUdp = inner?.udp?.bind(inner);
 
