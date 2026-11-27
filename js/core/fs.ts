@@ -143,7 +143,10 @@ export interface Fs {
 	remove?(path: string, dir: boolean): MaybePromise<void>;
 	/** Replaces `to` if it exists (an empty directory, or a non-directory over a non-directory). */
 	rename?(from: string, to: string): MaybePromise<void>;
-	/** Make `path` a new name (a hard link) for the regular file at `target`; EEXIST if `path` exists. */
+	/**
+	 * Make `path` a new name (a hard link) for the regular file at `target`; EEXIST if `path` exists.
+	 * The server checks `target`'s type as the guest walked it, which may have changed since: check it again.
+	 */
 	link?(target: string, path: string): MaybePromise<void>;
 	/** Change a path that is not open (chmod, utimes, truncate by name). */
 	setattr?(path: string, attr: FsSetAttr): MaybePromise<void>;

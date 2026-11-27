@@ -7,17 +7,17 @@
 //   await vm.mount("/ref", nodeFs("/usr/share/doc"), { readOnly: true });
 //
 // Paths from the 9p server are absolute, normalised and walked one name at
-// a time, and the server never walks through a symlink, so a path stays
-// below `dir`. Symlinks are listed and read as symlinks (lstat, readlink)
-// and never followed here: the guest resolves them itself, inside its own
-// tree. Opens use O_NOFOLLOW, and O_NONBLOCK so that a FIFO in the tree
-// cannot block a libuv thread (anything but a regular file refuses to
-// open). A hard link's source must be a regular file (Darwin's link(2)
-// follows a symlink), and no guest rename, remove or symlink runs during
-// a link, so the guest cannot swap one in. Not covered: the host
-// swapping a directory for a symlink between the guest's walk and its
-// next request (that request could then reach outside `dir`; Node has no
-// openat2 RESOLVE_BENEATH).
+// a time, and the server never walks through a symlink, so a path is below
+// `dir` when it is walked. Symlinks are listed and read as symlinks (lstat,
+// readlink) and never followed here: the guest resolves them itself,
+// inside its own tree. Opens use O_NOFOLLOW, and O_NONBLOCK so that a FIFO
+// in the tree cannot block a libuv thread (anything but a regular file
+// refuses to open). A hard link checks every directory on both its paths
+// and that its source is a regular file (Darwin's link(2) follows a
+// symlink), and no rename, remove or symlink in the directory runs during
+// it (SwapLock). Not covered: the host swapping a directory for a symlink
+// between the guest's walk and its next request (that request could then
+// reach outside `dir`; Node has no openat2 RESOLVE_BENEATH).
 //
 // Owners: every file shows uid and gid 1000 (FS_DEFAULT_OWNER: the distro
 // images' user, the guest's default), and chown is accepted and ignored,
@@ -26,7 +26,7 @@
 // (st_dev, st_ino, in readdir too) are the host's. Names that are not
 // UTF-8 are left out of listings (the guest could not name them).
 
-import { constants } from "node:fs";
+import { constants, realpathSync } from "node:fs";
 import * as fsp from "node:fs/promises";
 import path from "node:path";
 import { FsError, type Fs, type FsAttr, type FsDirEntry, type FsFile, type FsStatFs } from "../core/fs.ts";
@@ -54,33 +54,75 @@ function attrOf(st: BigStats): FsAttr {
 
 const lstat = (p: string) => fsp.lstat(p, { bigint: true }) as Promise<BigStats>;
 
-// A hard link runs alone; renames, removes and symlinks run together (swap()) but never while a link runs
-// (nodeFs's link). Module-wide, since two mounts can serve one host directory.
-let linking: Promise<void> | undefined;
-let swapping = 0;
-let drained: (() => void) | undefined;
+/** How long a hard link, or a rename, remove or symlink, waits for the other kind (SwapLock), and a link may hold the lock, in ms. */
+const SWAP_LOCK_MS = 10_000;
 
-async function swap<T>(op: () => Promise<T>): Promise<T> {
-	while (linking) await linking;
-	swapping++;
-	try {
-		return await op();
-	} finally {
-		if (--swapping === 0) drained?.();
+/** Resolves true when `p` settles, false after `ms` (an op that hangs does not hold the caller). */
+function within(p: Promise<unknown>, ms: number): Promise<boolean> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	return Promise.race([p.then(() => true, () => true), new Promise<boolean>((r) => (timer = setTimeout(r, ms, false)))]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * One host directory's hard links against its renames, removes and symlinks: those run together,
+ * a link runs alone, so the guest cannot swap a symlink into either of its paths during it. Waits
+ * and a link's hold are bounded (SWAP_LOCK_MS), so a hung host call fails the next requests
+ * with EAGAIN and is not held against other directories.
+ */
+class SwapLock {
+	#linking: Promise<void> | undefined;
+	#swapping = 0;
+	#drained: (() => void) | undefined;
+
+	// Each waits for a link inline, so that its last check that none runs and its taking the lock
+	// are one synchronous step (an await between them would let a link start unseen).
+
+	async swap<T>(op: () => Promise<T>): Promise<T> {
+		while (this.#linking) if (!(await within(this.#linking, SWAP_LOCK_MS))) throw new FsError("EAGAIN", "a hard link here has not finished");
+		this.#swapping++;
+		try {
+			return await op();
+		} finally {
+			if (--this.#swapping === 0) this.#drained?.();
+		}
+	}
+
+	async alone<T>(op: () => Promise<T>): Promise<T> {
+		while (this.#linking) if (!(await within(this.#linking, SWAP_LOCK_MS))) throw new FsError("EAGAIN", "a hard link here has not finished");
+		let release!: () => void;
+		this.#linking = new Promise((r) => (release = r));
+		try {
+			if (this.#swapping && !(await within(new Promise<void>((r) => (this.#drained = r)), SWAP_LOCK_MS)))
+				throw new FsError("EAGAIN", "a rename, remove or symlink here has not finished");
+			const run = op();
+			run.catch(() => {}); // what a link that outlived its hold does is answered by no one
+			if (!(await within(run, SWAP_LOCK_MS))) throw new FsError("EAGAIN", "the hard link has not finished");
+			return await run;
+		} finally {
+			this.#drained = undefined;
+			this.#linking = undefined;
+			release();
+		}
 	}
 }
 
-async function alone<T>(op: () => Promise<T>): Promise<T> {
-	while (linking) await linking;
-	let release!: () => void;
-	linking = new Promise((r) => (release = r));
+/** By real path: two mounts of one host directory share its lock. */
+const swapLocks = new Map<string, SwapLock>();
+
+function swapLockOf(root: string): SwapLock {
+	let key = root;
 	try {
-		if (swapping) await new Promise<void>((r) => (drained = r));
-		return await op();
-	} finally {
-		drained = undefined;
-		linking = undefined;
-		release();
+		key = realpathSync(root);
+	} catch {}
+	let lock = swapLocks.get(key);
+	if (!lock) swapLocks.set(key, (lock = new SwapLock()));
+	return lock;
+}
+
+/** Every directory on the way from `root` to `rp` is one (lstat), not a symlink that the host would follow. */
+async function realParents(root: string, rp: string, p: string): Promise<void> {
+	for (let at = rp.lastIndexOf("/"); at > root.length; at = rp.lastIndexOf("/", at - 1)) {
+		if (!(await lstat(rp.slice(0, at))).isDirectory()) throw new FsError("ESTALE", `${p}: a directory on its path is no longer one`);
 	}
 }
 
@@ -139,6 +181,7 @@ async function openRegular(p: string, flags: number, mode?: number): Promise<FsF
 /** A host directory as an Fs (see the top of this file). Mount it with { readOnly: true } to refuse changes. */
 export function nodeFs(dir: string): Fs {
 	const root = path.resolve(dir);
+	const lock = swapLockOf(root);
 	const real = (p: string): string => {
 		if (!p.startsWith("/") || p.includes("\0") || p.split("/").some((c) => c === ".." || c === ".")) throw new FsError("EINVAL", `bad path ${JSON.stringify(p)}`);
 		return p === "/" ? root : root + p;
@@ -185,21 +228,24 @@ export function nodeFs(dir: string): Fs {
 			await fsp.mkdir(real(p), { mode });
 		},
 		async symlink(p, target) {
-			await swap(() => fsp.symlink(target, real(p)));
+			await lock.swap(() => fsp.symlink(target, real(p)));
 		},
 		async remove(p, isDir) {
-			await swap(() => (isDir ? fsp.rmdir(real(p)) : fsp.unlink(real(p))));
+			await lock.swap(() => (isDir ? fsp.rmdir(real(p)) : fsp.unlink(real(p))));
 		},
 		async rename(from, to) {
-			await swap(() => fsp.rename(real(from), real(to)));
+			await lock.swap(() => fsp.rename(real(from), real(to)));
 		},
 		async link(target, p) {
-			// link(2) follows a symlink in the source on some hosts (Darwin), which would make a second name,
-			// inside this directory, for a file outside it. So the source must be a regular file, and the new
-			// name must be that file. The guest cannot swap either path meanwhile (alone(): no rename, remove
-			// or symlink runs), and a swap by the host between the two calls is undone.
-			await alone(async () => {
+			// A hard link names a file for good, so neither path may lead outside this directory: every
+			// directory on both is one, not a symlink the host's lookup would follow, and the source is a
+			// regular file (link(2) follows a symlink in the source on Darwin). The guest cannot swap one in meanwhile
+			// (SwapLock: no rename, remove or symlink runs), and a swap by the host between the calls is
+			// undone: the new name must be the file that was checked.
+			await lock.alone(async () => {
 				const from = real(target), to = real(p);
+				await realParents(root, from, target);
+				await realParents(root, to, p);
 				const want = await lstat(from);
 				if (!want.isFile()) throw new FsError("EPERM", `a hard link to something that is not a regular file: ${target}`);
 				await fsp.link(from, to);

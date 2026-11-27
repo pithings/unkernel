@@ -1157,17 +1157,20 @@ parts that are easy to get wrong.
   Optional `create` (returns the file open), `mkdir`, `symlink`,
   `readlink`, `remove`, `rename`, `link` (a hard link: a second name for a
   regular file), `setattr` (by path: chmod, utimes, truncate by name),
-  `statfs`, `close`. An FsError or an error with a Node
-  errno `code` answers that errno, anything else EIO plus one log line.
-  Missing methods: EROFS for changes, EOPNOTSUPP for `symlink`, mknod and
-  xattrs (kw9p mounts with `noxattr`); EPERM for `link`, and for a hard
-  link to anything but a regular file (nodeFs has `link`, and refuses a
-  symlink source itself, since Darwin's link(2) follows one, and runs no
-  rename, remove or symlink during a link, so the guest cannot swap one
-  in; MemoryFs has no `link`); a file without `write` is not opened for
-  writing (EACCES); Tfsync without `fsync` (a directory) succeeds. Tlcreate without O_EXCL
-  of a name that exists (the host made it after the guest's lookup) opens
-  it, honouring O_TRUNC. Writes, truncation, fsync and clunk through one
+  `statfs`, `close`. An FsError or an error with a Node errno `code`
+  answers that errno, anything else EIO plus one log line. Missing
+  methods: EROFS for changes, EOPNOTSUPP for `symlink`, mknod and xattrs
+  (kw9p mounts with `noxattr`); EPERM for `link`, and for a hard link to
+  a fid walked as anything but a regular file (MemoryFs has no `link`).
+  nodeFs's `link` checks the source again itself (Darwin's link(2)
+  follows a symlink), and that every directory on both paths is one
+  (ESTALE if not), and runs alone against renames, removes and symlinks in the
+  same host directory, so the guest cannot swap a symlink in meanwhile;
+  a wait for that lock, or a link holding it, past 10 s answers EAGAIN.
+  A file without `write` is not opened for writing (EACCES); Tfsync
+  without `fsync` (a directory) succeeds. Tlcreate without O_EXCL of a
+  name that exists (the host made it after the guest's lookup) opens it,
+  honouring O_TRUNC. Writes, truncation, fsync and clunk through one
   fid run in order; everything else concurrently. A rename moves the fids
   below it. Names are made only below directory fids,
   and walks never pass a non-directory, so no path goes through a symlink.

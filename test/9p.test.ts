@@ -14,7 +14,8 @@ import { P9FrameAssembler, serve9p } from "../js/core/9p.ts";
 import { FsError, type Fs, type FsAttr, type FsFile } from "../js/core/fs.ts";
 import { MemoryFs, type MemoryFsChange } from "../js/core/memfs.ts";
 import { nodeFs } from "../js/node/nodefs.ts";
-import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { MountError, normalizeMountPath, parseMounts, snapshotMountMismatch, toFs } from "../js/core/mounts.ts";
@@ -405,7 +406,7 @@ test("a computed file is evaluated once per open: its reads and getattr see that
 	await assert.rejects(c.open("count", O_RDWR), errno(13));
 });
 
-test("Tlink: a hard link through an Fs with link (nodeFs); EPERM without it, for a directory, and on a read-only mount; a link and a rename never overlap", async (t) => {
+test("Tlink: a hard link through an Fs with link (nodeFs); EPERM without it and for a directory, EROFS on a read-only mount; a link and a rename never overlap", async (t) => {
 	const { mount } = setup();
 	const dir = mkdtempSync(joinPath(tmpdir(), "unkernel-9p-link-"));
 	t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -428,7 +429,7 @@ test("Tlink: a hard link through an Fs with link (nodeFs); EPERM without it, for
 	symlinkSync(joinPath(outside, "secret"), joinPath(dir, "evil"));
 	await assert.rejects(c.link(0, (await c.walk(0, ["evil"])).fid, "copy"), errno(1), "EPERM: a hard link to a symlink");
 	await assert.rejects(Promise.resolve(nodeFs(dir).link!("/evil", "/copy2")), (e: { code?: string }) => e.code === "EPERM", "nodeFs refuses a symlink source");
-	assert.equal(statSync(joinPath(outside, "secret")).nlink, 1, "the outside file got no second name");
+	assert.equal(statSync(joinPath(outside, "secret")).nlink, 1, "the outside file got no second name (only Darwin's link(2) would give it one)");
 
 	const mem = await mount(new MemoryFs({ "x.txt": "x" }));
 	await assert.rejects(mem.c.link(0, (await mem.c.walk(0, ["x.txt"])).fid, "y.txt"), errno(1), "EPERM: an Fs without link");
@@ -443,6 +444,49 @@ test("Tlink: a hard link through an Fs with link (nodeFs); EPERM without it, for
 	assert.equal(linked.status === "rejected" && (linked.reason as { code?: string }).code, "ENOENT", "the link ran after the rename");
 	await Promise.all([fs.link!("/r.txt", "/l.txt"), other.rename!("/r.txt", "/a.txt")]);
 	assert.equal(statSync(joinPath(dir, "l.txt")).ino, statSync(joinPath(dir, "a.txt")).ino, "the rename ran after the link");
+});
+
+test("Tlink: ESTALE when a directory on either path is a symlink now (the host swapped it after the walk)", async (t) => {
+	const { mount } = setup();
+	const dir = mkdtempSync(joinPath(tmpdir(), "unkernel-9p-link-")), outside = mkdtempSync(joinPath(tmpdir(), "unkernel-9p-outside-"));
+	t.after(() => {
+		rmSync(dir, { recursive: true, force: true });
+		rmSync(outside, { recursive: true, force: true });
+	});
+	writeFileSync(joinPath(outside, "secret"), "host");
+	writeFileSync(joinPath(dir, "payload"), "guest");
+	mkdirSync(joinPath(dir, "a"));
+	writeFileSync(joinPath(dir, "a", "secret"), "");
+	const { c } = await mount(nodeFs(dir));
+	const src = await c.walk(0, ["a", "secret"]);
+	const into = await c.walk(0, ["a"]);
+	rmSync(joinPath(dir, "a"), { recursive: true });
+	symlinkSync(outside, joinPath(dir, "a"));
+	await assert.rejects(c.link(0, src.fid, "x"), errno(116), "ESTALE: the source's directory is a symlink now");
+	await assert.rejects(c.link(into.fid, (await c.walk(0, ["payload"])).fid, "planted"), errno(116), "ESTALE: the new name's directory is a symlink now");
+	assert.equal(statSync(joinPath(outside, "secret")).nlink, 1, "the outside file got no second name");
+	assert.ok(!existsSync(joinPath(dir, "x")) && !existsSync(joinPath(outside, "planted")), "no name made inside or outside");
+});
+
+test("nodeFs: a hung rename holds back links in its own host directory only", async (t) => {
+	const hung = mkdtempSync(joinPath(tmpdir(), "unkernel-9p-hung-")), free = mkdtempSync(joinPath(tmpdir(), "unkernel-9p-free-"));
+	const fspc = createRequire(import.meta.url)("node:fs/promises") as typeof import("node:fs/promises");
+	const rename = fspc.rename;
+	fspc.rename = ((a: string, b: string) => (String(a).startsWith(hung) ? new Promise<void>(() => {}) : rename(a, b))) as typeof rename;
+	syncBuiltinESMExports();
+	t.after(() => {
+		fspc.rename = rename;
+		syncBuiltinESMExports();
+		rmSync(hung, { recursive: true, force: true });
+		rmSync(free, { recursive: true, force: true });
+	});
+	writeFileSync(joinPath(hung, "h"), "");
+	writeFileSync(joinPath(free, "f"), "");
+	void nodeFs(hung).rename!("/h", "/h2");
+	const fs = nodeFs(free);
+	await fs.link!("/f", "/f2");
+	await fs.rename!("/f2", "/f3");
+	assert.equal(statSync(joinPath(free, "f3")).ino, statSync(joinPath(free, "f")).ino);
 });
 
 test("create, mkdir, symlink, readlink, readdir in pieces, unlinkat, rmdir, rename over, truncate on open; changes reported; Tlcreate without O_EXCL opens what exists", async () => {
