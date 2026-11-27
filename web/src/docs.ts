@@ -7,11 +7,10 @@
 //
 // - Embedding: the page is cross-origin isolated (COEP require-corp), so a
 //   cross-origin iframe loads only if its document sends COEP and
-//   `Cross-Origin-Resource-Policy: cross-origin`, or the iframe is
-//   credentialless (Chromium only: no cookies or storage shared with a
-//   normal visit, which the docs do not need). The site sends neither
-//   header, so where the credentialless iframe is missing (Firefox, Safari)
-//   the window offers the site in a new tab instead (EMBEDDABLE).
+//   `Cross-Origin-Resource-Policy: cross-origin`, which the site does
+//   (docs/.config/docs.yaml crossOriginIsolation), or the iframe is
+//   credentialless (Chromium only). The iframe is credentialless too, so
+//   Chromium shows the site even from a deploy without those headers.
 // - The site is another origin: the window cannot read where its page is,
 //   so Home goes back to DOCS_URL and the new tab opens there.
 // - Theme: the iframe's URL carries an undocs theme fragment (`#~` and
@@ -45,9 +44,6 @@ export const DOCS_WIN = "docs";
 const DOCS_DOCK = "dock-docs";
 /** The window's descriptor (wm.ts meta), and the Docs page app's (apps/system/docs.ts). */
 export const DOCS: AppMeta = { id: "docs", title: "Docs", glyph: DocsIcon };
-
-/** This browser can show the site in the page (see the top of this file). */
-export const EMBEDDABLE = typeof HTMLIFrameElement !== "undefined" && "credentialless" in HTMLIFrameElement.prototype;
 
 /** Bumped by Home: the iframe is made again (its key) on DOCS_URL. */
 export const docsNav$ = createStore<{ nav: number }>({ nav: 0 });

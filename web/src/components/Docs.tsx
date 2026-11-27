@@ -3,9 +3,7 @@
 // The Docs window's body (docs.ts opens the window, wm.ts draws its frame):
 // a compact toolbar under the title bar (Home: the site's first page again;
 // open the site in a new tab) over a credentialless iframe on DOCS_URL in
-// the page's theme (docs.ts DOCS_EMBED_URL), or,
-// where this browser cannot embed it (docs.ts EMBEDDABLE), a note with the
-// link instead. Ids: #docs (the root), #docs-home, #docs-tab, #docs-frame.
+// the page's theme (docs.ts DOCS_EMBED_URL). Ids: #docs (the root), #docs-home, #docs-tab, #docs-frame.
 // - Under the toolbar it is glass, as a Terminal window's content
 //   (style.css): the iframe's page has a transparent background.
 // - Pointer and keyboard as in the Browser (Preview.tsx): a click in the
@@ -13,7 +11,7 @@
 //   raises and focuses the window; the WM's focus moves the DOM focus to the
 //   root, and losing it gives it up, so keys reach no terminal under it.
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { DOCS_EMBED_URL, DOCS_URL, docsHome, docsNav$, EMBEDDABLE } from "../docs.ts";
+import { DOCS_EMBED_URL, DOCS_URL, docsHome, docsNav$ } from "../docs.ts";
 import { useWm, wm } from "../wm.ts";
 import { DocsIcon, ExternalIcon } from "./icons.tsx";
 
@@ -27,7 +25,7 @@ const CREDENTIALLESS = { credentialless: "" } as Record<string, string>;
 export function Docs({ id }: { id: string }) {
 	const { nav } = useSyncExternalStore(docsNav$.subscribe, docsNav$.get);
 	const focused = useWm((s) => s.focused === id);
-	const [loading, setLoading] = useState(EMBEDDABLE);
+	const [loading, setLoading] = useState(true);
 	const root = useRef<HTMLDivElement>(null);
 	const frame = useRef<HTMLIFrameElement>(null);
 	const pressed = useRef(0);
@@ -53,12 +51,12 @@ export function Docs({ id }: { id: string }) {
 		return () => removeEventListener("blur", onBlur);
 	}, [id]);
 
-	useEffect(() => { if (EMBEDDABLE) setLoading(true); }, [nav]);
+	useEffect(() => { setLoading(true); }, [nav]);
 
 	return (
 		<div id={id} ref={root} tabIndex={-1} aria-label="unkernel's documentation" className="absolute inset-0 flex flex-col outline-none">
 			<div className="relative flex flex-none items-center gap-1 border-b border-line bg-surface px-1.5 py-1 pointer-coarse:gap-1.5 pointer-coarse:py-1.5">
-				<button id={`${id}-home`} type="button" className={tool} title="Home" aria-label="Back to the first page" disabled={!EMBEDDABLE} onClick={docsHome}>
+				<button id={`${id}-home`} type="button" className={tool} title="Home" aria-label="Back to the first page" onClick={docsHome}>
 					{HOME_SVG}
 				</button>
 				<span className="flex h-7 min-w-0 flex-1 items-center gap-2 truncate px-1.5 font-mono text-[12.5px] text-faint pointer-coarse:h-10">
@@ -69,17 +67,8 @@ export function Docs({ id }: { id: string }) {
 				{loading && <span aria-hidden="true" className="absolute inset-x-0 -bottom-px h-px animate-pulse bg-accent" />}
 			</div>
 			<div className="relative min-h-0 flex-1">
-				{EMBEDDABLE
-					? <iframe key={nav} ref={frame} id={`${id}-frame`} src={DOCS_EMBED_URL} title="unkernel's documentation" {...CREDENTIALLESS}
-						className="absolute inset-0 h-full w-full border-0" onLoad={() => setLoading(false)} />
-					: <div className="absolute inset-0 grid place-items-center p-6 text-center">
-						<div className="max-w-sm space-y-3 text-[13px] text-muted">
-							<p>This browser cannot show the docs inside the page, which is cross-origin isolated.</p>
-							<a href={DOCS_URL} target="_blank" rel="noopener" className="inline-flex items-center gap-2 rounded-md border border-line-strong bg-surface px-3 py-1.5 text-fg transition-colors hover:bg-white/8">
-								<ExternalIcon /> Open {new URL(DOCS_URL).host}
-							</a>
-						</div>
-					</div>}
+				<iframe key={nav} ref={frame} id={`${id}-frame`} src={DOCS_EMBED_URL} title="unkernel's documentation" {...CREDENTIALLESS}
+					className="absolute inset-0 h-full w-full border-0" onLoad={() => setLoading(false)} />
 			</div>
 		</div>
 	);

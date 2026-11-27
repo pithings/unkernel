@@ -8,3 +8,7 @@ github: pithings/unkernel
 
 # No landing page: `/` is the intro page (index.md).
 landing: false
+
+# Cross-origin isolated (COEP require-corp, CORP cross-origin), so the
+# cross-origin isolated page (web/) can embed the docs in its Docs window.
+crossOriginIsolation: require-corp
