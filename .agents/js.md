@@ -1733,11 +1733,17 @@ parts that are easy to get wrong.
 
 - `NetStack` is a user-mode stack that terminates the guest's frames:
   guest 10.0.2.15/24, gateway 10.0.2.2, DNS 10.0.2.3. It handles ARP,
-  DHCP, DNS A (AAAA gets an empty answer), ping to the gateway and DNS
-  addresses, TCP (MSS, window scaling, flow control, go-back-N
-  retransmit, FIN, RST) and UDP flows. Each TCP connection goes to a
-  backend (any object with `connect` and `lookup`), each UDP flow to its
-  optional `udp`. `net` may also be a spec (Worker mode).
+  DHCP, DNS A (AAAA gets an empty answer), ping, TCP (MSS, window
+  scaling, flow control, go-back-N retransmit, FIN, RST) and UDP flows.
+  Each TCP connection goes to a backend (any object with `connect` and
+  `lookup`), each UDP flow to its optional `udp`. `net` may also be a spec
+  (Worker mode).
+- The stack answers pings to the gateway and DNS addresses itself; an echo
+  request to another host goes to the backend's optional `ping` (3 s, at
+  most 64 in flight, more are dropped), and the reply carries the guest's
+  id, sequence and data. Neither built-in backend has `ping` (it is a hook
+  for other backends; `fetchRoutes` forwards it), and without it the
+  gateway answers ICMP administratively prohibited.
 - A UDP flow is a guest port and one remote address and port (replies
   from anywhere else are not delivered); it closes after `UDP_IDLE_MS`
   (60 s) idle, and past 256 flows the least recently used one goes. A
@@ -1790,7 +1796,7 @@ parts that are easy to get wrong.
   takes the string form as `routes` (`buildNet()`). The page routes
   `deb.debian.org` to a CORS mirror (`web/src/config.ts` DEFAULT_ROUTES,
   `?routes=0` turns it off).
-- Not implemented: IPv6, IP fragments, ICMP beyond 10.0.2.2/3, SACK,
+- Not implemented: IPv6, IP fragments, ICMP other than echo, SACK,
   timestamps and inbound connections and datagrams. A raw-Ethernet
   relay backend is not useful: v86's relay gave DHCP but no upstream DNS
   or TCP.

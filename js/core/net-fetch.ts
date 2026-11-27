@@ -108,6 +108,7 @@ export function fetchRoutes(inner: NetBackend | undefined, routes: Record<string
 		byIp.set(r.ip, r);
 	}
 	const conns = new Set<() => void>();
+	const innerPing = inner?.ping?.bind(inner);
 
 	function fetchFor(host: string, route: FetchRoute, req: Req, signal: AbortSignal): Promise<Response> {
 		if (typeof route !== "string") {
@@ -286,6 +287,11 @@ export function fetchRoutes(inner: NetBackend | undefined, routes: Record<string
 			if (r) return addr.port === 80 ? serve(r.name, r.route, ev) : refused(ev, `connection refused (${r.name} serves port 80 only)`);
 			return inner ? inner.connect(addr, ev) : refused(ev, "connection refused");
 		},
+		// The reserved addresses answer pings, but only next to an inner
+		// backend that pings: without one, NetStack refuses them all at once.
+		...(innerPing && {
+			ping: (host: string, timeoutMs: number) => byIp.has(host) ? Promise.resolve(true) : innerPing(host, timeoutMs),
+		}),
 		close() {
 			for (const abort of [...conns]) abort();
 			inner?.close?.();

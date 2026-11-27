@@ -5,10 +5,12 @@
 //
 // The guest's kwnet device exchanges raw Ethernet frames with the host. This
 // module terminates them: it answers ARP for the virtual subnet, runs a tiny
-// DHCP server and DNS server, answers pings to the gateway, terminates TCP
-// connections and forwards UDP flows, bridging each one to a pluggable
-// backend (NetBackend: real sockets in Node, node/net.ts; a Wisp server,
-// net-wisp.ts; or any other transport).
+// DHCP server and DNS server, answers pings to the gateway and DNS address
+// (other echo requests go to the backend's optional ping, which neither
+// built-in backend has; without it they get ICMP administratively
+// prohibited), terminates TCP connections and forwards UDP flows, bridging
+// each one to a pluggable backend (NetBackend: real sockets in Node,
+// node/net.ts; a Wisp server, net-wisp.ts; or any other transport).
 //
 //   10.0.2.0/24   virtual subnet
 //   10.0.2.2      gateway (TCP and UDP to it go to the host's loopback
@@ -23,7 +25,7 @@
 // unreachable. Replies come only from the flow's remote address and port.
 //
 // Not implemented: IPv6, IP fragments (so no datagram larger than the MTU
-// leaves the guest), ICMP other than echo to the gateway/DNS address, TCP
+// leaves the guest), ICMP other than echo, TCP
 // options beyond MSS and window scale (no SACK, no timestamps), inbound
 // connections and datagrams.
 
@@ -84,12 +86,18 @@ export interface NetDatagramSocket {
  *     it, UDP other than DHCP and DNS gets ICMP port unreachable
  *   lookup(name) -> IPv4 dotted quads; reject with { code: "ENOTFOUND" }
  *     for NXDOMAIN, anything else becomes SERVFAIL
+ *   ping(host, timeoutMs) (optional) -> true if the IPv4 dotted quad
+ *     answered one ICMP echo within timeoutMs; false or a rejection is no
+ *     answer. A hook for other backends: directBackend() and wispBackend()
+ *     have none, and without it the guest's echo requests to hosts beyond
+ *     the gateway get ICMP "administratively prohibited"
  *   close() (optional) drops every connection and the transport
  */
 export interface NetBackend {
 	connect(addr: { host: string; port: number }, ev: NetConnectionEvents): NetConnection;
 	udp?(addr: { host: string; port: number }, ev: NetDatagramEvents): NetDatagramSocket;
 	lookup(name: string): Promise<string[]>;
+	ping?(host: string, timeoutMs: number): Promise<boolean>;
 	close?(): void;
 }
 
@@ -187,6 +195,7 @@ export const UDP_IDLE_MS = 60_000;
 const UDP_MAX_FLOWS = 256;
 /** Datagrams a backend queues for a UDP flow until it can send them (more are dropped). */
 export const UDP_QUEUE = 64;
+const PING_TIMEOUT_MS = 3000, MAX_PINGS = 64; // echo requests through the backend; more in flight are dropped
 
 interface Segment {
 	sport: number;
@@ -507,6 +516,8 @@ export class NetStack implements NetDevice {
 	udpSweep: ReturnType<typeof setInterval> | null;
 	/** The last UDP error logged; the same one again is not (each datagram may open a flow that fails). */
 	udpError: string | null;
+	/** Echo requests waiting for backend.ping. */
+	pings: number;
 	ipId: number;
 	/** Where frames for the guest go (set by attach()). */
 	output: (frame: Uint8Array) => void;
@@ -529,6 +540,7 @@ export class NetStack implements NetDevice {
 		this.udp = new Map();
 		this.udpSweep = null;
 		this.udpError = null;
+		this.pings = 0;
 		this.ipId = 1;
 		this.output = () => {};
 		this.stats = { rx: 0, tx: 0, tcpOpened: 0, udpOpened: 0, dns: 0 };
@@ -658,10 +670,26 @@ export class NetStack implements NetDevice {
 	// --- ICMP ------------------------------------------------------------------
 
 	icmpInput(f: Uint8Array, _dv: DataView, src: number, dst: number, l4: number, end: number): void {
-		if (f[l4] !== 8 || (dst !== this.gw && dst !== this.dns)) return; // echo request
-		const len = end - l4;
-		const [r, rv] = this.ipFrame(dst, src, PROTO_ICMP, len);
-		r.set(f.subarray(l4, end), 34);
+		if (f[l4] !== 8 || end - l4 < 8) return; // echo requests only
+		if (dst === this.gw || dst === this.dns) return this.echoReply(f.subarray(l4, end), dst, src);
+		const host = this.backendHost(dst);
+		if (host === null) return;
+		const ping = this.backend.ping;
+		if (!ping) return this.icmpUnreachable(f.subarray(14, l4 + 8), src, this.gw, 13); // administratively prohibited
+		if (this.pings >= MAX_PINGS) return;
+		this.pings++;
+		const msg = f.slice(l4, end);
+		new Promise<boolean>((r) => r(ping.call(this.backend, host, PING_TIMEOUT_MS))).then(
+			(ok) => { this.pings--; if (ok) this.echoReply(msg, dst, src); },
+			() => { this.pings--; },
+		);
+	}
+
+	/** Echo reply from `src` to `dst` carrying the request's id, sequence and data. */
+	echoReply(msg: Uint8Array, src: number, dst: number): void {
+		const len = msg.length;
+		const [r, rv] = this.ipFrame(src, dst, PROTO_ICMP, len);
+		r.set(msg, 34);
 		r[34] = 0; rv.setUint16(36, 0);
 		rv.setUint16(36, fold(sum16(r, 34, len)));
 		this.emit(r);

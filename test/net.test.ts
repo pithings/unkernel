@@ -251,6 +251,57 @@ test("UDP flows that fail the same way are logged once", () => {
 	assert.equal(stack.udp.size, 0);
 });
 
+test("ping beyond the gateway goes to backend.ping; without one it is prohibited", async () => {
+	const echo = (seq: number) => {
+		const icmp = Uint8Array.from([8, 0, 0, 0, 0x12, 0x34, 0, seq, 9, 8, 7, 6, 5]);
+		new DataView(icmp.buffer).setUint16(2, csum(icmp, 0, icmp.length));
+		return icmp;
+	};
+	const asked: Array<[string, number]> = [];
+	const { stack, out } = mkStack({
+		ping: async (host, ms) => { asked.push([host, ms]); return host === "192.0.2.1"; },
+	});
+	stack.send(ipv4(1, GUEST, ip4("192.0.2.1"), echo(1)));
+	stack.send(ipv4(1, GUEST, ip4("192.0.2.9"), echo(2)));
+	stack.send(ipv4(1, GUEST, ip4("10.0.2.15"), echo(3)));     // the guest itself
+	stack.send(ipv4(1, GUEST, ip4("224.0.0.1"), echo(4)));     // multicast
+	await until(() => asked.length === 2 && stack.pings === 0);
+	assert.deepEqual(asked.map(([h]) => h), ["192.0.2.1", "192.0.2.9"]);
+	assert.ok(asked[0]![1] > 0);
+	assert.equal(out.length, 1, "one reply; no answer, no frame");
+	const r = out[0]!;
+	assert.equal(r.icmpType, 0);
+	assert.equal(ip4str(r.src!), "192.0.2.1");
+	assert.equal(r.dst, GUEST);
+	assert.deepEqual([...r.f.subarray(38)], [0x12, 0x34, 0, 1, 9, 8, 7, 6, 5], "id, sequence and data");
+
+	const rejecting = mkStack({ ping: () => Promise.reject(new Error("no")) });
+	rejecting.stack.send(ipv4(1, GUEST, ip4("192.0.2.1"), echo(5)));
+	await until(() => rejecting.stack.pings === 0);
+	assert.equal(rejecting.out.length, 0);
+
+	const none = mkStack({});
+	none.stack.send(ipv4(1, GUEST, ip4("192.0.2.1"), echo(6)));
+	assert.equal(none.out.length, 1);
+	const u = none.out[0]!;
+	assert.equal(u.icmpType, 3);
+	assert.equal(u.f[35], 13, "administratively prohibited");
+	assert.equal(ip4str(u.src!), "10.0.2.2");
+	assert.equal(ip4str(u.dv.getUint32(42 + 16)), "192.0.2.1", "quotes the request");
+	assert.equal(u.dv.getUint16(42 + 20 + 6), 6, "and its sequence");
+});
+
+test("ping in flight through the backend is capped", async () => {
+	const waiting: Array<(ok: boolean) => void> = [];
+	const { stack, out } = mkStack({ ping: () => new Promise<boolean>((r) => waiting.push(r)) });
+	const icmp = Uint8Array.from([8, 0, 0, 0, 0, 1, 0, 1]);
+	new DataView(icmp.buffer).setUint16(2, csum(icmp, 0, icmp.length));
+	for (let i = 0; i < 100; i++) stack.send(ipv4(1, GUEST, ip4("192.0.2.1"), icmp));
+	assert.equal(waiting.length, 64);
+	for (const w of waiting) w(true);
+	await until(() => out.length === 64 && stack.pings === 0);
+});
+
 test("TCP to a refused port gets RST; unknown segment gets RST", async () => {
 	const { stack, out } = mkStack(directBackend());
 	const srv = createServer();
