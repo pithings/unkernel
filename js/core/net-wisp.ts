@@ -27,22 +27,12 @@
 
 import type { NetBackend, NetConnection, NetConnectionEvents } from "./net.ts";
 
-/**
- * The default Wisp server: the project's own. Public alternatives (run by
- * third parties, who see the host names and ports the guest connects to and
- * plain-HTTP content; the guest's TLS is end to end): wss://anura.pro/,
- * wss://wisp.mercurywork.shop/. A ws:// server is blocked as mixed content
- * on an https page.
- */
-export const DEFAULT_WISP_SERVERS: readonly string[] = Object.freeze(["wss://wisp.unkernel.dev:6680/"]);
-
 export interface WispBackendOptions {
 	log?: (msg: string) => void;
 	/**
 	 * Extra handshake headers, e.g. `{ Origin: "http://localhost" }`. Only
 	 * runtimes whose WebSocket takes `{ headers }` (Node, Deno, Bun) send
 	 * them; in browsers, which set Origin themselves, the option is ignored.
-	 * The Node entry's wispBackend() defaults to NODE_WISP_HEADERS.
 	 */
 	headers?: Record<string, string>;
 	/**
@@ -100,13 +90,14 @@ interface Stream {
 
 /**
  * @param url  Wisp endpoint(s), e.g. "wss://wisp.example/" (trailing slash
- *   per the spec). Several are raced; the fastest handshake wins.
+ *   per the spec). Several are raced; the fastest handshake wins. The server
+ *   sees the host names and ports the guest connects to, and plain-HTTP
+ *   content (the guest's TLS is end to end). A ws:// server is blocked as
+ *   mixed content on an https page.
  */
 export function wispBackend(url: string | readonly string[], opts: WispBackendOptions = {}): WispBackend {
 	const urls = typeof url === "string" ? [url] : [...url];
 	const log = opts.log ?? (() => {});
-	// Logs name a default server, not its URL: logs end up in bug reports.
-	const name = (u: string) => (DEFAULT_WISP_SERVERS.includes(u) ? "the default server" : u);
 	// Node's WebSocket takes { protocols, headers } as its second argument.
 	const wsInit = opts.headers && !isBrowser() ? ({ headers: opts.headers } as unknown as string[]) : undefined;
 	let ws: WebSocket | null = null, ready: Promise<WebSocket> | null = null, failedAt = -Infinity, warned = false;
@@ -134,7 +125,7 @@ export function wispBackend(url: string | readonly string[], opts: WispBackendOp
 				clearTimeout(timer);
 				for (const s of sockets) s.close();
 				ready = null; failedAt = performance.now();
-				if (!warned) log(`[net] wisp ${urls.length > 1 ? "servers" : "server"} ${urls.map(name).join(", ")} unavailable; guest network offline`);
+				if (!warned) log(`[net] wisp ${urls.length > 1 ? "servers" : "server"} ${urls.join(", ")} unavailable; guest network offline`);
 				warned = true;
 				reject(new Error("wisp server unavailable"));
 			};
@@ -162,7 +153,7 @@ export function wispBackend(url: string | readonly string[], opts: WispBackendOp
 					initialCredit = new DataView(m.buffer).getUint32(5, true);
 					ws = s; warned = false;
 					for (const o of sockets) if (o !== s) o.close();
-					log(`[net] wisp connected: ${name(u)} (handshake ${Math.round(performance.now() - t0)} ms, buffer ${initialCredit} packets)`);
+					log(`[net] wisp connected: ${u} (handshake ${Math.round(performance.now() - t0)} ms, buffer ${initialCredit} packets)`);
 					resolve(s);
 				};
 			}

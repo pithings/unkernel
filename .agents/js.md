@@ -531,7 +531,7 @@ parts that are easy to get wrong.
   `:cpu*/`, `:webcpu*/`, `:wasi*/`, `:webwasi*/`).
   Vite's `?worker&inline` is not usable: plain Node cannot load it.
 - A worker's WebSocket sends the page's origin, so the Wisp allow list
-  works as inline; Node workers send `NODE_WISP_HEADERS`.
+  works as inline; Node sends no Origin unless the spec has `headers`.
 
 ## CPU threads (SMP kernels, `js/core/cpu.ts`)
 
@@ -1732,14 +1732,16 @@ parts that are easy to get wrong.
 - `directBackend()` (Node only, the CLI's default) uses host sockets and
   `dns.lookup`. With `hostLoopback`, 10.0.2.2 goes to the host's 127.0.0.1.
 - `wispBackend()` multiplexes connections over one WebSocket to a Wisp v1
-  server. `DEFAULT_WISP_SERVERS` is the project's
-  `wss://wisp.unkernel.dev:6680/` (port 443 does not answer). With several URLs, all are opened at once and
-  the first handshake wins.
-- The project's Wisp server has an allow list of Origins
-  (`http://localhost` is on it) and answers anything else, including no
-  Origin, with 404. Node's WebSocket sends no Origin, so the Node entry
-  and the CLI's `--net-wisp` send `Origin: http://localhost`
-  (`NODE_WISP_HEADERS`, overridable with `headers`; browsers ignore it).
+  server. The SDK names no server: the caller passes one (the page's is
+  `web/src/net.ts` DEFAULT_WISP_SERVERS, web.md). With several URLs, all
+  are opened at once and the first handshake wins. Logs carry the URLs.
+- `headers` are sent with the handshake where the WebSocket takes them
+  (Node, Deno, Bun; browsers ignore it). Node's WebSocket sends no Origin
+  of its own, and the SDK adds none.
+- The project's Wisp server, `wss://wisp.unkernel.dev:6680/` (port 443
+  does not answer), has an allow list of Origins (the page's, and
+  `http://localhost` for the dev server) and answers anything else,
+  including no Origin, with 404.
 - Wisp has no DNS, so the guest gets stable fake addresses from
   198.18.0.0/15 and a bad name fails at connect time. The table holds
   2^17 - 1 names and, when full, gives the least recently used name's

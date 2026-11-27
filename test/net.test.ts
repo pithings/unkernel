@@ -10,7 +10,7 @@ import { createServer, type AddressInfo } from "node:net";
 import { createServer as createHttpServer } from "node:http";
 import { ip4, ip4str, type NetBackend, type NetConnectionEvents } from "../js/core/net.ts";
 import { wispBackend } from "../js/core/net-wisp.ts";
-import { directBackend, wispBackend as nodeWispBackend } from "../js/node/net.ts";
+import { directBackend } from "../js/node/net.ts";
 import { acceptWebSocket } from "./ws-server.ts";
 import { GUEST, GUEST_MAC, collect, csum, echoTest, eth, ipv4, mkStack, tcp, udp, until, withWisp } from "./net-helpers.ts";
 
@@ -221,18 +221,18 @@ test("Wisp backend: close() during the handshake gives up at once", async () => 
 	}
 });
 
-test("Wisp handshake headers: the Node entry sends Origin: http://localhost, overridable", async () => {
+test("Wisp handshake headers: none by default, `headers` sent as given", async () => {
 	const origins: Array<string | undefined> = [];
 	const srv = createHttpServer();
 	srv.on("upgrade", (req, socket) => { origins.push(req.headers.origin); socket.destroy(); });
 	await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
 	const url = `ws://127.0.0.1:${(srv.address() as AddressInfo).port}/`;
 	try {
-		for (const b of [wispBackend(url), nodeWispBackend(url), nodeWispBackend(url, { headers: { Origin: "http://127.0.0.1:8080" } })]) {
+		for (const b of [wispBackend(url), wispBackend(url, { headers: { Origin: "http://127.0.0.1:8080" } })]) {
 			await assert.rejects(b.lookup("example.com").then(() => collect(b, "198.18.0.1", 80).closed.then((e) => { throw e; })));
 			b.close();
 		}
-		assert.deepEqual(origins, [undefined, "http://localhost", "http://127.0.0.1:8080"]);
+		assert.deepEqual(origins, [undefined, "http://127.0.0.1:8080"]);
 	} finally {
 		srv.closeAllConnections();
 		srv.close();

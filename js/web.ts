@@ -8,9 +8,9 @@
 // fetched cross-origin): host alpine.erofs (from a release, with its
 // distros.json) yourself and pass its URL, read lazily with Range requests.
 //
-//   import { createKernel, wispBackend, DEFAULT_WISP_SERVERS } from "unkernel";
+//   import { createKernel, wispBackend } from "unkernel";
 //   const vm = await createKernel({ distro: "/distros/alpine.erofs",
-//     net: wispBackend(DEFAULT_WISP_SERVERS), onProgress: (p) => console.log(p) });
+//     net: wispBackend("wss://wisp.example/"), onProgress: (p) => console.log(p) });
 //   vm.onOutput((b) => term.write(b));
 //   term.onData((d) => vm.write(d));
 //

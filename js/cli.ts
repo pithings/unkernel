@@ -108,8 +108,7 @@ one (custom section unkernel.datadisk), else vendor/build/disk/kwdata.kwsparse.g
 Networking (a user-mode NAT over host sockets) is on by default: --no-net
 disables it, --net-mtu N sets the MTU handed out by DHCP. The guest is
 10.0.2.15, gateway 10.0.2.2 (= host 127.0.0.1), DNS 10.0.2.3. --net-wisp URL
-sends the guest's TCP through a Wisp server instead (handshake with
-Origin: http://localhost, which wss://wisp.unkernel.dev:6680/ requires).
+sends the guest's TCP through a Wisp server instead.
 
 kwemu's JIT tier (hot guest code compiled to WebAssembly) is offered by default;
 --no-jit runs the interpreter only (a kernel built without the JIT never
@@ -444,7 +443,7 @@ const log = (m: string) => process.stderr.write(m + "\n");
 const wisp = opt("net-wisp");
 const mtu = opt("net-mtu");
 const useNet = !flag("no-net");
-// With --worker the network crosses as a spec (Wisp from a spec sends NODE_WISP_HEADERS too).
+// With --worker the network crosses as a spec.
 const netSpec: NetSpec | undefined = useNet && worker
 	? { kind: "net", backend: wisp ? { kind: "wisp", servers: wisp } : { kind: "direct" }, hostLoopback: !wisp, mtu: mtu ? Number(mtu) : undefined }
 	: undefined;

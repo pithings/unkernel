@@ -12,7 +12,7 @@ export { KWSPARSE_MAGIC, decodeKwsparse, encodeKwsparse, gunzipIfNeeded, gzipBlo
 export type { KwsparseImage } from "./kwsparse.ts";
 export { NetStack, ip4, ip4str } from "./net.ts";
 export type { NetBackend, NetConnection, NetConnectionEvents, NetStackOptions, NetStats } from "./net.ts";
-export { DEFAULT_WISP_SERVERS, wispBackend } from "./net-wisp.ts";
+export { wispBackend } from "./net-wisp.ts";
 export type { WispBackend, WispBackendOptions } from "./net-wisp.ts";
 export { fetchRoutes } from "./net-fetch.ts";
 export type { FetchRoute, FetchRoutesBackend, FetchRoutesOptions } from "./net-fetch.ts";

@@ -9,7 +9,7 @@
 //
 //   node --test test/api.test.ts                       # from source (js/node.ts)
 //   UNKERNEL_DIST=1 node --test test/api.test.ts       # the built package ("unkernel" -> dist/)
-//   UNKERNEL_TEST_WISP=1 ...                           # also the default Wisp server (internet)
+//   UNKERNEL_TEST_WISP=wss://... ...                  # also a Wisp server on the internet (sent Origin: http://localhost)
 //   UNKERNEL_TEST_KERNEL=path ...                      # another bundle instead of the bundled kernel
 //   UNKERNEL_TEST_DISTRO_DIR=dir ...                   # where alpine.erofs is (default vendor/build/distro)
 //   UNKERNEL_TEST_CPUS=n ...                           # CPUs for an SMP kernel under test (the bundle's SMP kernel for n > 1)
@@ -29,7 +29,7 @@ import { fileURLToPath } from "node:url";
 
 const spec = process.env.UNKERNEL_DIST ? "unkernel" : "../js/node.ts";
 const sdk: typeof import("../js/node.ts") = await import(spec);
-const { createKernel, ConsoleRouter, NetStack, directBackend, wispBackend, DEFAULT_WISP_SERVERS, FileDisk, bundledBoot, bundledKernelUrl, createImageFromKwsparse, MemoryFs, nodeFs } = sdk;
+const { createKernel, ConsoleRouter, NetStack, directBackend, wispBackend, FileDisk, bundledBoot, bundledKernelUrl, createImageFromKwsparse, MemoryFs, nodeFs } = sdk;
 type Instance = Awaited<ReturnType<typeof createKernel>>;
 /** The kernel under test: UNKERNEL_TEST_KERNEL (a bundle, e.g. from a build of your own), else the bundled one. */
 const testKernel = process.env.UNKERNEL_TEST_KERNEL ? path.resolve(process.env.UNKERNEL_TEST_KERNEL) : undefined;
@@ -609,10 +609,11 @@ describe("api", { concurrency: CONCURRENCY }, () => {
 		});
 	});
 
-	for (const { worker, name } of MODES) test(`Wisp networking through the default server (${name})`, { skip: !process.env.UNKERNEL_TEST_WISP && "set UNKERNEL_TEST_WISP=1 (needs internet)" }, async (t) => {
-		const logs: string[] = [];
-		const vm = await boot(t, { worker, log: (m) => logs.push(m), net: worker ? { kind: "net", backend: { kind: "wisp", servers: [...DEFAULT_WISP_SERVERS] } }
-			: wispBackend(DEFAULT_WISP_SERVERS, { log: (m) => logs.push(m) }) });
+	for (const { worker, name } of MODES) test(`Wisp networking through UNKERNEL_TEST_WISP (${name})`, { skip: !process.env.UNKERNEL_TEST_WISP && "set UNKERNEL_TEST_WISP=wss://... (needs internet)" }, async (t) => {
+		const logs: string[] = [], servers = process.env.UNKERNEL_TEST_WISP!.split(",");
+		const headers = { Origin: "http://localhost" };   // Node's WebSocket sends none, and some servers want one
+		const vm = await boot(t, { worker, log: (m) => logs.push(m), net: worker ? { kind: "net", backend: { kind: "wisp", servers, headers } }
+			: wispBackend(servers, { headers, log: (m) => logs.push(m) }) });
 		const { s, waitFor } = screen(vm);
 		await waitFor(PROMPT);
 		const at = s.text.length;

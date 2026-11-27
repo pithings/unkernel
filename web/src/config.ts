@@ -292,7 +292,7 @@ export interface Config {
 	cmdlineGiven: boolean;
 	/** The guest network device (?net=0 or ?wisp=0 removes it). */
 	net: boolean;
-	/** ?wisp= servers, or null for the SDK's DEFAULT_WISP_SERVERS. */
+	/** ?wisp= servers, or null for net.ts DEFAULT_WISP_SERVERS. */
 	wisp: string[] | null;
 	/** Plain-HTTP hosts answered with fetch(): DEFAULT_ROUTES, or null with ?routes=0. */
 	routes: Record<string, string> | null;

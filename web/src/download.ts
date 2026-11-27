@@ -32,7 +32,8 @@
 //   pushFiles() writes a batch of them into a directory with one exec, as a
 //   tar.
 
-import { DEFAULT_WISP_SERVERS, fetchOver, wispBackend, type ByteDuplex, type GuestConnect, type KernelHandle, type NetBackend } from "./sdk.ts";
+import { DEFAULT_WISP_SERVERS } from "./net.ts";
+import { fetchOver, wispBackend, type ByteDuplex, type GuestConnect, type KernelHandle, type NetBackend } from "./sdk.ts";
 
 const CACHE_NAME = "kw-files-v1";
 const MAX_REDIRECTS = 5;

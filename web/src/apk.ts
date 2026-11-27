@@ -38,7 +38,8 @@
 
 import { backendConnect } from "./download.ts";
 import { fmtMiB } from "./format.ts";
-import { DEFAULT_WISP_SERVERS, fetchOver, wispBackend, type GuestConnect, type KernelHandle } from "./sdk.ts";
+import { DEFAULT_WISP_SERVERS } from "./net.ts";
+import { fetchOver, wispBackend, type GuestConnect, type KernelHandle } from "./sdk.ts";
 import { execAsRoot } from "./sudo.ts";
 
 /** Get an index again when the guest's copy is older than this (apk's own limit is 4 h). */

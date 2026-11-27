@@ -347,10 +347,10 @@ disk (labelled `kwdata`) is attached: then each distro keeps them in
 ### Add a network
 
 ```js
-import { createKernel, directBackend, wispBackend, DEFAULT_WISP_SERVERS } from "unkernel";
+import { createKernel, directBackend, wispBackend } from "unkernel";
 
 await createKernel({ net: directBackend() });                       // Node: host sockets
-await createKernel({ net: wispBackend(DEFAULT_WISP_SERVERS) });     // anywhere: a Wisp proxy
+await createKernel({ net: wispBackend("wss://wisp.example/") });    // anywhere: your Wisp proxy
 ```
 
 Networking is off unless you pass `net`. Any object with `connect` and
