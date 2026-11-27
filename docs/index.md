@@ -98,6 +98,21 @@ Most "Linux in the browser" projects emulate a whole PC (faithful but slow), emu
 
 unkernel needs [JSPI](https://github.com/WebAssembly/js-promise-integration): Node 24+, Chrome / Edge 137+, Firefox 153+, or Safari 27+ (and any browser on iOS/iPadOS 27).
 
+## Credits
+
+Made with ♥ by [Pooya Parsa](https://x.com/_pi0_) ([pi0](https://github.com/pi0)), sponsored by [▲ Vercel](https://vercel.com/open-source-program).
+
+Thanks to:
+
+- [Kernarium](https://github.com/imxieyi/Kernarium), for the idea: a native kernel with emulated user space behind a software MMU.
+- [linux-wasm](https://github.com/joelseverin/linux-wasm) by Joel Severin, for the `arch/wasm` port this kernel grew from, the wasm-ld linker-script patches and the Kbuild toolchain wrapper.
+- [iSH](https://github.com/ish-app/ish) and [v86](https://github.com/copy/v86), for showing how to build a fast user-mode emulator and a wasm JIT.
+- [virglrenderer](https://gitlab.freedesktop.org/virgl/virglrenderer) and [Mesa](https://mesa3d.org/), for guest GL: Mesa's virgl driver in the guest, and virglrenderer compiled to wasm with [Emscripten](https://emscripten.org/), rendering on WebGL2 in the page.
+- [Alpine Linux](https://alpinelinux.org/) and [Debian](https://www.debian.org/), the distributions it boots, packed with [erofs-utils](https://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git), [LZ4](https://github.com/lz4/lz4) and [Zstandard](https://github.com/facebook/zstd).
+- [wland](https://github.com/pithings/wland), the Wayland compositor that brings the guest's windows to the page, and [wterm](https://wterm.dev/), the page's terminals.
+- [Zig](https://ziglang.org/), [LLVM](https://llvm.org/) and [Binaryen](https://github.com/WebAssembly/binaryen), which build it; [React](https://react.dev/), [Tailwind CSS](https://tailwindcss.com/), [Vite](https://vite.dev/), [Nitro](https://nitro.build/) and the [Geist](https://vercel.com/font) fonts, which make the page.
+- [Wisp](https://github.com/MercuryWorkshop/wisp-protocol), the protocol behind the guest's network in the browser.
+
 ## License
 
-The project is GPL-2.0-or-later unless a file says otherwise. The JavaScript SDK and page are MIT, so you can embed them anywhere. The npm package ships a Linux kernel (GPL-2.0) with a small base system, so it is `MIT AND GPL-2.0-only`.
+See [LICENSE](https://github.com/pithings/unkernel/blob/main/LICENSE) and [LICENSE-MIT](https://github.com/pithings/unkernel/blob/main/LICENSE-MIT).
