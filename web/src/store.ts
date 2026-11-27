@@ -170,6 +170,7 @@ export interface UiState {
 	/** The Font size option: "auto" or a size in px. */
 	fontPref: string;
 	fontSize: number;
+	termTheme: "auto" | "dark" | "light";
 	/** The Copy diagnostics fallback text, shown when the clipboard is unavailable. */
 	copyText: string | null;
 	display: DisplayState;

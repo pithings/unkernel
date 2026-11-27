@@ -421,6 +421,16 @@
 	--term-color-8: #737373; --term-color-9: #ff8589; --term-color-10: #7ee2a8; --term-color-11: #ffc96b;
 	--term-color-12: #8ec5ff; --term-color-13: #d9a6fd; --term-color-14: #5fe0d0; --term-color-15: #ffffff;
 }
+:root[data-term-theme="light"] #workspace .wterm {
+	color-scheme: light; scrollbar-color: #afb8c1 transparent;
+	--term-fg: #24292f; --term-bg: #ffffff; --term-cursor: #24292f;
+	--term-selection-bg: rgb(9 105 218 / 20%);
+	--term-color-0: #24292f; --term-color-1: #cf222e; --term-color-2: #116329; --term-color-3: #4d2d00;
+	--term-color-4: #0969da; --term-color-5: #8250df; --term-color-6: #1b7c83; --term-color-7: #6e7781;
+	--term-color-8: #57606a; --term-color-9: #a40e26; --term-color-10: #1a7f37; --term-color-11: #633c01;
+	--term-color-12: #218bff; --term-color-13: #a475f9; --term-color-14: #3192aa; --term-color-15: #8c959f;
+}
+:root[data-term-theme="light"] .wm-body[data-app="terminal"] { background: #fff; }
 /* A Terminal window's content is glass, focused or not: the desktop and the
    windows behind show through the terminal, blurred. Only the content: the
    border, the title bar and the tab strip stay solid. Not maximized ones
@@ -434,6 +444,7 @@
 	-webkit-backdrop-filter: blur(20px) saturate(1.5); backdrop-filter: blur(20px) saturate(1.5);
 }
 #app:not(.compact) .wm-win:not([data-max]) > .wm-body[data-app="terminal"] .wterm { background: transparent; }
+:root[data-term-theme="light"] #app:not(.compact) .wm-win:not([data-max]) > .wm-body[data-app="terminal"] { background: rgb(255 255 255 / 72%); }
 /* Docs: less see-through than a terminal, for its prose. */
 #app:not(.compact) .wm-win:not([data-max]) > .wm-body[data-app="docs"] { background: rgb(8 8 8 / 84%); }
 .wm-win, .wm-title, .wm-strip, .wm-body { transition: background-color 0.18s; }

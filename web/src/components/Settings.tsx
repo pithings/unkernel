@@ -33,14 +33,14 @@ import { AppShell, H3, K, type SectionDef } from "./AppShell.tsx";
 import { Keyboard } from "./KeysHud.tsx";
 import { DesktopSettings } from "./DesktopSettings.tsx";
 import { DiskIcon, DisplayIcon, KeysIcon, LayersIcon, MemIcon, PauseIcon, PreviewIcon, Triangle, WallpaperIcon } from "./icons.tsx";
-import { DisplayOptions, DistroOptions, FontSize, MachineOptions, NetworkOptions, SessionOptions, StorageOptions } from "./Options.tsx";
+import { DisplayOptions, DistroOptions, FontSize, MachineOptions, NetworkOptions, SessionOptions, StorageOptions, TermTheme } from "./Options.tsx";
 
 const SECTIONS: SectionDef[] = [
 	{ id: "boot", name: "Machine", icon: <MemIcon size={14} />, desc: "The virtual machine and the kernel. Applied when you reboot." },
 	{ id: "distro", name: "Distro", icon: <LayersIcon />, desc: "The root file system the guest boots. Applied when you reboot." },
 	{ id: "storage", name: "Storage", icon: <DiskIcon size={14} />, desc: "The data disk: /data and your changes to the root, kept in this browser." },
 	{ id: "network", name: "Network", icon: <PreviewIcon size={14} />, desc: "The guest's internet, and its web servers in a browser window." },
-	{ id: "display", name: "Display and sound", icon: <DisplayIcon size={14} />, desc: "The guest's devices (applied when you reboot) and the terminal's font." },
+	{ id: "display", name: "Display and sound", icon: <DisplayIcon size={14} />, desc: "The guest's devices (applied when you reboot) and the terminal's font and colours." },
 	{ id: "desktop", name: "Desktop", icon: <WallpaperIcon size={14} />, desc: "The wallpaper and the console after boot. Applied at once." },
 	{ id: "session", name: "Session", icon: <PauseIcon size={14} />, desc: "Saving the running system when the tab is hidden or closed." },
 	{ id: "keys", name: "Keyboard", icon: <KeysIcon />, desc: <>Shortcuts work anywhere: {PREFIX}, then a key.</> },
@@ -77,7 +77,7 @@ export function Settings() {
 				: id === "distro" ? <DistroOptions />
 				: id === "storage" ? <Storage />
 				: id === "network" ? <Network />
-				: id === "display" ? <><DisplayOptions /><H3>Terminal</H3><FontSize /></>
+				: id === "display" ? <><DisplayOptions /><H3>Terminal</H3><FontSize /><TermTheme /></>
 				: id === "desktop" ? <DesktopSettings />
 				: id === "session" ? <SessionOptions />
 				: id === "keys" ? <KeysHelp />

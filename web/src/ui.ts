@@ -62,6 +62,7 @@ function reloadToResume(auto: boolean): void {
 const SUSPEND_TOAST_MS = 20000;
 
 const padLayout = (v: string | null): PadLayout => (v === "keys" ? v : "gamepad");
+const termThemePref = (v: string | null): UiState["termTheme"] => (v === "auto" || v === "light" ? v : "dark");
 
 interface BrowserInfo { name: string; v: number; ios?: boolean }
 
@@ -165,7 +166,7 @@ export function createUi(cfg: Config) {
 			: null,
 		distro: cfg.distro ? { name: cfg.distro.name, image: cfg.distro.imageId ?? "", url: cfg.distro.url } : null,
 		ctrl: false, keysOn: false, pasteOpen: false, ask: null, paused: false, prefix: false,
-		fontPref, fontSize: cfg.fontSize, copyText: null,
+		fontPref, fontSize: cfg.fontSize, termTheme: termThemePref(store("termtheme")), copyText: null,
 		display: { attached: false, width: 0, height: 0, keyboard: false, mouse: false, tablet: false,
 			rotate: store("fbRotate") === "1", layout: padLayout(store("padLayout")),
 			touchMode: store("touchMode") === "trackpad" ? "trackpad" : "mouse",
@@ -174,6 +175,14 @@ export function createUi(cfg: Config) {
 		launcher: false,
 		options,
 	} satisfies UiState);
+
+	const lightScheme = matchMedia("(prefers-color-scheme: light)");
+	const showTermTheme = () => {
+		const pref = $.get().termTheme;
+		document.documentElement.dataset.termTheme = pref === "auto" ? (lightScheme.matches ? "light" : "dark") : pref;
+	};
+	lightScheme.addEventListener("change", showTermTheme);
+	showTermTheme();
 
 	// ---- the tab's title ---------------------------------------------------
 	// One character before the title says how the machine is (titleMark()),
@@ -518,6 +527,12 @@ export function createUi(cfg: Config) {
 			cfg.fontSize = size;
 			$.set({ fontPref: pref, fontSize: size });
 			KW.term?.setFontSize(size);
+		},
+		setTermTheme(pref: string) {
+			const termTheme = termThemePref(pref);
+			store("termtheme", termTheme);
+			$.set({ termTheme });
+			showTermTheme();
 		},
 
 		copyDiagnostics,

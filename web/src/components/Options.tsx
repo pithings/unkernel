@@ -55,7 +55,9 @@ function openStop(t: HTMLInputElement, i: number): number {
 	return i;
 }
 
-const pick = (name: string, v: string) => (name === "font" ? KW.ui!.setFont(v) : KW.ui!.setOption(name as keyof Opts, v as never));
+const pick = (name: string, v: string) => (name === "font" ? KW.ui!.setFont(v)
+	: name === "termtheme" ? KW.ui!.setTermTheme(v)
+	: KW.ui!.setOption(name as keyof Opts, v as never));
 
 function Field({ label, wide, hidden, id, children }: { label: string; wide?: boolean; hidden?: boolean; id?: string; children: ReactNode }) {
 	return (
@@ -89,7 +91,7 @@ function Check({ id, name, on, off, value, label, note, forced, blocked }: { id:
 }
 
 /** (•) one of several. */
-function Radio({ id, name, value, current, label }: { id: string; name: keyof Opts; value: string; current: string; label: string }) {
+function Radio({ id, name, value, current, label }: { id: string; name: string; value: string; current: string; label: string }) {
 	const checked = value === current;
 	return (
 		<label className="flex cursor-pointer items-center gap-1.5 text-muted select-none hover:text-fg">
@@ -380,5 +382,19 @@ export function FontSize() {
 		<div className="max-w-sm">
 			<Slider id="opt-font" name="font" label="Font size" value={fontValue} stops={fonts} />
 		</div>
+	);
+}
+
+export function TermTheme() {
+	const termTheme = useStore((s) => s.termTheme);
+	return (
+		<fieldset className="mt-5 flex max-w-sm flex-col gap-1.5">
+			<legend className="mb-1.5 text-[11.5px] text-faint">Colours</legend>
+			<div className="flex flex-wrap gap-x-5 gap-y-1" role="radiogroup" id="opt-termtheme">
+				<Radio id="opt-termtheme-auto" name="termtheme" value="auto" current={termTheme} label="Auto" />
+				<Radio id="opt-termtheme-dark" name="termtheme" value="dark" current={termTheme} label="Dark" />
+				<Radio id="opt-termtheme-light" name="termtheme" value="light" current={termTheme} label="Light" />
+			</div>
+		</fieldset>
 	);
 }
