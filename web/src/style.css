@@ -434,7 +434,8 @@
 /* A Terminal window's content is glass, focused or not: the desktop and the
    windows behind show through the terminal, blurred. Only the content: the
    border, the title bar and the tab strip stay solid. Not maximized ones
-   (nothing is behind them worth showing) and not in compact mode. Cells
+   (nothing is behind them worth showing), not in compact mode and not with
+   See-through window off (Settings, data-term-glass). Cells
    with a colour of their own keep it. The Docs window's too, under its
    toolbar: the docs site paints no background of its own there (docs.ts
    THEME). */
@@ -445,6 +446,10 @@
 }
 #app:not(.compact) .wm-win:not([data-max]) > .wm-body[data-app="terminal"] .wterm { background: transparent; }
 :root[data-term-theme="light"] #app:not(.compact) .wm-win:not([data-max]) > .wm-body[data-app="terminal"] { background: rgb(255 255 255 / 72%); }
+:root[data-term-glass="off"] #app:not(.compact) .wm-win:not([data-max]):has(> .wm-body[data-app="terminal"]) { background: #0a0a0a; }
+:root[data-term-glass="off"] #app:not(.compact) .wm-win:not([data-max]) > .wm-body[data-app="terminal"] { background: #000; -webkit-backdrop-filter: none; backdrop-filter: none; }
+:root[data-term-glass="off"][data-term-theme="light"] #app:not(.compact) .wm-win:not([data-max]) > .wm-body[data-app="terminal"] { background: #fff; }
+:root[data-term-glass="off"] #app:not(.compact) .wm-win:not([data-max]) > .wm-body[data-app="terminal"] .wterm { background: var(--term-app-bg, var(--term-bg)); }
 /* Docs: less see-through than a terminal, for its prose. */
 #app:not(.compact) .wm-win:not([data-max]) > .wm-body[data-app="docs"] { background: rgb(8 8 8 / 84%); }
 .wm-win, .wm-title, .wm-strip, .wm-body { transition: background-color 0.18s; }

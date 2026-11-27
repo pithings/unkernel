@@ -114,6 +114,7 @@
 	try {
 		const t = localStorage.getItem("kw.termtheme");
 		root.setAttribute("data-term-theme", t === "light" || (t === "auto" && matchMedia("(prefers-color-scheme: light)").matches) ? "light" : "dark");
+		root.setAttribute("data-term-glass", localStorage.getItem("kw.termglass") === "off" ? "off" : "on");
 		const h = JSON.parse(localStorage.getItem("kw.wallpaper-hint") || "null");
 		if (h && typeof h.css === "string") {
 			root.style.setProperty("--wp-hint", h.css);

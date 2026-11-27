@@ -57,6 +57,7 @@ function openStop(t: HTMLInputElement, i: number): number {
 
 const pick = (name: string, v: string) => (name === "font" ? KW.ui!.setFont(v)
 	: name === "termtheme" ? KW.ui!.setTermTheme(v)
+	: name === "termglass" ? KW.ui!.setTermGlass(v)
 	: KW.ui!.setOption(name as keyof Opts, v as never));
 
 function Field({ label, wide, hidden, id, children }: { label: string; wide?: boolean; hidden?: boolean; id?: string; children: ReactNode }) {
@@ -73,7 +74,7 @@ function Field({ label, wide, hidden, id, children }: { label: string; wide?: bo
  * A forced box is shown ticked and disabled, its stored value kept (Worker thread with several CPUs);
  * a blocked one unticked and disabled, its stored value kept (Guest GL with another distro).
  */
-function Check({ id, name, on, off, value, label, note, forced, blocked }: { id: string; name: keyof Opts; on: string; off: string; value: string; label: string; note?: string; forced?: boolean; blocked?: boolean }) {
+function Check({ id, name, on, off, value, label, note, forced, blocked }: { id: string; name: string; on: string; off: string; value: string; label: string; note?: string; forced?: boolean; blocked?: boolean }) {
 	const checked = !blocked && (forced || value === on);
 	const locked = forced || blocked;
 	return (
@@ -396,5 +397,14 @@ export function TermTheme() {
 				<Radio id="opt-termtheme-light" name="termtheme" value="light" current={termTheme} label="Light" />
 			</div>
 		</fieldset>
+	);
+}
+
+export function TermGlass() {
+	const termGlass = useStore((s) => s.termGlass);
+	return (
+		<div className="mt-5 max-w-sm">
+			<Check id="opt-termglass" name="termglass" on="on" off="off" value={termGlass} label="See-through window" note="the desktop shows through, blurred" />
+		</div>
 	);
 }

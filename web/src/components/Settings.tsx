@@ -33,7 +33,7 @@ import { AppShell, H3, K, type SectionDef } from "./AppShell.tsx";
 import { Keyboard } from "./KeysHud.tsx";
 import { DesktopSettings } from "./DesktopSettings.tsx";
 import { DiskIcon, DisplayIcon, KeysIcon, LayersIcon, MemIcon, PauseIcon, PreviewIcon, Triangle, WallpaperIcon } from "./icons.tsx";
-import { DisplayOptions, DistroOptions, FontSize, MachineOptions, NetworkOptions, SessionOptions, StorageOptions, TermTheme } from "./Options.tsx";
+import { DisplayOptions, DistroOptions, FontSize, MachineOptions, NetworkOptions, SessionOptions, StorageOptions, TermGlass, TermTheme } from "./Options.tsx";
 
 const SECTIONS: SectionDef[] = [
 	{ id: "boot", name: "Machine", icon: <MemIcon size={14} />, desc: "The virtual machine and the kernel. Applied when you reboot." },
@@ -77,7 +77,7 @@ export function Settings() {
 				: id === "distro" ? <DistroOptions />
 				: id === "storage" ? <Storage />
 				: id === "network" ? <Network />
-				: id === "display" ? <><DisplayOptions /><H3>Terminal</H3><FontSize /><TermTheme /></>
+				: id === "display" ? <><DisplayOptions /><H3>Terminal</H3><FontSize /><TermTheme /><TermGlass /></>
 				: id === "desktop" ? <DesktopSettings />
 				: id === "session" ? <SessionOptions />
 				: id === "keys" ? <KeysHelp />

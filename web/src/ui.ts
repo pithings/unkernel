@@ -63,6 +63,7 @@ const SUSPEND_TOAST_MS = 20000;
 
 const padLayout = (v: string | null): PadLayout => (v === "keys" ? v : "gamepad");
 const termThemePref = (v: string | null): UiState["termTheme"] => (v === "auto" || v === "light" ? v : "dark");
+const termGlassPref = (v: string | null): UiState["termGlass"] => (v === "off" ? v : "on");
 
 interface BrowserInfo { name: string; v: number; ios?: boolean }
 
@@ -166,7 +167,7 @@ export function createUi(cfg: Config) {
 			: null,
 		distro: cfg.distro ? { name: cfg.distro.name, image: cfg.distro.imageId ?? "", url: cfg.distro.url } : null,
 		ctrl: false, keysOn: false, pasteOpen: false, ask: null, paused: false, prefix: false,
-		fontPref, fontSize: cfg.fontSize, termTheme: termThemePref(store("termtheme")), copyText: null,
+		fontPref, fontSize: cfg.fontSize, termTheme: termThemePref(store("termtheme")), termGlass: termGlassPref(store("termglass")), copyText: null,
 		display: { attached: false, width: 0, height: 0, keyboard: false, mouse: false, tablet: false,
 			rotate: store("fbRotate") === "1", layout: padLayout(store("padLayout")),
 			touchMode: store("touchMode") === "trackpad" ? "trackpad" : "mouse",
@@ -183,6 +184,7 @@ export function createUi(cfg: Config) {
 	};
 	lightScheme.addEventListener("change", showTermTheme);
 	showTermTheme();
+	document.documentElement.dataset.termGlass = $.get().termGlass;
 
 	// ---- the tab's title ---------------------------------------------------
 	// One character before the title says how the machine is (titleMark()),
@@ -533,6 +535,12 @@ export function createUi(cfg: Config) {
 			store("termtheme", termTheme);
 			$.set({ termTheme });
 			showTermTheme();
+		},
+		setTermGlass(pref: string) {
+			const termGlass = termGlassPref(pref);
+			store("termglass", termGlass);
+			$.set({ termGlass });
+			document.documentElement.dataset.termGlass = termGlass;
 		},
 
 		copyDiagnostics,
