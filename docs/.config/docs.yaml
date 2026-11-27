@@ -1,0 +1,10 @@
+# yaml-language-server: $schema=https://unpkg.com/undocs-nightly/schema/config.json
+name: unkernel
+shortDescription: Linux on WebAssembly
+description: A real Linux kernel, compiled to WebAssembly. Boot Alpine, Debian or your own aarch64 Linux userland in Node or the browser.
+
+themeColor: purple
+github: pithings/unkernel
+
+# No landing page: `/` is the intro page (index.md).
+landing: false
