@@ -52,6 +52,8 @@ export const WallpaperIcon = (p: P) => <Icon {...p}><rect x="3" y="4.5" width="1
 /** A prompt: the console and the terminal windows. */
 export const PromptIcon = (p: P) => <Icon {...p}><path d="m5 7 5 5-5 5M12.5 17H19" /></Icon>;
 /** A globe: the preview of a web server in the guest. */
+/** An open book. */
+export const DocsIcon = (p: P) => <Icon {...p}><path d="M12 6.5C10.3 5 7.9 4.5 3.5 4.5v14c4.4 0 6.8.5 8.5 2 1.7-1.5 4.1-2 8.5-2v-14c-4.4 0-6.8.5-8.5 2ZM12 6.5v14" /></Icon>;
 export const PreviewIcon = (p: P) => <Icon {...p}><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3Z" /></Icon>;
 /** Nine squares: the launcher. */
 export const GridIcon = (p: P) => <Icon {...p}><rect x="4" y="4" width="4" height="4" rx="1" /><rect x="10" y="4" width="4" height="4" rx="1" /><rect x="16" y="4" width="4" height="4" rx="1" /><rect x="4" y="10" width="4" height="4" rx="1" /><rect x="10" y="10" width="4" height="4" rx="1" /><rect x="16" y="10" width="4" height="4" rx="1" /><rect x="4" y="16" width="4" height="4" rx="1" /><rect x="10" y="16" width="4" height="4" rx="1" /><rect x="16" y="16" width="4" height="4" rx="1" /></Icon>;

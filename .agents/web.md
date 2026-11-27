@@ -55,7 +55,8 @@ their top):
   tabs), `wterms.ts` (terminals 1-9), `bottom.ts` (keeps a terminal at
   its bottom when it gets shorter), `autohide.ts` (the console minimizing
   itself after boot), `sysapps.ts` (the Settings and System windows),
-  `launcher.ts` (how an app runs), `installer.ts` (an app's install, out
+  `launcher.ts` (how an app runs), `docs.ts` (the Docs window: the docs
+  site in a credentialless iframe, in the page's theme), `installer.ts` (an app's install, out
   of sight), `showcase.ts`.
 - `apps/`: the launcher's apps (Launcher, below); `apps/sdlwl.ts`,
   `apps/xkms.ts` and `apps/xwl.ts` are what the SDL Wayland games, the
@@ -73,7 +74,7 @@ their top):
   system apps' portals and frame), `Settings.tsx`, `Options.tsx`,
   `DesktopSettings.tsx`, `SystemInfo.tsx`, `Overview.tsx`, `About.tsx`,
   `Display.tsx` and `Pad.tsx` (the display's content: rotation, mouse and
-  touch input, touch controls), `Preview.tsx` (the Browser's content),
+  touch input, touch controls), `Preview.tsx` (the Browser's content), `Docs.tsx` (the Docs window's),
   `WaylandOutput.tsx`, `Dialog.tsx`, `Overlays.tsx` (the confirm and paste
   dialogs, the Resume card, the toast), `icons.tsx`.
 
@@ -576,8 +577,9 @@ deploying the page needs no kernel toolchain.
   tile per other open window (`#dock-terminal-K`, `#dock-display`,
   `#dock-preview`, ...), and while wland's relay is connected
   `#dock-wayland` (Ctrl-A w). Pins (`pins.ts`): localStorage `kw.pins`, an
-  ordered list of app ids and `group:<id>` (by default Terminal and
-  Settings), changed from the
+  ordered list of app ids and `group:<id>` (by default Terminal, Settings
+  and Docs; a default added later, Docs, goes into a stored list once,
+  `kw.pins-added`), changed from the
   tiles' and the launcher's menus (Keep in Dock, Remove from Dock, Move
   Left, Move Right); an entry the registry no longer has is kept but not
   shown. A pinned app's tile stands for its window (`appwindows.ts`
