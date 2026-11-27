@@ -66,7 +66,7 @@ export function Keys({ show, onPress, omit, className = "" }: {
 					<button
 						key={k.key} type="button" data-key={k.key} aria-label={k.aria} title={k.title}
 						aria-pressed={k.key === "ctrl" ? ctrl : k.key === "prefix" ? prefix : undefined}
-						className={`h-9.5 min-w-9 flex-[1_0_auto] touch-manipulation border border-line bg-surface px-2 text-fg active:bg-hover aria-pressed:border-fg aria-pressed:bg-fg aria-pressed:text-black ${k.word ? "text-[12.5px] font-medium" : "font-mono text-[16px]"}`}
+						className={`h-9.5 min-w-9 flex-[1_0_auto] touch-manipulation border border-line bg-surface px-2 text-fg active:bg-hover aria-pressed:border-fg aria-pressed:bg-fg aria-pressed:text-bg ${k.word ? "text-[12.5px] font-medium" : "font-mono text-[16px]"}`}
 					>{k.label}</button>
 				))}
 		</nav>

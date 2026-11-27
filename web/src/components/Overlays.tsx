@@ -45,7 +45,7 @@ export function ResumeCard() {
 		: "The session is saved in this browser: you can close this tab.";
 	return (
 		<div id="resume-card" data-paused={(!suspended && paused) || undefined}
-			className="pointer-events-none absolute inset-0 z-(--z-resume) grid place-items-center bg-black/30 px-4">
+			className="pointer-events-none absolute inset-0 z-(--z-resume) grid place-items-center bg-bg/30 px-4">
 			<section role="region" aria-labelledby="resume-card-title" className="alert pointer-events-auto">
 				<AlertContent id="resume-card" icon="pause" title={suspended ? "Suspended" : "Paused"} msg={msg} msgRole="status"
 					actions={suspended

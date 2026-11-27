@@ -191,12 +191,12 @@ function Cell({ e, idx, on, onPick, onHover, onMenu }: { e: Entry; idx: number; 
 			title={f ? `${f.title}: ${f.desc}` : t!.tip}
 			onMouseDown={(ev) => ev.preventDefault()} // the focus stays in the search field
 			onMouseEnter={onHover} onClick={() => { if (!consumed()) onPick(); }} {...handlers}
-			className={`group flex min-w-0 flex-col items-center gap-1.5 rounded-2xl px-1 pt-2.5 pb-1.5 outline-none transition-colors select-none [-webkit-touch-callout:none] ${on ? "bg-white/10" : ""} ${dim ? "opacity-45" : ""}`}
+			className={`group flex min-w-0 flex-col items-center gap-1.5 rounded-2xl px-1 pt-2.5 pb-1.5 outline-none transition-colors select-none [-webkit-touch-callout:none] ${on ? "bg-ink/10" : ""} ${dim ? "opacity-45" : ""}`}
 		>
 			{f ? <FolderFace f={f} /> : <Icon t={t!} />}
-			<span className="max-w-full truncate text-[12px] text-white/90 [text-shadow:0_1px_3px_rgba(0,0,0,.6)] sm:text-[13px]">{title}</span>
+			<span className="max-w-full truncate text-[12px] text-ink/90 [text-shadow:0_1px_3px_color-mix(in_srgb,var(--color-bg)_60%,transparent)] sm:text-[13px]">{title}</span>
 			{/* Running: a dot under the title, as in the Dock. */}
-			<span aria-hidden="true" className={`-mt-0.5 size-1 rounded-full ${running ? "bg-white/80" : "bg-transparent"}`} />
+			<span aria-hidden="true" className={`-mt-0.5 size-1 rounded-full ${running ? "bg-ink/80" : "bg-transparent"}`} />
 			<span className="sr-only">
 				{f ? `, folder, ${f.tiles.length} apps${f.running ? ", one running" : ""}` : t!.running ? `, ${t!.running}` : ""}
 			</span>
@@ -251,16 +251,16 @@ function FolderLayer({ f, leaving, listRef, onClose, onGone, children }: {
 			ref={layer} data-backdrop="1"
 			onMouseDown={(e) => e.preventDefault()}
 			onClick={(e) => { if (e.target === e.currentTarget || (e.target as HTMLElement).dataset.backdrop) onClose(); }}
-			className={`absolute inset-0 z-10 flex flex-col items-center justify-center bg-black/40 pt-[max(16px,var(--st))] pr-[max(16px,var(--sr))] pb-[max(16px,var(--sb))] pl-[max(16px,var(--sl))] backdrop-blur-xl ${leaving ? "pointer-events-none" : ""}`}
+			className={`absolute inset-0 z-10 flex flex-col items-center justify-center bg-bg/40 pt-[max(16px,var(--st))] pr-[max(16px,var(--sr))] pb-[max(16px,var(--sb))] pl-[max(16px,var(--sl))] backdrop-blur-xl ${leaving ? "pointer-events-none" : ""}`}
 		>
 			<div data-backdrop="1" className="flex w-full max-w-[25rem] flex-col sm:max-w-[30rem]">
-				<h2 ref={head} data-backdrop="1" className="mb-3 flex items-center gap-2.5 px-3 text-[26px] font-semibold tracking-tight text-white [text-shadow:0_1px_3px_rgba(0,0,0,.5)]">
+				<h2 ref={head} data-backdrop="1" className="mb-3 flex items-center gap-2.5 px-3 text-[26px] font-semibold tracking-tight text-ink [text-shadow:0_1px_3px_color-mix(in_srgb,var(--color-bg)_50%,transparent)]">
 					<span aria-hidden="true" style={gradient(f.colors)} className="grid size-8 flex-none place-items-center rounded-[28%] text-[15px] shadow-[0_2px_8px_rgba(0,0,0,.45),inset_0_1px_0_rgba(255,255,255,.25)]">
 						<AppGlyph icon={f.icon} className="size-[62%]" />
 					</span>
 					{f.title}
 				</h2>
-				<div ref={panel} className="rounded-[2rem] border border-white/10 bg-neutral-900/60 p-3 shadow-[0_24px_80px_rgba(0,0,0,.6),inset_0_1px_0_rgba(255,255,255,.06)] backdrop-blur-2xl sm:p-5">
+				<div ref={panel} className="rounded-[2rem] border border-ink/10 bg-(--launcher-panel) p-3 shadow-(--launcher-panel-shadow) backdrop-blur-2xl sm:p-5">
 					<div ref={listRef} id="launcher-folder" role="listbox" aria-label={f.title}
 						className={`grid gap-y-3 sm:gap-y-5 ${f.tiles.length > 9 ? "grid-cols-3 sm:grid-cols-4" : "grid-cols-3"}`}>
 						{children}
@@ -501,15 +501,15 @@ function Pad() {
 				if (folder) return; // the folder's layer closes it on a click outside its panel
 				if (e.target === e.currentTarget || (e.target as HTMLElement).dataset.backdrop) setLauncher(false);
 			}}
-			className="fixed inset-0 z-(--z-launcher) flex flex-col items-center bg-black/55 pt-[max(28px,calc(var(--st)+20px))] pb-[max(12px,var(--sb))] outline-none backdrop-blur-2xl backdrop-saturate-150 transition-[opacity,scale] duration-200 ease-out starting:scale-105 starting:opacity-0"
+			className="fixed inset-0 z-(--z-launcher) flex flex-col items-center bg-(--launcher-dim) pt-[max(28px,calc(var(--st)+20px))] pb-[max(12px,var(--sb))] outline-none backdrop-blur-2xl backdrop-saturate-150 transition-[opacity,scale] duration-200 ease-out starting:scale-105 starting:opacity-0"
 		>
 			<label className="relative z-20 mb-5 flex w-[min(17rem,calc(100%-32px))] flex-none items-center sm:mb-8">
-				<SearchIcon className="pointer-events-none absolute left-2.5 text-white/60" />
+				<SearchIcon className="pointer-events-none absolute left-2.5 text-ink/60" />
 				<input
 					ref={input} type="search" value={query} onChange={(e) => onType(e.target.value)}
 					placeholder="Search" aria-label="Search the apps" aria-controls={opened && !results ? "launcher-folder" : "launcher-grid"}
 					aria-activedescendant={hint && cur ? optId(cur) : undefined} autoComplete="off" spellCheck={false}
-					className="h-9 w-full rounded-xl border border-white/15 bg-white/10 pr-3 pl-8 text-[14px] text-white placeholder:text-white/50 focus:border-white/30 focus:outline-none max-sm:text-[16px] [&::-webkit-search-cancel-button]:hidden"
+					className="h-9 w-full rounded-xl border border-ink/15 bg-ink/10 pr-3 pl-8 text-[14px] text-ink placeholder:text-ink/50 focus:border-ink/30 focus:outline-none max-sm:text-[16px] [&::-webkit-search-cancel-button]:hidden"
 				/>
 			</label>
 			<div data-backdrop="1" className="flex min-h-0 w-full flex-1 flex-col items-center overflow-y-auto overscroll-contain pr-[max(16px,var(--sr))] pb-4 pl-[max(16px,var(--sl))]">
@@ -518,18 +518,18 @@ function Pad() {
 					className={`grid w-full content-start gap-x-1 gap-y-4 sm:mt-[4vh] sm:gap-y-6 ${results ? "max-w-[34rem] grid-cols-4 sm:max-w-[42rem] sm:grid-cols-5" : "max-w-[34rem] grid-cols-4"}`}
 				>
 					{cells(results ?? top)}
-					{results && !results.length && <p className="col-span-full pt-6 text-center text-white/60">Nothing matches “{query.trim()}”.</p>}
+					{results && !results.length && <p className="col-span-full pt-6 text-center text-ink/60">Nothing matches “{query.trim()}”.</p>}
 				</div>
 			</div>
-			<p aria-live="polite" className={`pointer-events-none relative z-20 min-h-[2.75rem] w-[min(36rem,calc(100%-32px))] flex-none pt-2 text-center text-[12px] text-white/60 ${hint ? "" : "invisible"}`}>
+			<p aria-live="polite" className={`pointer-events-none relative z-20 min-h-[2.75rem] w-[min(36rem,calc(100%-32px))] flex-none pt-2 text-center text-[12px] text-ink/60 ${hint ? "" : "invisible"}`}>
 				<span className="block truncate">{line}</span>
-				<span className="mt-1 block font-mono text-[11px] text-white/40 max-sm:hidden">
+				<span className="mt-1 block font-mono text-[11px] text-ink/40 max-sm:hidden">
 					↵ open · arrows select · esc {folder ? "back" : "close"}
 					{!coarse && <>
 						{" · "}
 						<span title={`${PREFIX}, then a key: the page's shortcuts`} onMouseDown={(e) => e.preventDefault()} onClick={showShortcuts}
-							className="pointer-events-auto cursor-pointer whitespace-nowrap hover:text-white/70">
-							{PREFIX.split("-").map((k) => <kbd key={k} className="mr-0.5 rounded-[4px] border border-white/20 px-1 font-mono text-[10px]">{k}</kbd>)} shortcuts
+							className="pointer-events-auto cursor-pointer whitespace-nowrap hover:text-ink/70">
+							{PREFIX.split("-").map((k) => <kbd key={k} className="mr-0.5 rounded-[4px] border border-ink/20 px-1 font-mono text-[10px]">{k}</kbd>)} shortcuts
 						</span>
 					</>}
 				</span>

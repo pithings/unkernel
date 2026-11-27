@@ -144,8 +144,8 @@ export function Spark({ points, series, max, fmt, label, height = 52, bare = fal
 			{!bare && (max != null || peak > 0) && <span aria-hidden="true" className="pointer-events-none absolute top-0.5 left-1 font-mono text-[10px] leading-none text-faint">{fmt(top)}</span>}
 			{hp && (
 				<>
-					<span aria-hidden="true" className="pointer-events-none absolute inset-y-0 w-px bg-white/30" style={{ left: `${hx}%` }} />
-					<span aria-hidden="true" className="pointer-events-none absolute top-0.5 rounded-sm bg-black/85 px-1.5 py-0.5 font-mono text-[10.5px] leading-tight whitespace-nowrap text-fg tabular-nums ring-1 ring-line-strong"
+					<span aria-hidden="true" className="pointer-events-none absolute inset-y-0 w-px bg-ink/30" style={{ left: `${hx}%` }} />
+					<span aria-hidden="true" className="pointer-events-none absolute top-0.5 rounded-sm bg-bg/85 px-1.5 py-0.5 font-mono text-[10.5px] leading-tight whitespace-nowrap text-fg tabular-nums ring-1 ring-line-strong"
 						style={(hx > 55 ? { right: `calc(${100 - hx}% + 6px)` } : { left: `calc(${hx}% + 6px)` }) satisfies CSSProperties}>
 						<span className="text-faint">{agoSeconds(t1 - hp.t)}</span>
 						{series.map((s) => { const v = s.get(hp); return <span key={s.label} className="ml-2"><span style={{ color: s.color }}>●</span> {v != null ? fmt(v) : "–"}</span>; })}

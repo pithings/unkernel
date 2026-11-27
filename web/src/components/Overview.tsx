@@ -252,7 +252,7 @@ function BootTimeline() {
 					);
 				})}
 				{tip && (
-					<div aria-hidden="true" className="pointer-events-none absolute top-[calc(100%+6px)] z-10 w-max max-w-full rounded-md bg-black/90 px-2 py-1 text-[11px] leading-snug text-fg shadow-lg ring-1 ring-line-strong"
+					<div aria-hidden="true" className="pointer-events-none absolute top-[calc(100%+6px)] z-10 w-max max-w-full rounded-md bg-bg/90 px-2 py-1 text-[11px] leading-snug text-fg shadow-lg ring-1 ring-line-strong"
 						style={{ left: `${center}%`, transform: `translateX(-${center}%)` }}>
 						<div className="tabular-nums">{describe(tip)}</div>
 						{tip.detail && <div className="break-words text-faint">{tip.detail}</div>}

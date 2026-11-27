@@ -124,6 +124,10 @@
 	--wm-snap-shadow: inset 0 1px 0 rgb(255 255 255 / 14%), 0 0 0 1px rgb(0 0 0 / 25%), 0 16px 48px rgb(0 0 0 / 35%);
 	--dock-face-bg: rgb(0 0 0 / 24%);
 	--dock-label-shadow: 0 4px 14px rgb(0 0 0 / 40%);
+	--line-hover: #555;
+	--launcher-dim: rgb(0 0 0 / 55%);
+	--launcher-panel: --alpha(var(--color-neutral-900) / 60%);
+	--launcher-panel-shadow: 0 24px 80px rgb(0 0 0 / 60%), inset 0 1px 0 rgb(255 255 255 / 6%);
 }
 :root[data-theme="light"] {
 	color-scheme: light;
@@ -165,6 +169,10 @@
 	--wm-snap-shadow: inset 0 1px 0 rgb(255 255 255 / 70%), 0 0 0 1px rgb(0 0 0 / 10%), 0 16px 48px rgb(0 0 0 / 14%);
 	--dock-face-bg: rgb(255 255 255 / 40%);
 	--dock-label-shadow: 0 4px 14px rgb(0 0 0 / 12%);
+	--line-hover: #a3a3a3;
+	--launcher-dim: rgb(255 255 255 / 78%);
+	--launcher-panel: rgb(255 255 255 / 60%);
+	--launcher-panel-shadow: 0 24px 80px rgb(0 0 0 / 16%), inset 0 1px 0 rgb(255 255 255 / 70%);
 }
 /* No backdrop blur: the tints alone, nearly opaque. */
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {

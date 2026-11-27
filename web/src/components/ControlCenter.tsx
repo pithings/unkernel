@@ -8,7 +8,7 @@
 //     starting, suspending or held amber; suspended grey; halted dim; error
 //     red), the state's name (store label) and the guest's uptime;
 //   - quick settings, as small round icon buttons (the word is the tooltip;
-//     pressed ones lighter), only what changes at once: Full screen (the
+//     pressed ones stronger), only what changes at once: Full screen (the
 //     page; where the browser has it, or iPhone's hint), Wallpaper (Random:
 //     the next photo, the popover stays; any other wallpaper: Settings,
 //     Desktop), Display (while a program has the display open: shows the
@@ -73,8 +73,8 @@ function Tile({ id, label, title, icon, on, busy, onClick }: {
 }) {
 	return (
 		<button id={id} type="button" title={title} aria-label={label} aria-pressed={on} aria-busy={busy || undefined} onClick={() => { if (!busy) onClick(); }}
-			className={`flex size-8 flex-none items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/50 pointer-coarse:size-(--hit) ${
-				on ? "bg-white/[0.22] text-fg" : "bg-white/[0.08] text-muted hover:bg-white/[0.14] hover:text-fg"} ${busy ? "opacity-60" : ""}`}>
+			className={`flex size-8 flex-none items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ink/50 pointer-coarse:size-(--hit) ${
+				on ? "bg-ink/[0.22] text-fg" : "bg-ink/[0.08] text-muted hover:bg-ink/[0.14] hover:text-fg"} ${busy ? "opacity-60" : ""}`}>
 			<span aria-hidden="true" className="flex">{icon}</span>
 		</button>
 	);
@@ -84,7 +84,7 @@ function Tile({ id, label, title, icon, on, busy, onClick }: {
 function Item({ it, onPick }: { it: MenuItem; onPick: (it: MenuItem) => void }) {
 	return (
 		<button id={it.id} type="button" disabled={it.disabled} onClick={() => onPick(it)}
-			className="mx-1 flex items-center gap-2.5 rounded-lg px-2 py-2 text-left text-[12.5px] text-muted enabled:hover:bg-white/10 enabled:hover:text-fg focus-visible:bg-white/10 focus-visible:text-fg focus-visible:outline-none disabled:opacity-40 pointer-coarse:py-3">
+			className="mx-1 flex items-center gap-2.5 rounded-lg px-2 py-2 text-left text-[12.5px] text-muted enabled:hover:bg-ink/10 enabled:hover:text-fg focus-visible:bg-ink/10 focus-visible:text-fg focus-visible:outline-none disabled:opacity-40 pointer-coarse:py-3">
 			<span aria-hidden="true" className="inline-flex w-[13px] flex-none justify-center">{it.icon}</span>
 			<span className="truncate">{it.label}</span>
 			{it.keys && <span className="ml-auto pl-4 text-[11px] text-faint">{it.keys}</span>}
@@ -92,7 +92,7 @@ function Item({ it, onPick }: { it: MenuItem; onPick: (it: MenuItem) => void }) 
 	);
 }
 
-const Sep = () => <div role="separator" className="my-1 border-t border-white/10" />;
+const Sep = () => <div role="separator" className="my-1 border-t border-ink/10" />;
 
 /** What the opener passes to either popover. */
 interface PopoverProps {

@@ -100,10 +100,10 @@ export function Menu({ id, label, header, items, anchor, point, onClose }: {
 			style={{ left: pos?.left ?? -9999, top: pos?.top ?? 0 }}>
 			{header && <div aria-hidden="true" className="truncate px-3 pt-1.5 pb-1 font-sans text-[11.5px] font-medium text-faint">{header}</div>}
 			{items.map((it, i) => it === null
-				? <div key={`sep-${i}`} role="separator" className="my-1 border-t border-white/10" />
+				? <div key={`sep-${i}`} role="separator" className="my-1 border-t border-ink/10" />
 				: (
 					<button key={it.label} id={it.id} type="button" role="menuitem" disabled={it.disabled} onClick={() => { close.current("pick"); it.run(); }}
-						className="flex items-center gap-2.5 px-3 py-2 text-left text-muted enabled:hover:bg-white/10 enabled:hover:text-fg focus-visible:bg-white/10 focus-visible:text-fg focus-visible:outline-none disabled:cursor-default disabled:opacity-40 pointer-coarse:py-3">
+						className="flex items-center gap-2.5 px-3 py-2 text-left text-muted enabled:hover:bg-ink/10 enabled:hover:text-fg focus-visible:bg-ink/10 focus-visible:text-fg focus-visible:outline-none disabled:cursor-default disabled:opacity-40 pointer-coarse:py-3">
 						<span aria-hidden="true" className="inline-flex w-[13px] flex-none justify-center">{it.icon}</span>
 						<span className="truncate">{it.label}</span>
 						{it.keys && <span className="ml-auto pl-4 text-[11px] text-faint">{it.keys}</span>}

@@ -27,5 +27,5 @@ export function KeyHint({ k, small, inline }: { k: string; small?: boolean; inli
 	if (!armed) return null;
 	const at = inline ? "flex-none" : `pointer-events-none absolute z-1 ${small ? "-top-0.5 -left-0.5" : "top-0 left-0"}`;
 	const size = small ? "h-3.5 min-w-3.5 rounded-[3px] text-[10px]" : "h-4 min-w-4 rounded-[4px] text-[11px]";
-	return <kbd className={`${at} grid ${size} place-items-center bg-warn px-0.5 font-mono leading-none font-semibold text-black`}>{k}</kbd>;
+	return <kbd className={`${at} grid ${size} place-items-center bg-warn px-0.5 font-mono leading-none font-semibold text-bg`}>{k}</kbd>;
 }

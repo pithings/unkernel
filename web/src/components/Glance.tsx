@@ -89,7 +89,7 @@ function Row({ k, current, icon, label, value, facts, children }: {
 }) {
 	return (
 		<section aria-label={label} data-res={k} aria-current={current || undefined}
-			className={`flex flex-col gap-1 px-3 py-2 ${current ? "bg-white/[0.06]" : ""}`}>
+			className={`flex flex-col gap-1 px-3 py-2 ${current ? "bg-ink/[0.06]" : ""}`}>
 			<div className="flex min-w-0 items-center gap-2">
 				<span aria-hidden="true" className="flex flex-none" style={{ color: TONE[k] }}>{icon}</span>
 				<span className="w-[54px] flex-none font-sans text-[12px] text-muted">{label}</span>

@@ -17,7 +17,7 @@ import { DocsIcon, ExternalIcon } from "./icons.tsx";
 
 /** A press in the page this recently (ms) gave the window the focus: the page keeps the DOM focus. */
 const PRESS_MS = 1000;
-const tool = "grid h-7 w-7 flex-none place-items-center rounded-md text-muted transition-colors hover:bg-white/8 hover:text-fg disabled:pointer-events-none disabled:opacity-40 pointer-coarse:h-10 pointer-coarse:w-10";
+const tool = "grid h-7 w-7 flex-none place-items-center rounded-md text-muted transition-colors hover:bg-ink/8 hover:text-fg disabled:pointer-events-none disabled:opacity-40 pointer-coarse:h-10 pointer-coarse:w-10";
 const HOME_SVG = <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3.5 11 12 4l8.5 7M5.5 9.5V20h13V9.5" /></svg>;
 /** React passes an unknown attribute through as it is; the DOM types lack this one. */
 const CREDENTIALLESS = { credentialless: "" } as Record<string, string>;
