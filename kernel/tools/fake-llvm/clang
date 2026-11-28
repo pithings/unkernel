@@ -93,7 +93,7 @@ def rewrite_clang(original_args):
 
     if is_linking(args):
         # -shared is the correct clang driver option, except llvm thinks we got a reactor (crt1-reactor.o).
-        # We can solve that by convering it to -Wl,-shared so that it's passed right into the linker.
+        # We can solve that by converting it to -Wl,-shared so that it's passed right into the linker.
         args = ["-Wl,-shared" if arg == "-shared" else arg for arg in args]
 
         max_memory = MAX_MEMORY_WASM32 if arch == "wasm32" else MAX_MEMORY_WASM64
