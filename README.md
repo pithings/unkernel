@@ -430,6 +430,27 @@ console.log((await zipped).length);
 With `pty: false` the program gets pipes: `stdin`, `stdout` and `stderr`
 web streams, byte for byte.
 
+### Transfer guest files
+
+```js
+import { readGuestFile, writeGuestFile } from "unkernel";
+
+await writeGuestFile(vm, "/home/user/data.bin", new Uint8Array([0, 1, 2, 255]));
+const bytes = await readGuestFile(vm, "/home/user/data.bin");
+```
+
+`readGuestFile(vm, path, opts?)` and `writeGuestFile(vm, path, bytes, opts?)`
+transfer one regular file as a buffered `Uint8Array` at a guest-absolute path
+(with optional `user`, `signal`, and `maxBuffer` on reads, defaulting to 64 MiB).
+On the distro images with a data disk attached, write to normal guest paths
+such as `/home/user/...` so changes land in the live overlay; writing directly
+under `/data` needs a directory writable by the selected user (`/data` is
+root-owned `0755`, while the default user is `user`, uid 1000) or `user: "root"`.
+Writes stage to a unique sibling temporary file and atomically replace the
+destination with a new private file owned by the selected user. Call
+`vm.sync()` or power off cleanly for disk durability. For large or streamed
+transfers, use `vm.spawn(..., { pty: false })` on pipes directly.
+
 ### Mount host files
 
 ```js

@@ -26,10 +26,11 @@ import type { AddressInfo } from "node:net";
 import { availableParallelism, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { KernelHandle, PipeOptions, Subprocess } from "../js/node.ts";
 
 const spec = process.env.UNKERNEL_DIST ? "unkernel" : "../js/node.ts";
 const sdk: typeof import("../js/node.ts") = await import(spec);
-const { createKernel, ConsoleRouter, NetStack, directBackend, wispBackend, FileDisk, bundledBoot, bundledKernelUrl, createImageFromKwsparse, MemoryFs, nodeFs } = sdk;
+const { createKernel, ConsoleRouter, NetStack, directBackend, wispBackend, FileDisk, bundledBoot, bundledKernelUrl, createImageFromKwsparse, MemoryFs, nodeFs, readGuestFile, writeGuestFile } = sdk;
 type Instance = Awaited<ReturnType<typeof createKernel>>;
 /** The kernel under test: UNKERNEL_TEST_KERNEL (a bundle, e.g. from a build of your own), else the bundled one. */
 const testKernel = process.env.UNKERNEL_TEST_KERNEL ? path.resolve(process.env.UNKERNEL_TEST_KERNEL) : undefined;
@@ -1693,6 +1694,186 @@ describe("api", { concurrency: CONCURRENCY }, () => {
 		});
 	});
 
+	// Guest file transfers (js/core/guest-files.ts): readGuestFile() and writeGuestFile() across all three transports.
+	for (const { worker, shared, name } of TRANSPORTS) describe(`guest file transfers (readGuestFile / writeGuestFile), one kernel (${name})`,
+		{ concurrency: 1, skip: !kernelHasVsock && "the kernel under test has no kwvsock" }, () => {
+		const k = sharedKernel(() => ({ worker, shared, log: () => {} }));
+		const sh = async (script: string) => {
+			const r = await k.vm.exec("sh", ["-c", script]);
+			assert.equal(r.exitCode, 0, r.stderr);
+			return r.stdout;
+		};
+		const sha256 = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
+
+		before(async () => {
+			await sh("mkdir /tmp/gf-dir && ln -s /tmp/gf-dir /tmp/gf-link && mkfifo /tmp/gf-dir/pipe && ln -s /tmp/gf-dir/nope /tmp/gf-dir/dangling");
+		});
+
+		test("empty and binary payloads, unusual filenames through a symlinked directory, replacement and symlink reads", async () => {
+			// Empty file round trip.
+			const emptyPath = "/tmp/gf-dir/empty.bin";
+			await writeGuestFile(k.vm, emptyPath, new Uint8Array(0));
+			const emptyOut = await readGuestFile(k.vm, emptyPath);
+			assert.equal(emptyOut.byteLength, 0);
+			assert.equal((await sh(`stat -c '%s %a' -- '${emptyPath}'`)).trim(), "0 600");
+
+			// Multi-chunk binary payload with NUL, invalid UTF-8 and control bytes, under an unusual name through a directory symlink.
+			const payload = new Uint8Array(128 * 1024 + 17);
+			payload.set([0x00, 0x01, 0x0d, 0x0a, 0x7f, 0x80, 0xc0, 0xaf, 0xfe, 0xff], 0);
+			for (let i = 10; i < payload.length; i++) payload[i] = (i * 37 + (i >> 7)) & 0xff;
+			const weird = "/tmp/gf-link/-a café's.bin";
+			await writeGuestFile(k.vm, weird, payload);
+
+			const got = await readGuestFile(k.vm, weird);
+			assert.equal(got.byteLength, payload.byteLength);
+			assert.ok(Buffer.from(got).equals(Buffer.from(payload)), "binary payload matches byte for byte");
+			const guestHash = (await k.vm.exec("sh", ["-c", 'sha256sum < "$1" | cut -d" " -f1', "sh", weird])).stdout.trim();
+			assert.equal(guestHash, sha256(payload), "guest sha256 matches host sha256");
+			assert.equal((await sh("find /tmp/gf-dir -name '.unkernel-write.*'")).trim(), "");
+
+			// Symlink to regular file: readable, not writable.
+			const link = "/tmp/gf-dir/file-link";
+			assert.equal((await k.vm.exec("ln", ["-s", "--", weird, link])).exitCode, 0);
+			const viaLink = await readGuestFile(k.vm, link);
+			assert.ok(Buffer.from(viaLink).equals(Buffer.from(payload)), "readGuestFile follows symlink to regular file");
+
+			// Atomic replacement of an existing regular file.
+			const replacement = Uint8Array.of(0xff, 0x00, 0xfe, 0x42, 0x80);
+			await writeGuestFile(k.vm, weird, replacement);
+			const replaced = await readGuestFile(k.vm, weird);
+			assert.ok(Buffer.from(replaced).equals(Buffer.from(replacement)), "replacement bytes match");
+			assert.equal((await sh("find /tmp/gf-dir -name '.unkernel-write.*'")).trim(), "");
+		});
+
+		test("missing paths, non-regular files, final symlinks, small maxBuffer and pre-aborted calls", async () => {
+			const target = "/tmp/gf-dir/target.bin";
+			const before = Uint8Array.of(1, 2, 3);
+			await writeGuestFile(k.vm, target, before);
+			await sh("ln -s /tmp/gf-dir/target.bin /tmp/gf-dir/target-link");
+
+			await assert.rejects(readGuestFile(k.vm, "/tmp/gf-dir/missing"), /readGuestFile \/tmp\/gf-dir\/missing:/);
+			await assert.rejects(readGuestFile(k.vm, "/tmp/gf-dir/dangling"), /readGuestFile \/tmp\/gf-dir\/dangling:/);
+			await assert.rejects(readGuestFile(k.vm, "/tmp/gf-dir"), /readGuestFile \/tmp\/gf-dir: not a regular file/);
+			await assert.rejects(readGuestFile(k.vm, "/tmp/gf-dir/pipe"), /readGuestFile \/tmp\/gf-dir\/pipe: not a regular file/);
+
+			await assert.rejects(writeGuestFile(k.vm, "/tmp/gf-dir", Uint8Array.of(1)), /writeGuestFile \/tmp\/gf-dir: destination is not a regular file/);
+			await assert.rejects(writeGuestFile(k.vm, "/tmp/gf-dir/pipe", Uint8Array.of(1)), /writeGuestFile \/tmp\/gf-dir\/pipe: destination is not a regular file/);
+			await assert.rejects(writeGuestFile(k.vm, "/tmp/gf-dir/target-link", Uint8Array.of(9, 9, 9)), /writeGuestFile \/tmp\/gf-dir\/target-link: destination is not a regular file/);
+			await assert.rejects(writeGuestFile(k.vm, "/tmp/gf-dir/dangling", Uint8Array.of(1)), /writeGuestFile \/tmp\/gf-dir\/dangling: destination is not a regular file/);
+			await assert.rejects(writeGuestFile(k.vm, "/tmp/gf-no-such-parent/file.bin", Uint8Array.of(1)), /writeGuestFile \/tmp\/gf-no-such-parent\/file\.bin:/);
+			assert.ok(Buffer.from(await readGuestFile(k.vm, target)).equals(Buffer.from(before)), "rejected symlink write left target untouched");
+
+			// Small maxBuffer cap rejects with PtyError ENOBUFS.
+			const bigger = new Uint8Array(64).fill(0x55);
+			await writeGuestFile(k.vm, "/tmp/gf-dir/capped.bin", bigger);
+			await assert.rejects(
+				readGuestFile(k.vm, "/tmp/gf-dir/capped.bin", { maxBuffer: 16 }),
+				(e: unknown) => e instanceof sdk.PtyError && e.code === "ENOBUFS",
+			);
+
+			// Pre-aborted signal rejects with PtyError ABORTED and leaves existing target intact.
+			const ac = new AbortController();
+			ac.abort();
+			const isAborted = (e: unknown) => e instanceof sdk.PtyError && e.code === "ABORTED";
+			await assert.rejects(readGuestFile(k.vm, "/tmp/gf-dir/capped.bin", { signal: ac.signal }), isAborted);
+			await assert.rejects(writeGuestFile(k.vm, "/tmp/gf-dir/capped.bin", Uint8Array.of(1, 2, 3), { signal: ac.signal }), isAborted);
+			assert.ok(Buffer.from(await readGuestFile(k.vm, "/tmp/gf-dir/capped.bin")).equals(Buffer.from(bigger)));
+		});
+
+		test("failed write (ENOSPC), deterministic in-flight cancellation and concurrent writes preserve whole targets and clean up temporaries", async () => {
+			// Failed guest publication (ENOSPC on a tiny tmpfs): preserves existing target and cleans up temp file.
+			await sh("mkdir -p /tmp/gf-small && mount -t tmpfs -o size=64k tmpfs /tmp/gf-small");
+			try {
+				const keep = new TextEncoder().encode("preserve-enospc");
+				await writeGuestFile(k.vm, "/tmp/gf-small/target.bin", keep);
+				await assert.rejects(
+					writeGuestFile(k.vm, "/tmp/gf-small/target.bin", new Uint8Array(128 * 1024).fill(0xaa)),
+					/writeGuestFile \/tmp\/gf-small\/target\.bin:/,
+				);
+				assert.ok(Buffer.from(await readGuestFile(k.vm, "/tmp/gf-small/target.bin")).equals(Buffer.from(keep)));
+				assert.equal((await sh("find /tmp/gf-small -name '.unkernel-write.*'")).trim(), "");
+			} finally {
+				await k.vm.exec("umount", ["/tmp/gf-small"]);
+			}
+
+			// Deterministic in-flight cancellation against the real guest: pause after chunk 1 once the guest's
+			// sibling temp file has bytes on disk, then abort before chunk 2 or EOF.
+			await sh("rm -rf /tmp/gf-cancel && mkdir /tmp/gf-cancel");
+			const keepCancel = new TextEncoder().encode("preserve-cancel");
+			await writeGuestFile(k.vm, "/tmp/gf-cancel/target.bin", keepCancel);
+			const ac = new AbortController();
+			let stdinClosed = false, stdinAborted = false;
+			const wrappedVm = {
+				exec: k.vm.exec.bind(k.vm),
+				spawn: async (file: string | undefined, args: readonly string[] | undefined, opts: PipeOptions) => {
+					const real = await k.vm.spawn(file, args, opts);
+					const realWriter = real.stdin.getWriter();
+					let writes = 0;
+					const stdin = new WritableStream<Uint8Array | string>({
+						async write(chunk) {
+							writes++;
+							await realWriter.write(chunk);
+							if (writes === 1) {
+								const deadline = Date.now() + 10000;
+								for (;;) {
+									const st = await k.vm.exec("sh", ["-c", "stat -c %s /tmp/gf-cancel/.unkernel-write.* 2>/dev/null || :"]);
+									if (Number(st.stdout.trim()) > 0) break;
+									assert.ok(Date.now() < deadline, "guest did not receive partial write before cancel");
+									await new Promise((r) => setTimeout(r, 25));
+								}
+								ac.abort();
+							}
+						},
+						close: () => {
+							stdinClosed = true;
+							return realWriter.close();
+						},
+						abort: (reason) => {
+							stdinAborted = true;
+							return realWriter.abort(reason);
+						},
+					});
+					const proc: Subprocess = {
+						pid: real.pid,
+						get exitCode() { return real.exitCode; },
+						version: real.version,
+						features: real.features,
+						stdin,
+						stdout: real.stdout,
+						stderr: real.stderr,
+						ended: real.ended,
+						kill: (sig?: string) => real.kill(sig),
+						close: () => real.close(),
+						[Symbol.asyncDispose]: () => real[Symbol.asyncDispose](),
+					};
+					return proc;
+				},
+			} as unknown as KernelHandle;
+			await assert.rejects(
+				writeGuestFile(wrappedVm, "/tmp/gf-cancel/target.bin", new Uint8Array(128 * 1024).fill(0xbb), { signal: ac.signal }),
+				(e: unknown) => e instanceof sdk.PtyError && e.code === "ABORTED",
+			);
+			assert.equal(stdinClosed, false, "stdin was not closed on cancel");
+			assert.equal(stdinAborted, false, "stdin was not aborted on cancel");
+			assert.ok(Buffer.from(await readGuestFile(k.vm, "/tmp/gf-cancel/target.bin")).equals(Buffer.from(keepCancel)), "existing target preserved after cancel");
+			assert.equal((await sh("find /tmp/gf-cancel -name '.unkernel-write.*'")).trim(), "", "sibling temporary file removed on cancel");
+
+			// Concurrent writes to the same destination: final file matches one complete payload with no leftover temp files.
+			const a = new Uint8Array(96 * 1024).fill(0x41);
+			const b = new Uint8Array(96 * 1024).fill(0x42);
+			await Promise.all([
+				writeGuestFile(k.vm, "/tmp/gf-dir/race.bin", a),
+				writeGuestFile(k.vm, "/tmp/gf-dir/race.bin", b),
+			]);
+			const finalBytes = await readGuestFile(k.vm, "/tmp/gf-dir/race.bin");
+			assert.ok(
+				Buffer.from(finalBytes).equals(Buffer.from(a)) || Buffer.from(finalBytes).equals(Buffer.from(b)),
+				"concurrent write left one whole payload",
+			);
+			assert.equal((await sh("find /tmp/gf-dir -name '.unkernel-write.*'")).trim(), "");
+		});
+	});
+
 	// Host commands (js/core/commands.ts; guest/src/kwcmd.c): guest processes that run functions of the host.
 	for (const { worker, name } of MODES) describe(`host commands (kwcmd), one kernel (${name})`,
 		{ concurrency: 1, skip: !kernelHasVsock && "the kernel under test has no kwvsock" }, () => {
@@ -1833,11 +2014,75 @@ describe("api", { concurrency: CONCURRENCY }, () => {
 		});
 	});
 
+	test("guest file transfers on Alpine with a persistent data disk: permissions, user-writable /data, overlay home persistence across clean reboot",
+		{ skip: noAlpine || (!kernelHasVsock && "the kernel under test has no kwvsock") }, async (t) => {
+		const dir = mkdtempSync(path.join(tmpdir(), "unkernel-gf-data-"));
+		try {
+			const tpl = bundledBoot(kernelModule).datadisk;
+			assert.ok(tpl, "the bundle carries the data disk template (kernel/build.sh datadisk)");
+			const file = path.join(dir, "data.img");
+			await createImageFromKwsparse(file, tpl);
+			const sha256 = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
+			const homePayload = new Uint8Array(65536 + 13);
+			for (let i = 0; i < homePayload.length; i++) homePayload[i] = (i * 29 + 7) & 0xff;
+			const dataPayload = new Uint8Array(4096 + 9);
+			for (let i = 0; i < dataPayload.length; i++) dataPayload[i] = (i * 53 + 11) & 0xff;
+			const rootPayload = Uint8Array.of(0x00, 0xde, 0xad, 0xbe, 0xef, 0xff);
+
+			// Boot 1 (inline): verify default user cannot write directly under /data, write as root and as default user, then poweroff cleanly.
+			const disks = [{ kind: "file" as const, path: file }];
+			let vm = await boot(t, { distro: alpine!, disks, log: () => {} });
+			await assert.rejects(
+				writeGuestFile(vm, "/data/denied.bin", dataPayload),
+				/writeGuestFile \/data\/denied\.bin:.*Permission denied/i,
+			);
+			await writeGuestFile(vm, "/data/root-only.bin", rootPayload, { user: "root" });
+			const mk = await vm.exec("sh", ["-c", "mkdir /data/user-files && chown 1000:1000 /data/user-files"], { user: "root" });
+			assert.equal(mk.exitCode, 0, mk.stderr);
+
+			const dataFile = "/data/user-files/a b's.bin";
+			const homeFile = "/home/user/persist.bin";
+			await writeGuestFile(vm, dataFile, dataPayload);
+			await writeGuestFile(vm, homeFile, homePayload);
+
+			const meta = await vm.exec("sh", ["-c", 'stat -c "%u:%g %a" -- /data/root-only.bin "$1" "$2"', "sh", dataFile, homeFile], { user: "root" });
+			assert.equal(meta.exitCode, 0, meta.stderr);
+			assert.equal(meta.stdout, "0:0 600\n1000:1000 600\n1000:1000 600\n");
+
+			vm.write("\npoweroff\n");
+			assert.equal((await vm.exited).code, 0);
+
+			// Boot 2 (worker mode, same data disk): verify persistence and permissions across modes.
+			vm = await boot(t, { worker: true, distro: alpine!, disks, log: () => {} });
+			const gotHome = await readGuestFile(vm, homeFile);
+			const gotData = await readGuestFile(vm, dataFile);
+			assert.ok(Buffer.from(gotHome).equals(Buffer.from(homePayload)), "merged overlay home file survived reboot");
+			assert.ok(Buffer.from(gotData).equals(Buffer.from(dataPayload)), "/data user file survived reboot");
+
+			// Root-owned 0600 file is unreadable by default user, readable with user: "root".
+			await assert.rejects(readGuestFile(vm, "/data/root-only.bin"), /readGuestFile \/data\/root-only\.bin:.*Permission denied/i);
+			const gotRoot = await readGuestFile(vm, "/data/root-only.bin", { user: "root" });
+			assert.ok(Buffer.from(gotRoot).equals(Buffer.from(rootPayload)), "root-owned /data file survived reboot");
+
+			// Independent guest sha256 verification against host hashes.
+			const sums = await vm.exec("sh", ["-c", 'sha256sum < "$1" | cut -d" " -f1; sha256sum < "$2" | cut -d" " -f1', "sh", homeFile, dataFile]);
+			assert.equal(sums.exitCode, 0, sums.stderr);
+			assert.equal(sums.stdout, `${sha256(homePayload)}\n${sha256(dataPayload)}\n`);
+
+			vm.write("\npoweroff\n");
+			assert.equal((await vm.exited).code, 0);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test("connect() and fetch() on an instance created with vsock: false: ENODEV", async (t) => {
 		const vm = await boot(t, { vsock: false, log: () => {}, cmdline: "console=hvc0 rdinit=/bin/true" });
 		const isNoDev = (e: Error & { code?: string }) => e.name === "PtyError" && e.code === "ENODEV";
 		await assert.rejects(vm.connect(80), isNoDev);
 		await assert.rejects(vm.fetch("http://guest/"), isNoDev);
+		await assert.rejects(readGuestFile(vm, "/etc/hostname"), isNoDev);
+		await assert.rejects(writeGuestFile(vm, "/tmp/x", new Uint8Array()), isNoDev);
 		await vm.exited;
 	});
 

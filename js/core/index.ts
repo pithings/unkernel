@@ -40,6 +40,8 @@ export { VSOCK_GUEST_CID, VSOCK_HEADER_SIZE, VSOCK_HOST_CID, VsockDevice, VsockE
 export type { Vsock, VsockConnection, VsockDeviceOptions, VsockDeviceStats, VsockHeader, VsockHostOptions, VsockListener, VsockStats } from "./vsock.ts";
 export { PtyError, TTY_DETACH_TIMEOUT, TTY_FEATURE_CONNECT, TTY_FEATURE_DETACH, TTY_FEATURE_PIPES, TTY_FEATURE_USER, TTY_PORT, TTY_SIGNALS, TTY_VERSION, TtyFrameParser, attachPty, connectGuest, encodeTtyAttach, encodeTtyFrame, encodeTtyOpen, encodeTtyResize, execSubprocess, spawnPty, spawnSubprocess } from "./tty.ts";
 export type { AttachOptions, ConnectOptions, ExecOptions, ExecResult, GuestSocket, PipeOptions, Pty, PtyEnd, PtyErrorCode, PtyOptions, PtySize, SpawnOptions, Subprocess, TtyFrame, TtySessionSnapshot } from "./tty.ts";
+export { readGuestFile, writeGuestFile } from "./guest-files.ts";
+export type { GuestFileOptions, ReadGuestFileOptions, WriteGuestFileOptions } from "./guest-files.ts";
 export { HTTP_MAX_HEADER_BYTES, fetchOver } from "./http.ts";
 export type { ByteDuplex, GuestConnect } from "./http.ts";
 export { FS_DEFAULT_OWNER, FsError } from "./fs.ts";
