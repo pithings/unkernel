@@ -1,0 +1,13 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+# reboot under kw-init: SIGUSR2 to PID 1; another user through sudo -n.
+
+# unkernel: reboot under kw-init.
+trap 'exit 0' TERM   # kw-init stops everything: no "Terminated"
+if [ "$(id -u)" != 0 ]; then
+	sudo -n /usr/local/sbin/reboot "$@"
+	exit
+fi
+kill -USR2 1
+sleep 10

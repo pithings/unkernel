@@ -41,7 +41,7 @@ const {
 const bundledKernelUrl = new URL("./unkernel.wasm", import.meta.url);
 const fetchDistro = distroFetcher(new URL("..", import.meta.url));
 
-const USAGE = `Usage: unkernel [kernel.wasm | --kernel kernel.wasm] [--distro alpine|debian|none|FILE|URL]
+const USAGE = `Usage: unkernel [kernel.wasm | --kernel kernel.wasm] [--distro alpine|arch|debian|none|FILE|URL]
        [--initrd none|NAME|file.cpio[.gz]] [--append "cmdline"] [--user NAME]
        [--mem MiB] [--timeout seconds] [--input "text"] [--input-delay seconds]
        [--size COLSxROWS] [--stats] [--profile FILE [--profile-hz N] [--profile-insns N] [--profile-root DIR]]
@@ -60,7 +60,7 @@ overlay root and runs its /sbin/init; the root's changes go to the data disk's
 /data/distros/NAME/ with --data, else to memory. Without a distro it starts the
 base shell (busybox and the kw tools).
 
---distro picks the distro image: alpine (the default) or debian, none (the
+--distro picks the distro image: alpine (the default), arch or debian, none (the
 base shell), an image FILE, or an http(s) URL served with Range support. An
 image is an erofs or ext4 file system labelled kwroot, attached read-only as
 /dev/wda, before any --disk and --data, and never written. A NAME is, in a

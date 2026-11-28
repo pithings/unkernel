@@ -350,6 +350,30 @@ layer: boot to a prompt 0.25 s (Alpine) and 0.32 s (Debian) from
   copied back into the tree, and `/etc/apk/world` keeps plain names);
   without the bundle or node the image has no doas and no user. What else
   a program needs comes from apk on first use (the shim's libgcc, above).
+- **Arch** (`distro/arch/`): the Arch Linux ARM generic aarch64 tarball
+  (pinned in `pins.sh`; upstream publishes only a rolling `latest`, so the pin
+  breaks when it is replaced: re-pin), without firmware, kernel modules,
+  /boot, docs, man pages and locales, and upgraded to the mirror's current
+  packages in a boot of the tree on the base bundle (`guest/tools/vm-run.ts`,
+  with the network, as Alpine's doas and Debian's apt cache: `pacman -Syu`,
+  then `ARCH_PACKAGES`; the changes to the overlay's upper layer are copied
+  back into the tree). The packages are not pinned (the mirror keeps only
+  current ones), so an image is as current as its build and not reproducible.
+  `/usr/local/sbin/kw-init` is Debian's without services (systemd does not
+  run), and makes the keyring at the first boot, in the background (about
+  25 s of waiting for entropy, 2026-11-28; the master key is per machine). pacman.conf has
+  `DownloadUser` off: its sandbox needs Landlock. The user (wheel, audio,
+  video, input, users) has sudo without a password (with Debian's
+  `secure_path`: Arch's leaves out `/usr/sbin`, where the layer's `kw-overlay`
+  is); the tarball's own account "alarm" is removed and root is locked. Arch
+  merges sbin into bin, so `/usr/sbin` is a link to `bin`; the layer's
+  `/usr/sbin` directory replaces it, and holds only the layer's tools there. `/var/lib/pacman/sync` has the build's package lists
+  and `/usr/lib/kw-commands` the command -> package map (`tools/commands.py`,
+  from the repositories' file lists) that `kw-pacman-install` reads, as
+  Debian's `kw-apt-install` does. Terminal and TUI apps work (the page's
+  launcher installs their packages with pacman); there is no Wayland desktop
+  yet (no wlandr, no font) and no guest GL, Vulkan or VA-API, and the page's
+  GUI, game and browser apps are Debian-only.
 - **Debian** (`distro/debian/`): debian:trixie-slim (pinned in
   `pins.sh`), Debian's own builds in full. `/sbin/init` ->
   `/usr/local/sbin/kw-init`, a bash PID 1: the layer's rc, welcome and

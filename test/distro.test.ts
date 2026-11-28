@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
 // createKernel({ distro }): the distroless bundle (kernel + base initramfs)
-// with a read-only distro image, for each of Alpine and Debian.
+// with a read-only distro image, for each of Alpine, Arch and Debian.
 //
 //   node --test test/distro.test.ts
 //   UNKERNEL_TEST_BASE_KERNEL=path ...      # another distroless bundle (default vendor/build/bundle/unkernel.wasm)
@@ -72,7 +72,7 @@ const poweroff = async (vm: Vm) => {
 	assert.equal(res.code, 0, res.reason);
 };
 
-for (const name of ["alpine", "debian"]) {
+for (const name of ["alpine", "arch", "debian"]) {
 	const img = noKernel ? undefined : image(name);
 	const skip = noKernel || (!img && `no ${path.join(distroDir, `${name}.${format}`)} (kernel/build.sh distro ${name})`);
 	describe(`distro ${name} (${format})`, { skip, concurrency: 1 }, () => {
@@ -282,7 +282,7 @@ for (const name of ["alpine", "debian"]) {
 			await poweroff(vm2);
 		});
 
-		const pm = name === "alpine" ? "apk add" : "apt install";
+		const pm = { alpine: "apk add", arch: "pacman -S", debian: "apt install" }[name]!;
 		const userShell = name === "alpine" ? "/bin/sh" : "/bin/bash";
 
 		test("the image's user: sessions and the console run as user (uid 1000, its groups, in /home/user), sudo -n works without a tty, root on request", async (t) => {
@@ -292,7 +292,7 @@ for (const name of ["alpine", "debian"]) {
 			vm.onOutput((b) => { out += dec.decode(b, { stream: true }); });
 			const [uid, gid, groups, cwd, env, p] = (await sh(vm, 'id -u; id -g; id -Gn; pwd; echo "$HOME $USER $LOGNAME $SHELL"; echo "$PATH"')).split("\n");
 			assert.deepEqual([uid, gid, cwd, env], ["1000", "1000", HOME, `${HOME} user user ${userShell}`]);
-			for (const g of ["audio", "video", "input", name === "alpine" ? "wheel" : "sudo"]) assert.ok(groups!.split(" ").includes(g), `${g} in ${groups}`);
+			for (const g of ["audio", "video", "input", name === "debian" ? "sudo" : "wheel"]) assert.ok(groups!.split(" ").includes(g), `${g} in ${groups}`);
 			assert.match(p!, new RegExp(`^/run/kw/bin:${HOME}/\\.local/bin:.*:/usr/sbin:.*:/usr/lib/kw/bin$`));
 			assert.equal(await sh(vm, "sudo -n true && sudo -n id -u && sudo -n sh -c 'echo $(id -u) $HOME' </dev/null"), "0\n0 /root");
 			assert.equal(await sh(vm, "id -u; pwd; echo $HOME", "root"), "0\n/root\n/root");
@@ -308,7 +308,7 @@ for (const name of ["alpine", "debian"]) {
 			vm.write("\necho \"con-$(id -un)-$(pwd)-$((6*7))\"\n");
 			for (let i = 0; i < 600 && !/con-\w+-\S+-42/.test(out); i++) await new Promise((r) => setTimeout(r, 100));
 			assert.match(out, new RegExp(`con-user-${HOME}-42`));
-			vm.write("\ngrep SigIgn /proc/self/status\n");
+			vm.write("\ncommand grep SigIgn /proc/self/status\n");   // not an alias: Arch's skel colours grep
 			for (let i = 0; i < 600 && !/SigIgn:\s+\w{16}/.test(out); i++) await new Promise((r) => setTimeout(r, 100));
 			assert.match(out, /SigIgn:\s+0{16}/, "the console's programs do not ignore ^C");
 			await poweroff(vm);   // as the user: poweroff goes through sudo
@@ -360,12 +360,13 @@ for (const name of ["alpine", "debian"]) {
 			await poweroff(vm);
 		});
 
-		test(`${name === "alpine" ? "apk" : "apt and apt-get"} typed in an interactive shell run through sudo for the user; \\${name === "alpine" ? "apk" : "apt"} is the real one`, async (t) => {
+		test(`${{ alpine: "apk", arch: "pacman", debian: "apt and apt-get" }[name]} typed in an interactive shell run through sudo for the user; \\${{ alpine: "apk", arch: "pacman", debian: "apt" }[name]} is the real one`, async (t) => {
 			const vm = await boot(t, { distro: img!.file });
-			// A package to install offline: Debian's from a .deb the user builds, Alpine's a virtual one.
-			const install = name === "alpine" ? "apk add --no-network -t kw-test busybox" : "apt install -y -q /tmp/kw-test.deb";
+			// A package to install offline: Debian's from a .deb the user builds, Arch's from a package file that is only a .PKGINFO, Alpine's a virtual one.
+			const install = { alpine: "apk add --no-network -t kw-test busybox", arch: "pacman -U --noconfirm /tmp/kw-test.pkg.tar", debian: "apt install -y -q /tmp/kw-test.deb" }[name]!;
+			if (name === "arch") await sh(vm, "cd /tmp && printf 'pkgname = kw-test\\npkgver = 1-1\\npkgdesc = t\\narch = any\\nsize = 0\\n' > .PKGINFO && tar -cf kw-test.pkg.tar .PKGINFO");
 			if (name === "debian") await sh(vm, "mkdir -p /tmp/kwt/DEBIAN && printf 'Package: kw-test\\nVersion: 1\\nArchitecture: all\\nMaintainer: t <t@t>\\nDescription: t\\n' > /tmp/kwt/DEBIAN/control && dpkg-deb --root-owner-group -b /tmp/kwt /tmp/kw-test.deb >/dev/null");
-			const real = name === "alpine" ? "\\apk add --no-network -t kw-test2 busybox" : "\\apt-get install -y -q /tmp/kw-test.deb";
+			const real = { alpine: "\\apk add --no-network -t kw-test2 busybox", arch: "\\pacman -U --noconfirm /tmp/kw-test.pkg.tar", debian: "\\apt-get install -y -q /tmp/kw-test.deb" }[name]!;
 			const pty = await vm.spawn(undefined, [], { cols: 200, rows: 50 });
 			let out = "";
 			const dec = new TextDecoder();
@@ -380,9 +381,9 @@ for (const name of ["alpine", "debian"]) {
 			assert.notEqual(await run(real, "R2"), "0", "the real command, without sudo, cannot install");
 			assert.equal(await run("sudo -n true", "R3"), "0");
 			await pty.close();
-			assert.equal(await sh(vm, name === "alpine" ? "apk info -e kw-test" : "dpkg-query -W -f '${Status}' kw-test"), name === "alpine" ? "kw-test" : "install ok installed");
+			assert.equal(await sh(vm, { alpine: "apk info -e kw-test", arch: "pacman -Qq kw-test", debian: "dpkg-query -W -f '${Status}' kw-test" }[name]!), name === "debian" ? "install ok installed" : "kw-test");
 			// Scripts have no alias.
-			assert.notEqual((await vm.exec("sh", ["-c", name === "alpine" ? "apk add --no-network -t kw-test3 busybox" : "apt-get install -y -q /tmp/kw-test.deb"], EXEC)).exitCode, 0);
+			assert.notEqual((await vm.exec("sh", ["-c", { alpine: "apk add --no-network -t kw-test3 busybox", arch: "pacman -U --noconfirm /tmp/kw-test.pkg.tar", debian: "apt-get install -y -q /tmp/kw-test.deb" }[name]!], EXEC)).exitCode, 0);
 			await poweroff(vm);
 		});
 
@@ -396,17 +397,23 @@ for (const name of ["alpine", "debian"]) {
 			// apt-get takes ~8 s a run on the emulator, and offline the shims run three each
 			// (install, update, which exits 0, and the install again): ~100 s.
 			if (name === "debian") await asRoot(vm, `printf '%s\\n' '#!/bin/sh' 'echo "$(id -u) $*" >>/tmp/kw-apt.log' 'exit 100' >/usr/bin/apt-get`);
-			const cnf = name === "alpine" ? "/etc/kw-apk-install" : "/usr/local/sbin/kw-apt-install";
-			// rg: in neither image (Debian's has htop).
+			// Arch: pacman is the same stub (the shim waits for the keyring first).
+			if (name === "arch") await asRoot(vm, `touch /etc/pacman.d/gnupg/.kw-keys; printf '%s\\n' '#!/bin/sh' 'echo "$(id -u) $*" >>/tmp/kw-pacman.log' 'exit 1' >/usr/bin/pacman`);
+			const cnf = { alpine: "/etc/kw-apk-install", arch: "/usr/local/sbin/kw-pacman-install", debian: "/usr/local/sbin/kw-apt-install" }[name]!;
+			// rg: in no image (Debian's has htop).
 			const r = await vm.exec(cnf, ["rg"], EXEC);
 			assert.equal(r.exitCode, 127, r.stderr);
-			// As root (through sudo): Alpine fetches its index first, Debian runs apt-get.
-			assert.match(r.stderr, name === "alpine" ? /rg: not found, fetching the apk index/ : /rg: not found, sudo apt-get install ripgrep/);
+			// As root (through sudo): Alpine fetches its index first, Arch and Debian run their package manager.
+			assert.match(r.stderr, { alpine: /rg: not found, fetching the apk index/, arch: /rg: not found, sudo pacman -S ripgrep/, debian: /rg: not found, sudo apt-get install ripgrep/ }[name]!);
 			if (name === "alpine") {
 				// A fixed version, so that the shim goes on to the library before any download.
 				const s = await vm.exec("node", ["--version"], { ...EXEC, env: { KW_NODE_VERSION: "24.0.0" } });
 				assert.equal(s.exitCode, 127);
 				assert.match(s.stderr, /node: sudo apk add libgcc \(node needs libgcc_s\.so\.1\)/);
+			} else if (name === "arch") {
+				// A failed install fetches the lists; that fails too, so no second install.
+				assert.match(r.stderr, /fetching the package lists/);
+				assert.equal(await sh(vm, "cat /tmp/kw-pacman.log"), ["0 -S --noconfirm --needed ripgrep", "0 -Sy --noconfirm"].join("\n"));
 			} else {
 				// A failed install fetches the lists; the update fails too, so no second install.
 				assert.match(r.stderr, /fetching the package lists/);

@@ -10,7 +10,7 @@ break. Longer topics are in `.agents/kernel/`:
 | [kernel/devices.md](kernel/devices.md) | console, kwblk, kwnet, kwfb, kwinput, kwsnd, kwvsock, kwshm, kwvirtio and virtio-gpu, 9p |
 | [kernel/config.md](kernel/config.md) | `kw_defconfig` rules, what is on and off, measured options |
 | [kernel/tests.md](kernel/tests.md) | kwtest and abitest coverage, other checks, debugging |
-| [kernel/guest.md](kernel/guest.md) | the base initramfs and its shell, the kw layer, the Alpine and Debian images, guest tools and shims |
+| [kernel/guest.md](kernel/guest.md) | the base initramfs and its shell, the kw layer, the Alpine, Arch and Debian images, guest tools and shims |
 
 ## Tree and patch workflow
 

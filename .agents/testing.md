@@ -158,9 +158,9 @@ the SMP patch), then the distro images (`kernel/build.sh distro`: the
 Debian image boots on that bundle to make apt's cache, and the step fails
 if it was left out) and `distros.json`, which it checks against
 `include/kw_emu.h`'s ABI and the images (sha256, size, ids; exactly
-alpine and debian, erofs), and the guest GL renderer the package carries
+alpine, arch and debian, erofs), and the guest GL renderer the package carries
 (`gl/wasm/build.sh`: emscripten and virglrenderer, pinned). Network is
-needed only for the pinned downloads. Then it runs kwtest with and without the JIT and on 2 CPUs,
+needed for the pinned downloads and the Arch image's packages. Then it runs kwtest with and without the JIT and on 2 CPUs,
 and abitest on the UP kernel and on 2 CPUs (`--initrd base-test`, no
 distro), `pnpm typecheck` and `pnpm typecheck:web`, `pnpm test:kpatch`,
 the tty, http and 9p tests, `pnpm test:distro`, and kwtest and the api

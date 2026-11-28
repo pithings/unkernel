@@ -1,0 +1,68 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+# PID 1 of the Arch image (/usr/local/sbin/kw-init, which the base execs
+# first). The kw layer's runtime (/usr/lib/kw/, from the base) does the rest:
+# rc (mounts, hostname), welcome, net (DHCP, in the background), and at the
+# end, after this has stopped every process, shutdown (leave /data clean).
+# No services. In between it respawns the console's login shell on hvc0
+# (kwtty login) and kwtty serve (started once DHCP is done), until poweroff,
+# halt or reboot (/usr/local/sbin) signal it (SIGUSR1, SIGUSR2); then
+# reboot(2) through the base's busybox.
+
+# unkernel: PID 1 of the Arch image.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+if [ $$ != 1 ]; then
+	echo "kw-init: not PID 1" >&2
+	exit 1
+fi
+/usr/lib/kw/rc
+/usr/lib/kw/welcome
+/usr/lib/kw/net background
+
+action=
+trap 'action=poweroff' USR1
+trap 'action=reboot' USR2
+: > /run/kw-init
+export HOME=/root
+cd /root
+declare -A role started
+# The console's login shell (kwtty login: the user's, with its groups and
+# environment, in its home) in a session of its own with hvc0 as its
+# controlling terminal (job control, ^C), respawned like busybox init's
+# "respawn".
+console() { setsid -c /usr/bin/kwbox tty login <>/dev/hvc0 >&0 2>&0 & role[$!]=console; started[$!]=$SECONDS; }
+# kwtty sleeps in pause() when there is no vsock device, so it is not
+# respawned in a loop.
+kwtty() { { /usr/lib/kw/net wait 2>/dev/null; exec /usr/bin/kwbox tty serve; } </dev/null & role[$!]=kwtty; started[$!]=$SECONDS; }
+# pacman's keyring (the tarball has the keys, not the GnuPG directory: its
+# master key is made per machine, not shipped in the image), once, in the
+# background: key generation waits about 25 s for entropy. The stamp comes
+# last, so a power-off in between makes it start over.
+if [ ! -e /etc/pacman.d/gnupg/.kw-keys ]; then
+	{ rm -rf /etc/pacman.d/gnupg; pacman-key --init && pacman-key --populate archlinuxarm && : > /etc/pacman.d/gnupg/.kw-keys; } \
+		</dev/null >/var/log/kw-pacman-key.log 2>&1 &
+fi
+console
+kwtty
+while [ -z "$action" ]; do
+	pid=
+	# Returns for one of our children, or when a trapped signal arrives.
+	# Orphans that end up here are reaped by bash itself.
+	wait -n -p pid || true
+	[ -n "$pid" ] && [ -n "${role[$pid]-}" ] || continue
+	r=${role[$pid]}
+	# Throttle a program that dies at once.
+	[ $((SECONDS - started[$pid])) -ge 1 ] || sleep 1
+	unset "role[$pid]" "started[$pid]"
+	[ -n "$action" ] || $r
+done
+
+trap '' USR1 USR2
+exec 3>&2 2>/dev/null   # no "Killed" notices for the children
+kill -TERM -1
+sleep 0.2
+kill -KILL -1
+wait
+/usr/lib/kw/shutdown 2>&3
+exec /run/kw-lower/bin/busybox "$action" -f 2>&3
