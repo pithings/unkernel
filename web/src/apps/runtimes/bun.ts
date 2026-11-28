@@ -16,7 +16,7 @@ export default {
 	colors: ["#4a3b2a", "#14100c"],
 	needs: { net: true },
 	// The shim is on both distros; nothing to install first.
-	packages: { alpine: [], debian: [] },
+	packages: { alpine: [], arch: [], debian: [] },
 	terminal: "window",
 	commands: [
 		"echo 'The first run installs Bun into ~/.local/bin. Try: Bun.version, process.arch, await fetch(\"https://example.com\").then(r => r.status)'",

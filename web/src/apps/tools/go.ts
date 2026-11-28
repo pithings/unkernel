@@ -52,7 +52,7 @@ export default {
 		"go.mod": "module hello\n\ngo 1.22\n",
 		"main.go": MAIN,
 	},
-	packages: { alpine: ["go"], debian: ["golang-go"] },
+	packages: { alpine: ["go"], arch: ["go"], debian: ["golang-go"] },
 	community: true,
 	commands: [
 		"echo 'The first run compiles parts of the standard library, so it may take a while; later runs reuse ~/.cache/go-build'",

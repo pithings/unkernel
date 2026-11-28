@@ -94,7 +94,7 @@ export interface AppBundle {
 }
 
 /** The distro images an app can name packages for. */
-export type Distro = "alpine" | "debian";
+export type Distro = "alpine" | "arch" | "debian";
 
 interface AppBase {
 	id: string;

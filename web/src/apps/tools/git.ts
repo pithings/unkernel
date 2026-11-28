@@ -91,6 +91,6 @@ export default {
 		"clone.sh": { content: CLONE, mode: 0o755 },
 		"tour.sh": { content: TOUR, mode: 0o755 },
 	},
-	packages: { alpine: ["git", "tig"], debian: ["git", "tig"] },
+	packages: { alpine: ["git", "tig"], arch: ["git", "tig"], debian: ["git", "tig"] },
 	commands: ["./clone.sh", "./tour.sh", "cd linenoise", "tig"],
 } satisfies TerminalApp;

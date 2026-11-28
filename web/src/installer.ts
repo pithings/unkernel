@@ -306,6 +306,8 @@ export interface PackageLine {
  * (dlstatus: the downloads, 0 to 35% of the stage; pmstatus: dpkg's run, 35
  * to 100%), its summary line for the package count, dpkg's own lines, the
  * lock wait. apk: "(i/n) Installing|Upgrading" (i of n), its index fetches.
+ * pacman: "installing NAME..." lines against its "Packages (N)" line, its
+ * other stages by their ":: " headings.
  */
 export function packageParser(distro: Distro): (line: string) => PackageLine {
 	let total = 0;
@@ -321,6 +323,26 @@ export function packageParser(distro: Distro): (line: string) => PackageLine {
 			if (/^fetch /.test(line)) return { step: "Updating package lists…" };
 			if (/^OK: /.test(line)) return { done: 1 };
 			if (/^\$ .*apk add/.test(line)) return { step: "Installing packages…" };
+			return {};
+		};
+	}
+	if (distro === "arch") {
+		// On a pipe pacman prints "installing NAME..." without a count: the total is
+		// the "Packages (N)" line's, and n the lines seen since it (a transaction run
+		// again after pacman -Sy starts over).
+		let n = 0;
+		return (line) => {
+			let m = /^Packages \((\d+)\)/.exec(line);
+			if (m) { total = Number(m[1]); n = 0; return {}; }
+			if (/^(installing|upgrading|reinstalling|downgrading|removing) \S+\.\.\.$/.test(line)) {
+				n++;
+				return { done: total ? (n - 1) / total : 0, step: total ? `Installing ${n} of ${total} packages…` : "Installing packages…", unsafe: true };
+			}
+			if (/^Waiting for another install/.test(line)) return { step: "Waiting for another install…" };
+			if (/^:: Synchronizing package databases/.test(line)) return { step: "Updating package lists…" };
+			if (/^:: Retrieving packages/.test(line)) return { step: "Downloading packages…" };
+			if (/^:: Running post-transaction hooks/.test(line)) return { step: "Finishing…", unsafe: true };
+			if (/^\$ .*pacman -S /.test(line)) return { step: "Installing packages…" };
 			return {};
 		};
 	}
