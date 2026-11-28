@@ -1,0 +1,23 @@
+#version 450
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+// Uniform texel buffers of the three sampled types: every element fetched,
+// and the sizes (run.ts decodes the same bytes for many view formats).
+layout(local_size_x = 16) in;
+layout(set = 0, binding = 0) uniform samplerBuffer fbuf;
+layout(set = 0, binding = 1) uniform isamplerBuffer ibuf;
+layout(set = 0, binding = 2) uniform usamplerBuffer ubuf;
+layout(set = 0, binding = 3) buffer Out {
+	vec4 f[16];
+	ivec4 i[16];
+	uvec4 u[16];
+	ivec4 sizes;
+} o;
+void main() {
+	int n = int(gl_GlobalInvocationID.x);
+	o.f[n] = texelFetch(fbuf, n);
+	o.i[n] = texelFetch(ibuf, n);
+	o.u[n] = texelFetch(ubuf, n);
+	if (n == 0)
+		o.sizes = ivec4(textureSize(fbuf), textureSize(ibuf), textureSize(ubuf), 0);
+}

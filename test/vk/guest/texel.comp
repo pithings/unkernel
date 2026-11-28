@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+#version 450
+// vk-texel: gathers texels of a uniform texel buffer (RGBA8) through an index
+// buffer (R16_UINT), writes them scaled to a storage texel buffer (RGBA32F)
+// and counts the indices modulo 4 with image atomics (R32_UINT).
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) uniform samplerBuffer src;
+layout(set = 0, binding = 1) uniform usamplerBuffer idx;
+layout(set = 0, binding = 2, rgba32f) uniform writeonly imageBuffer dst;
+layout(set = 0, binding = 3, r32ui) uniform uimageBuffer cnt;
+layout(push_constant) uniform P {
+	float scale;
+} p;
+void main() {
+	int i = int(gl_GlobalInvocationID.x);
+	if (i >= textureSize(idx))
+		return;
+	int j = int(texelFetch(idx, i).x);
+	imageStore(dst, i, texelFetch(src, j) * p.scale);
+	imageAtomicAdd(cnt, j % 4, 1u);
+}

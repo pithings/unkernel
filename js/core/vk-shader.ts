@@ -44,6 +44,8 @@ export interface VkShaderBinding {
 	format?: string;
 	access?: string;
 	arrayIndex?: number;
+	/** a texel buffer's words ("data", a storage buffer) or parameters ("params", a uniform): vk/PROTOCOL.md, Amendments, "Texel buffers" */
+	texel?: "data" | "params";
 }
 
 export interface VkShaderResult {

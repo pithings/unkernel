@@ -12,12 +12,15 @@
 // The result is {"wgsl","entryPoint","bindings",["pushConstantSize"]} or
 // {"error"}; the caller frees it with kwvk_free(ptr, 4 + len).
 //
-// Before naga (spirv.rs): spec constants are baked and OpSpecConstantOp
-// folded, combined image samplers split, every binding doubled, output
+// Before naga (spirv.rs): OpLine/OpNoLine dropped, storage buffers the
+// module never writes made read-only, spec constants baked and
+// OpSpecConstantOp folded, isinf/isnan as bit tests, gl_SampleMask as a
+// u32, combined image samplers split, every binding doubled, output
 // blocks given per-member locations, std140 scalar/vec2 arrays wrapped,
 // uniform blocks WGSL cannot lay out repacked into u32 words (uniform.rs).
 // On naga's IR: gl_PointSize dropped, input blocks split, push constants
-// become a uniform buffer, only the requested entry point kept, uniform
+// become a uniform buffer, only the requested entry point kept and what it
+// reaches (constant branches and unreachable statements pruned), uniform
 // compute builtins passed to helpers as arguments (builtins.rs), loop
 // continues that would make a barrier non-uniform restructured (flow.rs).
 // Compute modules with subgroup builtins but no subgroup operation get the
@@ -31,6 +34,7 @@ mod flow;
 mod small;
 mod spirv;
 mod subgroup;
+mod texel;
 mod uniform;
 mod virt;
 
@@ -210,7 +214,9 @@ fn translate(spv: &[u8], o: &Opts) -> Result<String, String> {
 	}
 	let words: Vec<u32> = spv.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
 	spirv::check(&words)?;
+	let words = spirv::strip_debug_lines(words);
 	let words = spirv::member_access_to_variables(words);
+	let words = spirv::mark_unwritten_buffers(words);
 	let words = spirv::bake_spec_constants(words, &o.spec);
 	let words = spirv::fold_spec_ops(words);
 	let words = spirv::misc_fixes(words);
@@ -222,14 +228,18 @@ fn translate(spv: &[u8], o: &Opts) -> Result<String, String> {
 		_ => words,
 	};
 	let words = spirv::lower_umul_extended(words);
+	let words = spirv::lower_isinf_isnan(words);
+	let words = spirv::output_sample_mask(words);
 	let words = spirv::localize_subgroup_operands(words);
+	// Texel buffers: storage buffers of words and a uniform per binding (texel.rs).
+	let (words, texel) = texel::lower_texel_buffers(words, o.stage == naga::ShaderStage::Vertex)?;
 	let words = small::lower_small_storage(words, o.features.iter().any(|f| f == "shader-f16"))?;
 	let words = spirv::merge_aliased_buffers(words);
 	let words = spirv::storage_image_formats(words, &o.storage_formats);
 	let words = spirv::subpass_inputs(words);
 	let words = spirv::flatten_io_arrays(words)?;
 	let (words, flats) = spirv::flatten_descriptor_arrays(words, &o.arrays)?;
-	let fixed: std::collections::HashMap<u32, u32> = flats.iter().map(|f| (f.var, f.wgsl_binding)).collect();
+	let fixed: std::collections::HashMap<u32, u32> = flats.iter().map(|f| (f.var, f.wgsl_binding)).chain(texel.fixed.iter().copied()).collect();
 	let words = spirv::split_combined_samplers(words, &fixed)?;
 	let words = spirv::wrap_strided_arrays(words)?;
 	let words = spirv::split_misaligned_vectors(words);
@@ -255,19 +265,29 @@ fn translate(spv: &[u8], o: &Opts) -> Result<String, String> {
 
 	drop_point_size(&mut module)?;
 	defuse_zero_division(&mut module);
-	if o.stage == naga::ShaderStage::Compute && inline_compute_main(&mut module) {
-		// Branches on constants (baked spec constants) go, so resources
-		// only they use drop out of the reflection with the compaction.
+	if o.stage == naga::ShaderStage::Compute {
+		inline_compute_main(&mut module);
+	}
+	// Branches on constants (baked spec constants) go, and with them the
+	// statements after a return, break or continue (Tint warns "code is
+	// unreachable"). Then only what the entry point reaches is kept: the
+	// functions it calls and the globals they use (the old inner main of
+	// an inlined compute wrapper, which Tint would still analyze, goes too),
+	// so the WGSL and the reflection hold only the resources the stage
+	// uses, as Vulkan asks to be bound (GZDoom declares a texture at a
+	// binding its set layouts do not have; Taisei's SDL GPU shaders).
+	{
 		let consts = module.constants.clone();
 		let gexp = module.global_expressions.clone();
 		for ep in module.entry_points.iter_mut() {
 			let f = &mut ep.function;
 			prune_constant_ifs(&mut f.body, &f.expressions, &consts, &gexp);
 		}
-		// The old inner main is unused now but would still be analyzed by
-		// Tint: drop unused functions (and with them unused globals).
-		naga::compact::compact(&mut module, naga::compact::KeepUnused::No);
+		for (_, f) in module.functions.iter_mut() {
+			prune_constant_ifs(&mut f.body, &f.expressions, &consts, &gexp);
+		}
 	}
+	naga::compact::compact(&mut module, naga::compact::KeepUnused::No);
 	split_input_blocks(&mut module);
 	flat_integer_varyings(&mut module, &o.link);
 	for (_, f) in module.functions.iter_mut() {
@@ -359,6 +379,7 @@ fn translate(spv: &[u8], o: &Opts) -> Result<String, String> {
 	let mut wgsl = naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty())
 		.map_err(|e| format!("WGSL: {}", err_chain(&e)))?;
 	apply_paddings(&mut wgsl, &pads);
+	texel::patch_wgsl(&mut wgsl, &texel)?;
 	if !wgsl.contains("binding_array<") {
 		// Left over from flattened descriptor arrays' unused array types.
 		wgsl = wgsl.replace("enable wgpu_binding_array;\n", "");
@@ -415,6 +436,9 @@ fn translate(spv: &[u8], o: &Opts) -> Result<String, String> {
 		let _ = write!(s, "{{\"set\":{},\"binding\":{},\"group\":{},\"wgslBinding\":{},", rb.group, flat.map(|f| f.binding).unwrap_or(rb.binding >> 1), rb.group, rb.binding);
 		if let Some(f) = flat {
 			let _ = write!(s, "\"arrayIndex\":{},", f.index);
+		}
+		if let Some(&(_, _, k)) = texel.reflect.iter().find(|t| t.0 == rb.group && t.1 == rb.binding) {
+			let _ = write!(s, "\"texel\":\"{}\",", k);
 		}
 		s.push_str("\"kind\":");
 		match gv.space {
@@ -1101,6 +1125,22 @@ fn prune_constant_ifs(block: &mut naga::Block, ex: &naga::Arena<naga::Expression
 			}
 			_ => {}
 		}
+	}
+	// Statements after one that always leaves the block (a return, break or
+	// continue, also at the end of a nested block or of both branches of an
+	// if) never run: dropped. Not after a discard, which in WGSL demotes the
+	// invocation and goes on (the helper's derivatives need what follows).
+	fn leaves(st: &naga::Statement) -> bool {
+		use naga::Statement as S;
+		match st {
+			S::Return { .. } | S::Break | S::Continue => true,
+			S::Block(b) => b.last().is_some_and(leaves),
+			S::If { accept, reject, .. } => accept.last().is_some_and(leaves) && reject.last().is_some_and(leaves),
+			_ => false,
+		}
+	}
+	if let Some(k) = block.iter().position(leaves) {
+		block.cull(k + 1..);
 	}
 }
 

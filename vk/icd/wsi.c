@@ -929,9 +929,12 @@ static VkResult present_one(struct kw_swapchain *sc, uint32_t idx)
 
 static API VkResult CALL kw_vkQueuePresentKHR(VkQueue q, const VkPresentInfoKHR *pi)
 {
-	(void)q;
 	VkResult res = VK_SUCCESS;
 	int64_t t0 = kw_now();
+	/* after the submits held in the ICD for timeline values (they draw what
+	 * this presents): wait for their release, as Mesa's queues do */
+	if (kw_queue_unhold(((struct kw_queue *)q)->dev, "vkQueuePresentKHR") != VK_SUCCESS)
+		return VK_ERROR_DEVICE_LOST;
 	for (uint32_t i = 0; i < pi->swapchainCount; i++) {
 		VkResult r = present_one(HANDLE(struct kw_swapchain, pi->pSwapchains[i]), pi->pImageIndices[i]);
 		if (pi->pResults)

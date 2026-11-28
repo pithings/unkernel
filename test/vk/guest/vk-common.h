@@ -24,9 +24,10 @@ struct ctx {
 	VkPhysicalDeviceMemoryProperties mem;
 };
 
-static inline void ctx_init(struct ctx *c, const char *name)
+/* an instance of API version `api`, a device made with `features` (a pNext chain) */
+static inline void ctx_init_api(struct ctx *c, const char *name, uint32_t api, const void *features)
 {
-	VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = name, .apiVersion = VK_API_VERSION_1_0};
+	VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = name, .apiVersion = api};
 	VkInstanceCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app};
 	CHECK(vkCreateInstance(&ici, NULL, &c->inst));
 	uint32_t n = 1;
@@ -41,10 +42,12 @@ static inline void ctx_init(struct ctx *c, const char *name)
 	vkGetPhysicalDeviceMemoryProperties(c->pd, &c->mem);
 	float prio = 1;
 	VkDeviceQueueCreateInfo q = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = 0, .queueCount = 1, .pQueuePriorities = &prio};
-	VkDeviceCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1, .pQueueCreateInfos = &q};
+	VkDeviceCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = features, .queueCreateInfoCount = 1, .pQueueCreateInfos = &q};
 	CHECK(vkCreateDevice(c->pd, &dci, NULL, &c->dev));
 	vkGetDeviceQueue(c->dev, 0, 0, &c->queue);
 }
+
+static inline void ctx_init(struct ctx *c, const char *name) { ctx_init_api(c, name, VK_API_VERSION_1_0, NULL); }
 
 static inline uint32_t mem_type(struct ctx *c, uint32_t bits, VkMemoryPropertyFlags want)
 {

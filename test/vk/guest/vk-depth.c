@@ -6,8 +6,12 @@
 // is culled as back-facing. Drawn twice, with a normal and with a negative
 // viewport height (VK_KHR_maintenance1), and with the depth cleared by a
 // depth-only render pass of its own and loaded by the next (as vkd3d
-// does), counting the passed samples with an occlusion query. Exit 0 on
-// success.
+// does), counting the passed samples with an occlusion query. Then with
+// Vulkan 1.2's imagelessFramebuffer and separateDepthStencilLayouts: a
+// render pass made by vkCreateRenderPass2 with the depth-only layouts
+// (DEPTH_ATTACHMENT_OPTIMAL, stencil layouts chained), an imageless
+// framebuffer begun with two sets of views in one command buffer (a scratch
+// image first, then the one read back). Exit 0 on success.
 #include "vk-common.h"
 
 #include "depth_frag.h"
@@ -16,7 +20,28 @@
 #define W 64
 #define H 64
 
-/* mode 0: one pass; 1: negative viewport; 2: the depth cleared by a depth-only render pass of its own, then loaded (vkd3d) */
+/* the color attachment of mode 3's first pass, which draws into it instead */
+static VkImage scratch_image(struct ctx *c, VkFormat fmt, VkDeviceMemory *mem, VkImageView *view)
+{
+	VkImageCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = fmt,
+		.extent = {W, H, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+		.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
+	VkImage img;
+	CHECK(vkCreateImage(c->dev, &ici, NULL, &img));
+	VkMemoryRequirements req;
+	vkGetImageMemoryRequirements(c->dev, img, &req);
+	VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
+		.memoryTypeIndex = mem_type(c, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
+	CHECK(vkAllocateMemory(c->dev, &mai, NULL, mem));
+	CHECK(vkBindImageMemory(c->dev, img, *mem, 0));
+	VkImageViewCreateInfo vci = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img, .viewType = VK_IMAGE_VIEW_TYPE_2D,
+		.format = fmt, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+	CHECK(vkCreateImageView(c->dev, &vci, NULL, view));
+	return img;
+}
+
+/* mode 0: one pass; 1: negative viewport; 2: the depth cleared by a depth-only render pass of its own, then loaded (vkd3d);
+ * 3: mode 0 with vkCreateRenderPass2, depth-only layouts and an imageless framebuffer begun twice */
 static int run(struct ctx *cp, int mode)
 {
 	struct ctx c = *cp;
@@ -85,11 +110,56 @@ static int run(struct ctx *cp, int mode)
 		.pDepthStencilAttachment = &dref};
 	VkRenderPassCreateInfo rpci = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = 2, .pAttachments = atts,
 		.subpassCount = 1, .pSubpasses = &sub};
-	VkRenderPass rp;
-	CHECK(vkCreateRenderPass(c.dev, &rpci, NULL, &rp));
+	VkRenderPass rp = VK_NULL_HANDLE;
 	VkImageView fbviews[2] = {view, dview};
 	VkFramebufferCreateInfo fci = {.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = rp, .attachmentCount = 2,
 		.pAttachments = fbviews, .width = W, .height = H, .layers = 1};
+	VkImage simg = VK_NULL_HANDLE;
+	VkImageView sview = VK_NULL_HANDLE;
+	VkDeviceMemory smem = VK_NULL_HANDLE;
+	if (mode == 3) {
+		/* the same pass as vkCreateRenderPass2, with the depth aspect's own layouts */
+		VkAttachmentDescriptionStencilLayout dsl = {.sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_STENCIL_LAYOUT,
+			.stencilInitialLayout = VK_IMAGE_LAYOUT_UNDEFINED, .stencilFinalLayout = VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL};
+		VkAttachmentDescription2 a2[2] = {
+			{.sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2, .format = att.format, .samples = att.samples, .loadOp = att.loadOp,
+				.storeOp = att.storeOp, .stencilLoadOp = att.stencilLoadOp, .stencilStoreOp = att.stencilStoreOp,
+				.initialLayout = att.initialLayout, .finalLayout = att.finalLayout},
+			{.sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2, .pNext = &dsl, .format = datt.format, .samples = datt.samples,
+				.loadOp = datt.loadOp, .storeOp = datt.storeOp, .stencilLoadOp = datt.stencilLoadOp, .stencilStoreOp = datt.stencilStoreOp,
+				.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED, .finalLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL},
+		};
+		VkAttachmentReferenceStencilLayout rsl = {.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_STENCIL_LAYOUT,
+			.stencilLayout = VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL};
+		VkAttachmentReference2 r2 = {.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2, .attachment = 0,
+			.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT};
+		VkAttachmentReference2 dr2 = {.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2, .pNext = &rsl, .attachment = 1,
+			.layout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT};
+		VkSubpassDescription2 sub2 = {.sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2, .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+			.colorAttachmentCount = 1, .pColorAttachments = &r2, .pDepthStencilAttachment = &dr2};
+		VkRenderPassCreateInfo2 rpci2 = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2, .attachmentCount = 2, .pAttachments = a2,
+			.subpassCount = 1, .pSubpasses = &sub2};
+		CHECK(vkCreateRenderPass2(c.dev, &rpci2, NULL, &rp));
+		simg = scratch_image(&c, fmt, &smem, &sview);
+	} else {
+		CHECK(vkCreateRenderPass(c.dev, &rpci, NULL, &rp));
+	}
+	fci.renderPass = rp;
+	/* imageless: what the views must be like, the views at each begin */
+	VkFormat cfmt = fmt, dfmt = VK_FORMAT_D32_SFLOAT;
+	VkFramebufferAttachmentImageInfo fai[2] = {
+		{.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENT_IMAGE_INFO, .usage = ici.usage, .width = W, .height = H, .layerCount = 1,
+			.viewFormatCount = 1, .pViewFormats = &cfmt},
+		{.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENT_IMAGE_INFO, .usage = dci.usage, .width = W, .height = H, .layerCount = 1,
+			.viewFormatCount = 1, .pViewFormats = &dfmt},
+	};
+	VkFramebufferAttachmentsCreateInfo faci = {.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENTS_CREATE_INFO, .attachmentImageInfoCount = 2,
+		.pAttachmentImageInfos = fai};
+	if (mode == 3) {
+		fci.pNext = &faci;
+		fci.flags = VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT;
+		fci.pAttachments = NULL;
+	}
 	VkFramebuffer fb;
 	CHECK(vkCreateFramebuffer(c.dev, &fci, NULL, &fb));
 
@@ -146,6 +216,27 @@ static int run(struct ctx *cp, int mode)
 		vkCmdBeginRenderPass(cb, &cbi, VK_SUBPASS_CONTENTS_INLINE);
 		vkCmdEndRenderPass(cb);
 	}
+	VkSubpassBeginInfo sbi = {.sType = VK_STRUCTURE_TYPE_SUBPASS_BEGIN_INFO, .contents = VK_SUBPASS_CONTENTS_INLINE};
+	VkSubpassEndInfo sei = {.sType = VK_STRUCTURE_TYPE_SUBPASS_END_INFO};
+	VkImageView sviews[2] = {sview, dview};
+	VkRenderPassAttachmentBeginInfo rpab = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO, .attachmentCount = 2,
+		.pAttachments = sviews};
+	if (mode == 3) {
+		/* first into the scratch image (cleared green, drawn over), then into
+		 * the one read back: each begin draws into its own views */
+		VkClearValue sclears[2] = {{.color = {.float32 = {0, 1, 0, 1}}}, {.depthStencil = {1.0f, 0}}};
+		VkRenderPassBeginInfo sbegin = rpbi;
+		sbegin.pNext = &rpab;
+		sbegin.pClearValues = sclears;
+		vkCmdBeginRenderPass2(cb, &sbegin, &sbi);
+		vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+		vkCmdDraw(cb, 6, 1, 0, 0);
+		vkCmdEndRenderPass2(cb, &sei);
+	}
+	VkRenderPassAttachmentBeginInfo rpab2 = rpab;
+	rpab2.pAttachments = fbviews;
+	if (mode == 3)
+		rpbi.pNext = &rpab2;
 	vkCmdBeginRenderPass(cb, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
 	vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
 	vkCmdBeginQuery(cb, qp, 0, 0);
@@ -154,6 +245,12 @@ static int run(struct ctx *cp, int mode)
 	vkCmdEndRenderPass(cb);
 	VkBufferImageCopy region = {.bufferOffset = 0, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {W, H, 1}};
 	vkCmdCopyImageToBuffer(cb, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &region);
+	VkBuffer sbuf = VK_NULL_HANDLE;
+	VkDeviceMemory sbmem = VK_NULL_HANDLE;
+	if (mode == 3) {
+		host_buffer(&c, W * H * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, &sbuf, &sbmem);
+		vkCmdCopyImageToBuffer(cb, simg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sbuf, 1, &region);
+	}
 	submit_wait(&c, cb);
 
 	uint64_t samples[2] = {0, 0};
@@ -178,6 +275,18 @@ static int run(struct ctx *cp, int mode)
 		bad += !ok;
 	}
 	vkUnmapMemory(c.dev, bmem);
+	if (mode == 3) {
+		/* the first begin's views: the scratch image, cleared green and drawn */
+		CHECK(vkMapMemory(c.dev, sbmem, 0, VK_WHOLE_SIZE, 0, (void **)&p));
+		const uint8_t *g = p + (1 * W + 1) * 4, *r = p + (32 * W + 32) * 4;
+		int ok = g[0] < 3 && g[1] > 252 && g[2] < 3 && r[0] > 252 && r[1] < 3 && r[2] < 3;
+		printf("  scratch image (first begin): (1,1) = %02x%02x%02x%02x want green, (32,32) = %02x%02x%02x%02x want red %s\n", g[0], g[1], g[2],
+		       g[3], r[0], r[1], r[2], r[3], ok ? "ok" : "WRONG");
+		bad += !ok;
+		vkUnmapMemory(c.dev, sbmem);
+		vkDestroyBuffer(c.dev, sbuf, NULL);
+		vkFreeMemory(c.dev, sbmem, NULL);
+	}
 	CHECK(vkDeviceWaitIdle(c.dev));
 	vkDestroyCommandPool(c.dev, pool, NULL);
 	vkDestroyPipeline(c.dev, pipe, NULL);
@@ -194,18 +303,32 @@ static int run(struct ctx *cp, int mode)
 	vkDestroyImageView(c.dev, dview, NULL);
 	vkDestroyImage(c.dev, dimg, NULL);
 	vkFreeMemory(c.dev, dmem, NULL);
+	if (simg) {
+		vkDestroyImageView(c.dev, sview, NULL);
+		vkDestroyImage(c.dev, simg, NULL);
+		vkFreeMemory(c.dev, smem, NULL);
+	}
 	return bad;
 }
 
 int main(void)
 {
 	struct ctx c;
-	ctx_init(&c, "vk-depth");
+	VkPhysicalDeviceVulkan12Features f12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .imagelessFramebuffer = VK_TRUE,
+		.separateDepthStencilLayouts = VK_TRUE};
+	ctx_init_api(&c, "vk-depth", VK_API_VERSION_1_2, &f12);
 	int bad = run(&c, 0);
 	printf("  (negative viewport height)\n");
 	bad += run(&c, 1);
 	printf("  (depth cleared by a render pass of its own, then loaded)\n");
 	bad += run(&c, 2);
+	VkPhysicalDeviceVulkan12Features got = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+	VkPhysicalDeviceFeatures2 f2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &got};
+	vkGetPhysicalDeviceFeatures2(c.pd, &f2);
+	printf("  (vkCreateRenderPass2, depth-only layouts, an imageless framebuffer begun twice; imagelessFramebuffer %u, separateDepthStencilLayouts %u)\n",
+	       got.imagelessFramebuffer, got.separateDepthStencilLayouts);
+	bad += !got.imagelessFramebuffer || !got.separateDepthStencilLayouts;
+	bad += run(&c, 3);
 	vkDestroyDevice(c.dev, NULL);
 	vkDestroyInstance(c.inst, NULL);
 	printf("vk-depth: %s\n", bad ? "FAIL" : "ok");

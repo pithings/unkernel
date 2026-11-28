@@ -5,7 +5,9 @@
 // in non-uniform control flow (Tint refuses it): vkCreateComputePipelines
 // returns VK_ERROR_INVALID_SHADER_NV and a null handle. (2) A 512-wide
 // workgroup reducing through shared memory, on a device allowing fewer
-// invocations: refused the same way. (3) The device goes on: a good
+// invocations, runs as virtual invocations: its pipeline is made and the
+// sum is right; with its barriers in a function (which virtual invocations
+// do not take) it is refused as in (1). (3) The device goes on: a good
 // pipeline still computes. (4) A command buffer recording vkCmdDispatchBase
 // with a non-zero base (WebGPU has no base workgroup): vkQueueSubmit returns
 // VK_ERROR_DEVICE_LOST, and so do the waits after it. (5) On a new
@@ -18,6 +20,7 @@
 #include "barrier_comp.h"
 #include "double_comp.h"
 #include "shared512_comp.h"
+#include "shared512fn_comp.h"
 #include "wide_comp.h"
 
 static int fails;
@@ -116,13 +119,44 @@ int main(void)
 	VkResult r = comp_pipeline(&c, &k, spv_barrier_comp, sizeof spv_barrier_comp, &bad);
 	expect("barrier in non-uniform control flow: vkCreateComputePipelines refuses", r == VK_ERROR_INVALID_SHADER_NV && bad == VK_NULL_HANDLE, r);
 
-	/* (2) refused: 512 invocations sharing memory cannot be split */
+	/* (2) 512 invocations sharing memory: on a narrower device they cannot be
+	 * split, and run as virtual invocations (vk/PROTOCOL.md, Amendments,
+	 * "Virtual invocations"), the reduction's sum right */
 	int narrow = props.limits.maxComputeWorkGroupInvocations < 512;
+	{
+		struct comp k2;
+		comp_init(&c, &k2, 512);
+		float *v = (float *)k2.p, want = 0;
+		for (uint32_t i = 0; i < 512; i++)
+			want += v[i] = (float)(i % 7);
+		VkPipeline wide512;
+		r = comp_pipeline(&c, &k2, spv_shared512_comp, sizeof spv_shared512_comp, &wide512);
+		expect("512-wide workgroup with shared memory: vkCreateComputePipelines makes it", r == VK_SUCCESS && wide512 != VK_NULL_HANDLE, r);
+		if (r == VK_SUCCESS) {
+			comp_record(&k2, wide512, 0);
+			vkCmdDispatch(k2.cb, 1, 1, 1);
+			submit_wait(&c, k2.cb);
+			printf("vk-loud: 512-wide reduction: %g, want %g (the device allows %u invocations)\n", v[0], want,
+			       props.limits.maxComputeWorkGroupInvocations);
+			expect("and its reduction through shared memory is right", v[0] == want, VK_SUCCESS);
+			vkDestroyPipeline(c.dev, wide512, NULL);
+		}
+		vkUnmapMemory(c.dev, k2.mem);
+		vkDestroyCommandPool(c.dev, k2.pool, NULL);
+		vkDestroyDescriptorPool(c.dev, k2.dp, NULL);
+		vkDestroyPipelineLayout(c.dev, k2.pl, NULL);
+		vkDestroyDescriptorSetLayout(c.dev, k2.dsl, NULL);
+		vkDestroyBuffer(c.dev, k2.buf, NULL);
+		vkFreeMemory(c.dev, k2.mem, NULL);
+	}
+	/* refused: the same with its barriers in a function, which virtual
+	 * invocations do not take */
 	if (narrow) {
-		r = comp_pipeline(&c, &k, spv_shared512_comp, sizeof spv_shared512_comp, &bad);
-		expect("512-wide workgroup with shared memory: vkCreateComputePipelines refuses", r == VK_ERROR_INVALID_SHADER_NV && bad == VK_NULL_HANDLE, r);
+		r = comp_pipeline(&c, &k, spv_shared512fn_comp, sizeof spv_shared512fn_comp, &bad);
+		expect("512-wide workgroup with barriers in a function: vkCreateComputePipelines refuses", r == VK_ERROR_INVALID_SHADER_NV && bad == VK_NULL_HANDLE, r);
 	} else {
-		printf("vk-loud: 512-wide workgroups: skipped (the device allows %u invocations)\n", props.limits.maxComputeWorkGroupInvocations);
+		printf("vk-loud: 512-wide workgroups with barriers in a function: skipped (the device allows %u invocations)\n",
+		       props.limits.maxComputeWorkGroupInvocations);
 	}
 
 	/* (3) the device goes on */

@@ -75,14 +75,6 @@ pub fn check(words: &[u32]) -> Result<(), String> {
 		if n == 0 || i + n > words.len() {
 			return Err(format!("SPIR-V: bad instruction length at word {}", i));
 		}
-		let a = &words[i + 1..i + n];
-		match words[i] & 0xffff {
-			// Features WebGPU lacks, named plainly.
-			25 if a.len() >= 3 && a[2] == 5 => {
-				return Err("texel buffers (OpTypeImage Dim Buffer: samplerBuffer, imageBuffer) are not supported by WebGPU".into())
-			}
-			_ => {}
-		}
 		i += n;
 	}
 	Ok(())
@@ -613,8 +605,8 @@ pub fn wrap_strided_arrays(words: Vec<u32>) -> Result<Vec<u32>, String> {
 // Specialization: every OpSpecConstant* becomes the plain constant with the
 // value the host gave for its SpecId (else its default), before naga sees
 // it, so spec constants also work where naga's overrides do not (array
-// sizes, the workgroup size). OpSpecConstantOp is left to naga, which
-// rejects it.
+// sizes, the workgroup size). OpSpecConstantOp is folded next
+// (fold_spec_ops).
 pub fn bake_spec_constants(words: Vec<u32>, spec: &[(String, f64)]) -> Vec<u32> {
 	const OP_TYPE_BOOL: u32 = 20;
 	const OP_TYPE_INT: u32 = 21;
@@ -731,114 +723,380 @@ pub fn bake_spec_constants(words: Vec<u32>, spec: &[(String, f64)]) -> Vec<u32> 
 	out
 }
 
-// OpSpecConstantOp on (now baked) 32-bit integer and bool constants, as
-// glslang emits for `const uint N2 = N * 2;`, folded to plain constants
-// (naga's spv-in rejects OpSpecConstantOp). Others are left to naga.
+// OpSpecConstantOp on (now baked) constants, folded to plain constants
+// (naga's spv-in rejects OpSpecConstantOp, "unsupported instruction
+// SpecConstantOp at Type"): every operation the Shader capability allows
+// there, plus Bitcast of equal widths and QuantizeToF16, on integers of 8
+// to 64 bits and booleans, scalars and vectors (component-wise), as glslang
+// emits for `const uint N2 = N * 2;` or `gl_WorkGroupSize.xy * 2u`; on
+// floats only what needs no float arithmetic (Select, FConvert,
+// QuantizeToF16, the composite operations), as vkQuake's world.frag and
+// ssao_evaluate (`quality == 1u ? 2.0 : 1.0`, also in half). An operation
+// on something that is not a constant is left to naga, which rejects it.
 pub fn fold_spec_ops(words: Vec<u32>) -> Vec<u32> {
+	#[derive(Clone, Copy, PartialEq)]
+	enum Ty {
+		Int(u32, bool),
+		Float(u32),
+		Bool,
+		Vector(u32, u32),
+	}
 	const OP_TYPE_BOOL: u32 = 20;
 	const OP_TYPE_INT: u32 = 21;
+	const OP_TYPE_FLOAT: u32 = 22;
+	const OP_TYPE_VECTOR: u32 = 23;
 	const OP_CONSTANT_TRUE: u32 = 41;
 	const OP_CONSTANT_FALSE: u32 = 42;
 	const OP_CONSTANT: u32 = 43;
+	const OP_CONSTANT_COMPOSITE: u32 = 44;
+	const OP_CONSTANT_NULL: u32 = 46;
 	const OP_SPEC_CONSTANT_OP: u32 = 52;
-	let mut ints: HashMap<u32, bool> = HashMap::new(); // 32-bit int type -> signed
-	let mut bools: Vec<u32> = Vec::new();
-	let mut vals: HashMap<u32, u32> = HashMap::new();
-	let mut comps: HashMap<u32, Vec<u32>> = HashMap::new(); // constant composite -> members
+	const OP_VECTOR_SHUFFLE: u32 = 79;
+	const OP_COMPOSITE_EXTRACT: u32 = 81;
+	const OP_COMPOSITE_INSERT: u32 = 82;
+	const OP_SELECT: u32 = 169;
+
+	fn mask(w: u32) -> u64 {
+		if w >= 64 {
+			u64::MAX
+		} else {
+			(1u64 << w) - 1
+		}
+	}
+	fn sext(x: u64, w: u32) -> i64 {
+		let s = 64 - w.clamp(1, 64);
+		((x << s) as i64) >> s
+	}
+	fn width(t: Ty) -> u32 {
+		match t {
+			Ty::Int(w, _) | Ty::Float(w) => w,
+			_ => 1,
+		}
+	}
+	fn to_f64(bits: u64, w: u32) -> Option<f64> {
+		match w {
+			16 => Some(f16_to_f32(bits as u16) as f64),
+			32 => Some(f32::from_bits(bits as u32) as f64),
+			64 => Some(f64::from_bits(bits)),
+			_ => None,
+		}
+	}
+	// One scalar operation: the result type and the operands' (type, bits),
+	// bits masked to the type's width. None when it does not apply.
+	fn scalar_op(sop: u32, rty: Ty, x: &[(Ty, u64)]) -> Option<u64> {
+		let rw = width(rty);
+		let arg = |k: usize| x.get(k).copied();
+		let (t0, a) = arg(0)?;
+		let w0 = width(t0);
+		let ints = x.iter().all(|(t, _)| matches!(t, Ty::Int(..)));
+		let bools = x.iter().all(|(t, _)| *t == Ty::Bool);
+		let b = || arg(1).map(|(_, v)| v);
+		let flag = |f: bool| Some(f as u64);
+		let r = match sop {
+			// Select: either operand as it is (any scalar type).
+			OP_SELECT => {
+				let (c, (_, p), (_, q)) = (a, arg(1)?, arg(2)?);
+				return Some(if c != 0 { p } else { q });
+			}
+			124 if w0 == rw && matches!(rty, Ty::Int(..) | Ty::Float(_)) => a, // Bitcast
+			115 => {
+				// FConvert (no double rounding: not from 64 to 16 bits)
+				let v = to_f64(a, w0)?;
+				match (w0, rw) {
+					(64, 16) => return None,
+					(_, 16) => f32_to_f16(v as f32) as u64,
+					(_, 32) => (v as f32).to_bits() as u64,
+					(_, 64) => v.to_bits(),
+					_ => return None,
+				}
+			}
+			116 if w0 == 32 => f16_to_f32(f32_to_f16(f32::from_bits(a as u32))).to_bits() as u64, // QuantizeToF16
+			_ if bools => match sop {
+				164 => ((a != 0) == (b()? != 0)) as u64, // LogicalEqual
+				165 => ((a != 0) != (b()? != 0)) as u64,
+				166 => (a != 0 || b()? != 0) as u64,
+				167 => (a != 0 && b()? != 0) as u64,
+				168 => (a == 0) as u64,
+				_ => return None,
+			},
+			_ if ints => {
+				let (sa, sb) = (sext(a, w0), b().map(|v| sext(v, width(arg(1).unwrap().0))));
+				let sh = |v: u64| (v % w0 as u64) as u32; // WGSL's shift: by the amount modulo the width
+				match sop {
+					113 => a,                // UConvert: zero-extended (or truncated)
+					114 => sa as u64,        // SConvert: sign-extended
+					126 => sa.wrapping_neg() as u64,
+					200 => !a,
+					128 => a.wrapping_add(b()?),
+					130 => a.wrapping_sub(b()?),
+					132 => a.wrapping_mul(b()?),
+					// By zero (undefined in Vulkan): x / 0 = x, x % 0 = 0, as
+					// WGSL defines it at run time.
+					134 => a.checked_div(b()?).unwrap_or(a),
+					135 => match sb? {
+						0 => a,
+						d => sa.wrapping_div(d) as u64,
+					},
+					137 => a.checked_rem(b()?).unwrap_or(0),
+					138 => match sb? {
+						0 => 0,
+						d => sa.wrapping_rem(d) as u64,
+					},
+					139 => match sb? {
+						// SMod: the sign of the divisor
+						0 => 0,
+						d => {
+							let r = sa.wrapping_rem(d);
+							(if r != 0 && (r < 0) != (d < 0) { r.wrapping_add(d) } else { r }) as u64
+						}
+					},
+					194 => a >> sh(b()?),
+					195 => (sa >> sh(b()?)) as u64,
+					196 => a << sh(b()?),
+					197 => a | b()?,
+					198 => a ^ b()?,
+					199 => a & b()?,
+					170 => return flag(a == b()?),
+					171 => return flag(a != b()?),
+					172 => return flag(a > b()?),
+					173 => return flag(sa > sb?),
+					174 => return flag(a >= b()?),
+					175 => return flag(sa >= sb?),
+					176 => return flag(a < b()?),
+					177 => return flag(sa < sb?),
+					178 => return flag(a <= b()?),
+					179 => return flag(sa <= sb?),
+					_ => return None,
+				}
+			}
+			_ => return None,
+		};
+		Some(r & mask(rw))
+	}
+
+	let mut types: HashMap<u32, Ty> = HashMap::new();
+	let mut scal: HashMap<u32, (u32, u64)> = HashMap::new(); // scalar constant -> (type, bits)
+	let mut comps: HashMap<u32, (u32, Vec<u32>)> = HashMap::new(); // composite constant -> (type, members)
+	let mut bound = words[3];
 	let mut out: Vec<u32> = Vec::with_capacity(words.len());
 	out.extend_from_slice(&words[..5]);
+	// A folded scalar as a constant of `ty` (narrower signed integers
+	// sign-extended into their word, as SPIR-V wants them).
+	let emit_scalar = |out: &mut Vec<u32>, types: &HashMap<u32, Ty>, ty: u32, id: u32, v: u64| -> bool {
+		match types.get(&ty) {
+			Some(Ty::Bool) => out.extend(inst(if v != 0 { OP_CONSTANT_TRUE } else { OP_CONSTANT_FALSE }, &[ty, id])),
+			Some(&Ty::Int(w, signed)) => {
+				let lo = if signed && w < 32 { sext(v, w) as u32 } else { v as u32 };
+				if w == 64 {
+					out.extend(inst(OP_CONSTANT, &[ty, id, lo, (v >> 32) as u32]));
+				} else {
+					out.extend(inst(OP_CONSTANT, &[ty, id, lo]));
+				}
+			}
+			Some(&Ty::Float(w)) => {
+				if w == 64 {
+					out.extend(inst(OP_CONSTANT, &[ty, id, v as u32, (v >> 32) as u32]));
+				} else {
+					out.extend(inst(OP_CONSTANT, &[ty, id, v as u32]));
+				}
+			}
+			_ => return false,
+		}
+		true
+	};
 	let mut i = 5;
 	while i < words.len() {
 		let n = (words[i] >> 16) as usize;
 		let a = &words[i + 1..i + n];
 		let o = words[i] & 0xffff;
 		match o {
-			OP_TYPE_INT if a[1] == 32 => {
-				ints.insert(a[0], a[2] != 0);
+			OP_TYPE_BOOL => {
+				types.insert(a[0], Ty::Bool);
 			}
-			OP_TYPE_BOOL => bools.push(a[0]),
-			OP_CONSTANT if ints.contains_key(&a[0]) && a.len() == 3 => {
-				vals.insert(a[1], a[2]);
+			OP_TYPE_INT if a.len() >= 3 => {
+				types.insert(a[0], Ty::Int(a[1], a[2] != 0));
 			}
-			OP_CONSTANT_TRUE => {
-				vals.insert(a[1], 1);
+			OP_TYPE_FLOAT if a.len() >= 2 => {
+				types.insert(a[0], Ty::Float(a[1]));
 			}
-			44 => {
-				comps.insert(a[1], a[2..].to_vec());
+			OP_TYPE_VECTOR if a.len() >= 3 => {
+				types.insert(a[0], Ty::Vector(a[1], a[2]));
 			}
-			OP_CONSTANT_FALSE => {
-				vals.insert(a[1], 0);
+			OP_CONSTANT_TRUE | OP_CONSTANT_FALSE if a.len() >= 2 => {
+				scal.insert(a[1], (a[0], (o == OP_CONSTANT_TRUE) as u64));
+			}
+			OP_CONSTANT if a.len() >= 3 => {
+				if let Some(&(Ty::Int(w, _) | Ty::Float(w))) = types.get(&a[0]) {
+					let hi = if w == 64 { a.get(3).copied().unwrap_or(0) as u64 } else { 0 };
+					scal.insert(a[1], (a[0], (a[2] as u64 | hi << 32) & mask(w)));
+				}
+			}
+			OP_CONSTANT_NULL if a.len() >= 2 => {
+				if let Some(Ty::Int(..) | Ty::Float(_) | Ty::Bool) = types.get(&a[0]) {
+					scal.insert(a[1], (a[0], 0));
+				}
+			}
+			OP_CONSTANT_COMPOSITE if a.len() >= 2 => {
+				comps.insert(a[1], (a[0], a[2..].to_vec()));
 			}
 			_ => {}
 		}
 		if o == OP_SPEC_CONSTANT_OP && a.len() >= 4 {
 			let (ty, id, sop) = (a[0], a[1], a[2]);
-			let x: Vec<Option<u32>> = a[3..].iter().map(|v| vals.get(v).copied()).collect();
-			let u = |k: usize| x.get(k).copied().flatten();
-			let s = |k: usize| u(k).map(|v| v as i32);
-			let b = |f: bool| Some(f as u32);
-			let r: Option<u32> = (|| match sop {
-				126 => s(0).map(|v| v.wrapping_neg() as u32),
-				128 => Some(u(0)?.wrapping_add(u(1)?)),
-				130 => Some(u(0)?.wrapping_sub(u(1)?)),
-				132 => Some(u(0)?.wrapping_mul(u(1)?)),
-				// By zero (undefined in Vulkan): x / 0 = x, x % 0 = 0, as
-				// WGSL defines it at run time.
-				134 => Some(u(0)?.checked_div(u(1)?).unwrap_or(u(0)?)),
-				135 => Some(if s(1)? == 0 { u(0)? } else { s(0)?.wrapping_div(s(1)?) as u32 }),
-				137 => Some(u(0)?.checked_rem(u(1)?).unwrap_or(0)),
-				138 => Some(if s(1)? == 0 { 0 } else { s(0)?.wrapping_rem(s(1)?) as u32 }),
-				139 => {
-					let (p, q) = (s(0)?, s(1)?);
-					Some(if q == 0 { 0 } else { p.wrapping_rem(q).wrapping_add(q).wrapping_rem(q) as u32 })
+			let start = out.len();
+			let start_bound = bound;
+			let done = (|| -> Option<()> {
+				// A composite result made of existing constants.
+				fn composite(out: &mut Vec<u32>, comps: &mut HashMap<u32, (u32, Vec<u32>)>, ty: u32, id: u32, members: Vec<u32>) {
+					let mut ops = vec![ty, id];
+					ops.extend(&members);
+					out.extend(inst(OP_CONSTANT_COMPOSITE, &ops));
+					comps.insert(id, (ty, members));
 				}
-				194 => Some(u(0)?.wrapping_shr(u(1)?)),
-				195 => Some(s(0)?.wrapping_shr(u(1)?) as u32),
-				196 => Some(u(0)?.wrapping_shl(u(1)?)),
-				197 => Some(u(0)? | u(1)?),
-				198 => Some(u(0)? ^ u(1)?),
-				199 => Some(u(0)? & u(1)?),
-				200 => Some(!u(0)?),
-				164 => b(u(0)? == u(1)?),
-				165 => b(u(0)? != u(1)?),
-				166 => b(u(0)? != 0 || u(1)? != 0),
-				167 => b(u(0)? != 0 && u(1)? != 0),
-				168 => b(u(0)? == 0),
-				169 => Some(if u(0)? != 0 { u(1)? } else { u(2)? }),
-				170 => b(u(0)? == u(1)?),
-				171 => b(u(0)? != u(1)?),
-				172 => b(u(0)? > u(1)?),
-				173 => b(s(0)? > s(1)?),
-				174 => b(u(0)? >= u(1)?),
-				175 => b(s(0)? >= s(1)?),
-				176 => b(u(0)? < u(1)?),
-				177 => b(s(0)? < s(1)?),
-				178 => b(u(0)? <= u(1)?),
-				179 => b(s(0)? <= s(1)?),
-				113 | 114 | 124 => u(0), // UConvert, SConvert, Bitcast (32-bit)
-				// CompositeExtract of a constant composite (gl_WorkGroupSize.x)
-				81 => comps.get(&a[3]).and_then(|m| m.get(*a.get(4)? as usize)).and_then(|c| vals.get(c)).copied(),
-				_ => None,
+				match sop {
+					OP_COMPOSITE_EXTRACT if a.len() >= 5 => {
+						let mut cur = a[3];
+						for &k in &a[4..] {
+							cur = *comps.get(&cur)?.1.get(k as usize)?;
+						}
+						if let Some(&(_, v)) = scal.get(&cur) {
+							if !emit_scalar(&mut out, &types, ty, id, v) {
+								return None;
+							}
+							scal.insert(id, (ty, v));
+						} else {
+							let m = comps.get(&cur)?.1.clone();
+							composite(&mut out, &mut comps, ty, id, m);
+						}
+						return Some(());
+					}
+					OP_COMPOSITE_INSERT if a.len() == 6 => {
+						let mut m = comps.get(&a[4])?.1.clone();
+						*m.get_mut(a[5] as usize)? = a[3];
+						composite(&mut out, &mut comps, ty, id, m);
+						return Some(());
+					}
+					OP_VECTOR_SHUFFLE if a.len() >= 6 => {
+						let mut all = comps.get(&a[3])?.1.clone();
+						all.extend(&comps.get(&a[4])?.1);
+						// 0xFFFFFFFF: an undefined component; any value is right.
+						let m = a[5..].iter().map(|&k| all.get(if k == u32::MAX { 0 } else { k as usize }).copied()).collect::<Option<Vec<u32>>>()?;
+						composite(&mut out, &mut comps, ty, id, m);
+						return Some(());
+					}
+					// A scalar condition choosing a whole composite.
+					OP_SELECT if a.len() == 6 && scal.contains_key(&a[3]) && !scal.contains_key(&a[4]) => {
+						let pick = if scal[&a[3]].1 != 0 { a[4] } else { a[5] };
+						let m = comps.get(&pick)?.1.clone();
+						composite(&mut out, &mut comps, ty, id, m);
+						return Some(());
+					}
+					_ => {}
+				}
+				let operand = |x: u32, k: Option<usize>| -> Option<(Ty, u64)> {
+					let c = match (k, comps.get(&x)) {
+						(Some(k), Some((_, m))) => *m.get(k)?,
+						_ => x,
+					};
+					let &(t, v) = scal.get(&c)?;
+					Some((*types.get(&t)?, v))
+				};
+				match types.get(&ty).copied()? {
+					Ty::Vector(c, cnt) => {
+						let rty = *types.get(&c)?;
+						let vals = (0..cnt as usize)
+							.map(|k| scalar_op(sop, rty, &a[3..].iter().map(|&v| operand(v, Some(k))).collect::<Option<Vec<_>>>()?))
+							.collect::<Option<Vec<u64>>>()?;
+						let mut members = Vec::new();
+						for v in vals {
+							let m = bound;
+							bound += 1;
+							if !emit_scalar(&mut out, &types, c, m, v) {
+								return None;
+							}
+							scal.insert(m, (c, v));
+							members.push(m);
+						}
+						composite(&mut out, &mut comps, ty, id, members);
+					}
+					rty => {
+						let x = a[3..].iter().map(|&v| operand(v, None)).collect::<Option<Vec<_>>>()?;
+						let v = scalar_op(sop, rty, &x)?;
+						if !emit_scalar(&mut out, &types, ty, id, v) {
+							return None;
+						}
+						scal.insert(id, (ty, v));
+					}
+				}
+				Some(())
 			})();
-			if let Some(v) = r {
-				if bools.contains(&ty) {
-					out.extend(inst(if v != 0 { OP_CONSTANT_TRUE } else { OP_CONSTANT_FALSE }, &[ty, id]));
-					vals.insert(id, (v != 0) as u32);
-					i += n;
-					continue;
-				}
-				if ints.contains_key(&ty) {
-					out.extend(inst(OP_CONSTANT, &[ty, id, v]));
-					vals.insert(id, v);
-					i += n;
-					continue;
-				}
+			if done.is_some() {
+				i += n;
+				continue;
 			}
+			out.truncate(start);
+			bound = start_bound;
 		}
 		out.extend_from_slice(&words[i..i + n]);
 		i += n;
 	}
+	out[3] = bound;
 	out
+}
+
+// IEEE half <-> single precision (round to nearest even), for folding.
+fn f16_to_f32(h: u16) -> f32 {
+	let sign = ((h as u32) & 0x8000) << 16;
+	let exp = ((h >> 10) & 0x1f) as u32;
+	let man = (h & 0x3ff) as u32;
+	let bits = match exp {
+		0 if man == 0 => sign,
+		0 => {
+			// subnormal: normalized
+			let (mut e, mut m) = (113u32, man);
+			while m & 0x400 == 0 {
+				m <<= 1;
+				e -= 1;
+			}
+			sign | (e << 23) | ((m & 0x3ff) << 13)
+		}
+		0x1f => sign | 0x7f80_0000 | (man << 13),
+		_ => sign | ((exp + 112) << 23) | (man << 13),
+	};
+	f32::from_bits(bits)
+}
+
+fn f32_to_f16(f: f32) -> u16 {
+	let x = f.to_bits();
+	let sign = ((x >> 16) & 0x8000) as u16;
+	let exp = ((x >> 23) & 0xff) as i32;
+	let man = x & 0x7f_ffff;
+	if exp == 0xff {
+		return sign | 0x7c00 | if man != 0 { 0x200 | (man >> 13) as u16 } else { 0 };
+	}
+	let e = exp - 127 + 15;
+	if e >= 0x1f {
+		return sign | 0x7c00;
+	}
+	if e <= 0 {
+		if e < -10 {
+			return sign;
+		}
+		let m = man | 0x80_0000;
+		let shift = (14 - e) as u32;
+		let half = 1u32 << (shift - 1);
+		let (mut r, rem) = (m >> shift, m & ((1u32 << shift) - 1));
+		if rem > half || (rem == half && r & 1 != 0) {
+			r += 1;
+		}
+		return sign | r as u16;
+	}
+	let mut r = ((e as u32) << 10) | (man >> 13);
+	let rem = man & 0x1fff;
+	if rem > 0x1000 || (rem == 0x1000 && r & 1 != 0) {
+		r += 1; // may carry into the exponent, up to infinity: right
+	}
+	sign | r as u16
 }
 
 // `readonly buffer` / `writeonly buffer` as older glslang emits them (the
@@ -910,6 +1168,160 @@ pub fn member_access_to_variables(words: Vec<u32>) -> Vec<u32> {
 	out.extend_from_slice(&words[..last_annotation]);
 	out.extend(add);
 	out.extend_from_slice(&words[last_annotation..]);
+	out
+}
+
+// Storage buffers the module never writes, as GLSL `buffer` blocks without
+// `readonly` (GZDoom's bone and light buffers, read by its vertex shaders):
+// glslang decorates NonWritable only for `readonly`, so such a block became
+// read_write in WGSL, which WebGPU refuses in a vertex stage. A storage
+// buffer variable (StorageBuffer, or Uniform with a BufferBlock struct; an
+// array of them too) gets NonWritable when no pointer into it reaches
+// anything but OpLoad, OpAtomicLoad, OpArrayLength, an access chain or
+// OpCopyObject: a store, an atomic, a function call or any use this pass
+// does not know counts as a write. Variables sharing a binding (views
+// merge_aliased_buffers and small.rs join into one) are marked only when
+// none of them is written. Variables decorated NonReadable are left alone,
+// and so is a module with variable pointers (pointers can then join out of
+// the order this single walk sees).
+pub fn mark_unwritten_buffers(words: Vec<u32>) -> Vec<u32> {
+	const OP_CAPABILITY: u32 = 17;
+	const OP_TYPE_ARRAY: u32 = 28;
+	const OP_TYPE_RUNTIME_ARRAY: u32 = 29;
+	const OP_FUNCTION: u32 = 54;
+	const OP_ACCESS_CHAIN: u32 = 65;
+	const OP_IN_BOUNDS_ACCESS_CHAIN: u32 = 66;
+	const OP_PTR_ACCESS_CHAIN: u32 = 67;
+	const OP_ARRAY_LENGTH: u32 = 68;
+	const OP_IN_BOUNDS_PTR_ACCESS_CHAIN: u32 = 70;
+	const OP_COPY_OBJECT: u32 = 83;
+	const OP_ATOMIC_LOAD: u32 = 227;
+	const OP_DECORATE_ID: u32 = 332;
+	const OP_DECORATE_STRING: u32 = 5632;
+	const OP_MEMBER_DECORATE_STRING: u32 = 5633;
+	const DEC_BUFFER_BLOCK: u32 = 3;
+	const DEC_NON_WRITABLE: u32 = 24;
+	const DEC_NON_READABLE: u32 = 25;
+	const SC_UNIFORM: u32 = 2;
+	const SC_STORAGE_BUFFER: u32 = 12;
+	const CAP_VARIABLE_POINTERS_STORAGE_BUFFER: u32 = 4441;
+	const CAP_VARIABLE_POINTERS: u32 = 4442;
+
+	let mut has = std::collections::HashSet::<(u32, u32)>::new();
+	let (mut elem, mut pointee) = (HashMap::<u32, u32>::new(), HashMap::<u32, u32>::new());
+	let (mut set, mut binding) = (HashMap::<u32, u32>::new(), HashMap::<u32, u32>::new());
+	let mut vars: Vec<u32> = Vec::new();
+	let mut root: HashMap<u32, u32> = HashMap::new(); // pointer -> the storage variable it points into
+	let mut written = std::collections::HashSet::<u32>::new();
+	let mut last_annotation = 0;
+	let mut in_function = false;
+	let mut i = 5;
+	while i < words.len() {
+		let n = (words[i] >> 16) as usize;
+		let o = words[i] & 0xffff;
+		let a = &words[i + 1..i + n];
+		if o == OP_FUNCTION {
+			in_function = true;
+		}
+		if !in_function {
+			match o {
+				OP_CAPABILITY if a.first().is_some_and(|&c| c == CAP_VARIABLE_POINTERS || c == CAP_VARIABLE_POINTERS_STORAGE_BUFFER) => return words,
+				OP_DECORATE if a.len() >= 2 => {
+					has.insert((a[0], a[1]));
+					if a.len() >= 3 && a[1] == DEC_BINDING {
+						binding.insert(a[0], a[2]);
+					}
+					if a.len() >= 3 && a[1] == DEC_DESCRIPTOR_SET {
+						set.insert(a[0], a[2]);
+					}
+					last_annotation = i + n;
+				}
+				OP_MEMBER_DECORATE | OP_DECORATE_ID | OP_DECORATE_STRING | OP_MEMBER_DECORATE_STRING | 73 | 74 | 75 => last_annotation = i + n,
+				OP_TYPE_ARRAY | OP_TYPE_RUNTIME_ARRAY if a.len() >= 2 => {
+					elem.insert(a[0], a[1]);
+				}
+				OP_TYPE_POINTER if a.len() >= 3 => {
+					pointee.insert(a[0], a[2]);
+				}
+				OP_VARIABLE if a.len() >= 3 && (a[2] == SC_STORAGE_BUFFER || a[2] == SC_UNIFORM) => {
+					let mut t = pointee.get(&a[0]).copied().unwrap_or(0);
+					while let Some(&e) = elem.get(&t) {
+						t = e;
+					}
+					if a[2] == SC_STORAGE_BUFFER || has.contains(&(t, DEC_BUFFER_BLOCK)) {
+						vars.push(a[1]);
+						root.insert(a[1], a[1]);
+					}
+				}
+				_ => {}
+			}
+			i += n;
+			continue;
+		}
+		match o {
+			OP_ACCESS_CHAIN | OP_IN_BOUNDS_ACCESS_CHAIN | OP_PTR_ACCESS_CHAIN | OP_IN_BOUNDS_PTR_ACCESS_CHAIN | OP_COPY_OBJECT if a.len() >= 3 => {
+				if let Some(&r) = root.get(&a[2]) {
+					root.insert(a[1], r);
+				}
+				// The indices are integers, never pointers into a buffer.
+			}
+			OP_LOAD | OP_ATOMIC_LOAD | OP_ARRAY_LENGTH if a.len() >= 3 => {}
+			_ => {
+				for x in a {
+					if let Some(&r) = root.get(x) {
+						written.insert(r);
+					}
+				}
+			}
+		}
+		i += n;
+	}
+	let slot = |v: u32| (set.get(&v).copied().unwrap_or(0), binding.get(&v).copied());
+	let written_slots: std::collections::HashSet<(u32, Option<u32>)> = written.iter().map(|&v| slot(v)).collect();
+	let mut add = Vec::new();
+	for v in vars {
+		if has.contains(&(v, DEC_NON_WRITABLE)) || has.contains(&(v, DEC_NON_READABLE)) || written.contains(&v) || written_slots.contains(&slot(v)) {
+			continue;
+		}
+		add.extend(inst(OP_DECORATE, &[v, DEC_NON_WRITABLE]));
+	}
+	if add.is_empty() || last_annotation == 0 {
+		return words;
+	}
+	let mut out = Vec::with_capacity(words.len() + add.len());
+	out.extend_from_slice(&words[..last_annotation]);
+	out.extend(add);
+	out.extend_from_slice(&words[last_annotation..]);
+	out
+}
+
+// OpLine and OpNoLine (source positions only): a -g build (Taisei compiles
+// its shaders with glslang's debug info) has OpLine among the types and
+// globals, which naga's spv-in refuses ("unsupported instruction Line at
+// Type"). Dropped everywhere.
+pub fn strip_debug_lines(words: Vec<u32>) -> Vec<u32> {
+	const OP_LINE: u32 = 8;
+	const OP_NO_LINE: u32 = 317;
+	let is_line = |w: u32| matches!(w & 0xffff, OP_LINE | OP_NO_LINE);
+	let mut any = false;
+	let mut i = 5;
+	while i < words.len() {
+		any |= is_line(words[i]);
+		i += (words[i] >> 16) as usize;
+	}
+	if !any {
+		return words;
+	}
+	let mut out: Vec<u32> = Vec::with_capacity(words.len());
+	out.extend_from_slice(&words[..5]);
+	let mut i = 5;
+	while i < words.len() {
+		let n = (words[i] >> 16) as usize;
+		if !is_line(words[i]) {
+			out.extend_from_slice(&words[i..i + n]);
+		}
+		i += n;
+	}
 	out
 }
 
@@ -2340,6 +2752,254 @@ fn dual_source_index(words: Vec<u32>) -> Vec<u32> {
 	out
 }
 
+// gl_SampleMask and gl_SampleMaskIn (vkQuake's MSAA SSAO composite):
+// SPIR-V's are int[1] (or uint[1]), naga's a u32 (it writes the output's
+// default as a u32 into the array, "Initializer doesn't match the variable
+// type", and refuses an array input). Each becomes a u32 variable: access
+// chains to its element go, stores of an int are bitcast, loads bitcast
+// back. A mask wider than one word is left to naga (WebGPU has at most 32
+// samples).
+pub fn output_sample_mask(words: Vec<u32>) -> Vec<u32> {
+	const OP_TYPE_INT: u32 = 21;
+	const OP_TYPE_ARRAY: u32 = 28;
+	const OP_CONSTANT: u32 = 43;
+	const OP_FUNCTION: u32 = 54;
+	const OP_STORE: u32 = 62;
+	const OP_ACCESS_CHAIN: u32 = 65;
+	const OP_IN_BOUNDS_ACCESS_CHAIN: u32 = 66;
+	const OP_BITCAST: u32 = 124;
+	const BI_SAMPLE_MASK: u32 = 20;
+	const SC_INPUT: u32 = 1;
+	let mut mask_vars = Vec::new();
+	let mut ints: HashMap<u32, bool> = HashMap::new();
+	let mut arrays: HashMap<u32, (u32, u32)> = HashMap::new(); // array type -> (element, length id)
+	let mut pointers: HashMap<u32, u32> = HashMap::new();
+	let mut consts: HashMap<u32, u32> = HashMap::new();
+	let mut vars: HashMap<u32, (u32, u32)> = HashMap::new(); // Input/Output variable -> (pointer type, class)
+	let mut i = 5;
+	while i < words.len() {
+		let n = (words[i] >> 16) as usize;
+		let a = &words[i + 1..i + n];
+		match words[i] & 0xffff {
+			OP_FUNCTION => break,
+			OP_DECORATE if a.len() >= 3 && a[1] == DEC_BUILTIN && a[2] == BI_SAMPLE_MASK => mask_vars.push(a[0]),
+			OP_TYPE_INT if a.len() >= 3 && a[1] == 32 => {
+				ints.insert(a[0], a[2] != 0);
+			}
+			OP_TYPE_ARRAY if a.len() >= 3 => {
+				arrays.insert(a[0], (a[1], a[2]));
+			}
+			OP_TYPE_POINTER if a.len() >= 3 => {
+				pointers.insert(a[0], a[2]);
+			}
+			OP_CONSTANT if a.len() == 3 => {
+				consts.insert(a[1], a[2]);
+			}
+			OP_VARIABLE if a.len() >= 3 && (a[2] == SC_OUTPUT || a[2] == SC_INPUT) => {
+				vars.insert(a[1], (a[0], a[2]));
+			}
+			_ => {}
+		}
+		i += n;
+	}
+	// The variables (arrays of one 32-bit integer): their class, element
+	// type and whether that is signed.
+	let mut masks: HashMap<u32, (u32, u32, bool)> = mask_vars
+		.iter()
+		.filter_map(|&v| {
+			let &(p, class) = vars.get(&v)?;
+			let &(e, len) = arrays.get(pointers.get(&p)?)?;
+			(consts.get(&len) == Some(&1)).then_some(())?;
+			Some((v, (class, e, *ints.get(&e)?)))
+		})
+		.collect();
+	// Every use in a function must be an access chain to the element.
+	let mut i = 5;
+	let mut in_fn = false;
+	while i < words.len() {
+		let n = (words[i] >> 16) as usize;
+		let o = words[i] & 0xffff;
+		let a = &words[i + 1..i + n];
+		in_fn |= o == OP_FUNCTION;
+		if in_fn {
+			let chain = matches!(o, OP_ACCESS_CHAIN | OP_IN_BOUNDS_ACCESS_CHAIN) && a.len() == 4;
+			masks.retain(|v, _| !a.contains(v) || (chain && a[2] == *v));
+		}
+		i += n;
+	}
+	if masks.is_empty() {
+		return words;
+	}
+	let mut bound = words[3];
+	let uint = bound;
+	bound += 1;
+	let mut uint_declared = false;
+	let mut alias: HashMap<u32, u32> = HashMap::new(); // element pointer -> variable
+	let mut out: Vec<u32> = Vec::with_capacity(words.len() + 16);
+	out.extend_from_slice(&words[..5]);
+	let mut i = 5;
+	while i < words.len() {
+		let n = (words[i] >> 16) as usize;
+		let o = words[i] & 0xffff;
+		let a = &words[i + 1..i + n];
+		match o {
+			OP_VARIABLE if a.len() >= 3 && masks.contains_key(&a[1]) => {
+				if !uint_declared {
+					uint_declared = true;
+					out.extend(inst(OP_TYPE_INT, &[uint, 32, 0]));
+				}
+				let ptr = bound;
+				bound += 1;
+				out.extend(inst(OP_TYPE_POINTER, &[ptr, a[2], uint]));
+				out.extend(inst(OP_VARIABLE, &[ptr, a[1], a[2]]));
+			}
+			// The only element (any other index is out of bounds).
+			OP_ACCESS_CHAIN | OP_IN_BOUNDS_ACCESS_CHAIN if a.len() == 4 && masks.contains_key(&a[2]) => {
+				alias.insert(a[1], a[2]);
+			}
+			OP_STORE if a.len() >= 2 && alias.contains_key(&a[0]) => {
+				let var = alias[&a[0]];
+				let mut v = a[1];
+				if masks[&var].2 {
+					v = bound;
+					bound += 1;
+					out.extend(inst(OP_BITCAST, &[uint, v, a[1]]));
+				}
+				out.extend(inst(OP_STORE, &[var, v]));
+			}
+			OP_LOAD if a.len() >= 3 && alias.contains_key(&a[2]) => {
+				let var = alias[&a[2]];
+				let (_, elem, signed) = masks[&var];
+				if signed {
+					out.extend(inst(OP_LOAD, &[uint, bound, var]));
+					out.extend(inst(OP_BITCAST, &[elem, a[1], bound]));
+					bound += 1;
+				} else {
+					out.extend(inst(OP_LOAD, &[uint, a[1], var]));
+				}
+			}
+			_ => out.extend_from_slice(&words[i..i + n]),
+		}
+		i += n;
+	}
+	out[3] = bound;
+	out
+}
+
+// OpIsInf and OpIsNan on 32-bit floats (vkQuake's wboit_resolve and
+// mboit): WGSL has neither, naga's writer refuses them. The bits instead:
+// |x| == 0x7f800000 (inf), |x| > 0x7f800000 (NaN), on a bitcast to u32
+// (vectors component-wise). Other widths are left to naga.
+pub fn lower_isinf_isnan(words: Vec<u32>) -> Vec<u32> {
+	const OP_TYPE_INT: u32 = 21;
+	const OP_TYPE_FLOAT: u32 = 22;
+	const OP_TYPE_VECTOR: u32 = 23;
+	const OP_CONSTANT: u32 = 43;
+	const OP_CONSTANT_COMPOSITE: u32 = 44;
+	const OP_FUNCTION: u32 = 54;
+	const OP_BITCAST: u32 = 124;
+	const OP_IS_NAN: u32 = 156;
+	const OP_IS_INF: u32 = 157;
+	const OP_IEQUAL: u32 = 170;
+	const OP_UGREATER_THAN: u32 = 172;
+	const OP_BITWISE_AND: u32 = 199;
+	let (mut f32s, mut vectors, mut val_ty) = (Vec::new(), HashMap::<u32, (u32, u32)>::new(), HashMap::<u32, u32>::new());
+	let mut any = false;
+	let mut i = 5;
+	while i < words.len() {
+		let n = (words[i] >> 16) as usize;
+		let o = words[i] & 0xffff;
+		let a = &words[i + 1..i + n];
+		match o {
+			OP_TYPE_FLOAT if a.len() >= 2 && a[1] == 32 => f32s.push(a[0]),
+			OP_TYPE_VECTOR if a.len() >= 3 => {
+				vectors.insert(a[0], (a[1], a[2]));
+			}
+			OP_IS_NAN | OP_IS_INF => any = true,
+			_ => {}
+		}
+		// Result-typed instructions: (type, id) first.
+		if n >= 3 && !(19..=39).contains(&o) && !matches!(o, 5 | 6 | 7 | 10 | 11 | 15 | 16 | 17 | 71 | 72 | 331 | 332) {
+			val_ty.insert(a[1], a[0]);
+		}
+		i += n;
+	}
+	if !any {
+		return words;
+	}
+	// The float operand's component count, when it is f32 or vecN<f32>.
+	let count = |x: u32| -> Option<u32> {
+		let t = *val_ty.get(&x)?;
+		if f32s.contains(&t) {
+			return Some(1);
+		}
+		let &(c, k) = vectors.get(&t)?;
+		f32s.contains(&c).then_some(k)
+	};
+	let mut bound = words[3];
+	let mut id = || {
+		bound += 1;
+		bound - 1
+	};
+	let (uint, abs_mask, inf) = (id(), id(), id());
+	// uvecN and its two constants, per component count used.
+	let mut vec_ids: HashMap<u32, (u32, u32, u32)> = HashMap::new();
+	let mut i = 5;
+	while i < words.len() {
+		let n = (words[i] >> 16) as usize;
+		let o = words[i] & 0xffff;
+		let a = &words[i + 1..i + n];
+		if (o == OP_IS_NAN || o == OP_IS_INF) && a.len() == 3 {
+			if let Some(k) = count(a[2]).filter(|&k| k > 1) {
+				vec_ids.entry(k).or_insert_with(|| (id(), id(), id()));
+			}
+		}
+		i += n;
+	}
+	let mut out: Vec<u32> = Vec::with_capacity(words.len() + 64);
+	out.extend_from_slice(&words[..5]);
+	let mut first_fn = true;
+	let mut i = 5;
+	while i < words.len() {
+		let n = (words[i] >> 16) as usize;
+		let o = words[i] & 0xffff;
+		let a = &words[i + 1..i + n];
+		match o {
+			OP_FUNCTION if first_fn => {
+				first_fn = false;
+				out.extend(inst(OP_TYPE_INT, &[uint, 32, 0]));
+				out.extend(inst(OP_CONSTANT, &[uint, abs_mask, 0x7fff_ffff]));
+				out.extend(inst(OP_CONSTANT, &[uint, inf, 0x7f80_0000]));
+				let mut vs: Vec<_> = vec_ids.iter().map(|(&k, &v)| (k, v)).collect();
+				vs.sort();
+				for (k, (t, m, f)) in vs {
+					out.extend(inst(OP_TYPE_VECTOR, &[t, uint, k]));
+					let mut c = vec![t, m];
+					c.extend(std::iter::repeat(abs_mask).take(k as usize));
+					out.extend(inst(OP_CONSTANT_COMPOSITE, &c));
+					let mut c = vec![t, f];
+					c.extend(std::iter::repeat(inf).take(k as usize));
+					out.extend(inst(OP_CONSTANT_COMPOSITE, &c));
+				}
+				out.extend_from_slice(&words[i..i + n]);
+			}
+			OP_IS_NAN | OP_IS_INF if a.len() == 3 && count(a[2]).is_some() => {
+				let k = count(a[2]).unwrap();
+				let (t, m, f) = if k == 1 { (uint, abs_mask, inf) } else { vec_ids[&k] };
+				let (bits, abs) = (bound, bound + 1);
+				bound += 2;
+				out.extend(inst(OP_BITCAST, &[t, bits, a[2]]));
+				out.extend(inst(OP_BITWISE_AND, &[t, abs, bits, m]));
+				out.extend(inst(if o == OP_IS_INF { OP_IEQUAL } else { OP_UGREATER_THAN }, &[a[0], a[1], abs, f]));
+			}
+			_ => out.extend_from_slice(&words[i..i + n]),
+		}
+		i += n;
+	}
+	out[3] = bound;
+	out
+}
+
 // OpUMulExtended (llama.cpp's fastdiv: umulExtended), which naga lacks:
 // the low word is a*b, the high word from 16-bit partial products.
 // Scalar 32-bit operands only. Also +-inf float constants (naga rejects
@@ -2718,4 +3378,27 @@ pub fn strip_memory_operands(words: Vec<u32>) -> Vec<u32> {
 		i += n;
 	}
 	out
+}
+
+#[cfg(test)]
+mod tests {
+	// fold_spec_ops' half conversions: exact on every half, round to
+	// nearest even from single precision.
+	#[test]
+	fn half_conversions() {
+		for h in 0..=u16::MAX {
+			let f = super::f16_to_f32(h);
+			if f.is_nan() {
+				assert!(super::f32_to_f16(f) & 0x7fff > 0x7c00, "{:04x}", h);
+			} else {
+				assert_eq!(super::f32_to_f16(f), h, "{:04x} {}", h, f);
+			}
+		}
+		assert_eq!(super::f32_to_f16(1.0 + 1.0 / 2048.0), 0x3c00); // tie: even
+		assert_eq!(super::f32_to_f16(1.0 + 3.0 / 2048.0), 0x3c02);
+		assert_eq!(super::f32_to_f16(65520.0), 0x7c00); // rounds to inf
+		assert_eq!(super::f32_to_f16(5.9604645e-8), 0x0001);
+		assert_eq!(super::f32_to_f16(2.9802322e-8), 0x0000); // tie with 0: even
+		assert_eq!(super::f32_to_f16(1e-10), 0x0000);
+	}
 }

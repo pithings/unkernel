@@ -176,6 +176,15 @@ static const VkExtensionProperties dev_exts[] = {
 	{VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME, 1},
 	{VK_KHR_STORAGE_BUFFER_STORAGE_CLASS_EXTENSION_NAME, 1},
 	{VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME, 1},
+	{VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME, 2},
+	{VK_KHR_IMAGELESS_FRAMEBUFFER_EXTENSION_NAME, 1},
+	{VK_KHR_SEPARATE_DEPTH_STENCIL_LAYOUTS_EXTENSION_NAME, 1},
+	{VK_KHR_SHADER_SUBGROUP_EXTENDED_TYPES_EXTENSION_NAME, 1},
+	/* view formats: the host gives every single-sampled image, swapchain
+	 * images included, its own format and its sRGB twin (others are made
+	 * in the image's format, logged) */
+	{VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME, 1},
+	{VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME, 1},
 };
 
 static VkResult fill_props(const VkExtensionProperties *src, uint32_t n, uint32_t *count, VkExtensionProperties *out)
@@ -248,7 +257,8 @@ static uint32_t kw_subgroup_request(void)
 	return n >= 1 && n <= 128 && !(n & (n - 1)) ? (uint32_t)n : 0;
 }
 
-static void pd_init(struct kw_physical_device *pd, struct kw_reply *rep)
+/* wgpu: the app's engine is wgpu-hal (VkApplicationInfo's pEngineName) */
+static void pd_init(struct kw_physical_device *pd, struct kw_reply *rep, int wgpu)
 {
 	const char *L = js_get(rep->json, "limits");
 	VkPhysicalDeviceProperties *p = &pd->props;
@@ -316,7 +326,22 @@ static void pd_init(struct kw_physical_device *pd, struct kw_reply *rep)
 	l->maxImageDimension3D = lim(L, "maxTextureDimension3D", 2048);
 	l->maxImageDimensionCube = t2;
 	l->maxImageArrayLayers = lim(L, "maxTextureArrayLayers", 256);
-	l->maxTexelBufferElements = 65536;
+	/* texel buffers: the host's formats and limit; a view's offset is a
+	 * multiple of 16 (the host binds from the storage alignment below it
+	 * and tells the shader the rest); none from an older host */
+	{
+		const char *tb = js_get(rep->json, "texelBuffers");
+		double me = js_num(js_get(tb, "maxElements"), 0);
+		l->maxTexelBufferElements = tb && me >= 65536 ? (me > 4294967295.0 ? 0xffffffffu : (uint32_t)me) : 65536;
+		const char *tf = js_get(tb, "formats"), *tk, *tv, *tq = tf;
+		size_t tkl;
+		while (tq && (tq = js_member(tq, &tk, &tkl, &tv))) {
+			long n = strtol(tk, NULL, 10);
+			if (n > 0 && n < 256)
+				pd->texelcaps[n] = (uint8_t)js_num(tv, 0);
+		}
+		l->minTexelBufferOffsetAlignment = tb ? 16 : 256;
+	}
 	l->maxUniformBufferRange = lim(L, "maxUniformBufferBindingSize", 65536);
 	l->maxStorageBufferRange = lim(L, "maxStorageBufferBindingSize", 134217728);
 	l->maxPushConstantsSize = 128;
@@ -345,9 +370,14 @@ static void pd_init(struct kw_physical_device *pd, struct kw_reply *rep)
 	l->maxVertexInputBindings = lim(L, "maxVertexBuffers", 8);
 	l->maxVertexInputAttributeOffset = 2047;
 	l->maxVertexInputBindingStride = lim(L, "maxVertexBufferArrayStride", 2048);
+	/* WebGPU's maxInterStageShaderVariables locations. wgpu derives its own
+	 * limit as these components / 4 - 1 ("-1 for position", wgpu-hal's
+	 * vulkan/adapter.rs) and asks for WebGPU's default 16, so wgpu-hal gets
+	 * one location more, which it never uses; any other app gets exactly
+	 * what WebGPU takes */
 	uint32_t inter = lim(L, "maxInterStageShaderVariables", 16);
-	l->maxVertexOutputComponents = inter * 4;
-	l->maxFragmentInputComponents = inter * 4;
+	l->maxVertexOutputComponents = (inter + (wgpu ? 1 : 0)) * 4;
+	l->maxFragmentInputComponents = l->maxVertexOutputComponents;
 	l->maxFragmentOutputAttachments = lim(L, "maxColorAttachments", 8);
 	l->maxFragmentDualSrcAttachments = 0;
 	/* The sum, so nothing derived from it is cut: wgpu fits storage buffers,
@@ -365,7 +395,10 @@ static void pd_init(struct kw_physical_device *pd, struct kw_reply *rep)
 	l->subTexelPrecisionBits = 4;
 	l->mipmapPrecisionBits = 4;
 	l->maxDrawIndexedIndexValue = 0xffffffffu;
-	l->maxDrawIndirectCount = 1;
+	/* multiDrawIndirect: the host draws an indirect call's drawCount records
+	 * one by one (js/core/vk-exec.ts), so any count works; 2^16 - 1 is the
+	 * least the spec allows with the feature */
+	l->maxDrawIndirectCount = 65535;
 	l->maxSamplerLodBias = 0;
 	l->maxSamplerAnisotropy = 16;
 	l->maxViewports = 1;
@@ -373,7 +406,6 @@ static void pd_init(struct kw_physical_device *pd, struct kw_reply *rep)
 	l->viewportBoundsRange[0] = -2.0f * t2;
 	l->viewportBoundsRange[1] = 2.0f * t2 - 1;
 	l->minMemoryMapAlignment = 64;
-	l->minTexelBufferOffsetAlignment = 256;
 	l->minUniformBufferOffsetAlignment = lim(L, "minUniformBufferOffsetAlignment", 256);
 	l->minStorageBufferOffsetAlignment = lim(L, "minStorageBufferOffsetAlignment", 256);
 	l->minTexelOffset = -8;
@@ -427,6 +459,7 @@ static void pd_init(struct kw_physical_device *pd, struct kw_reply *rep)
 	f->shaderClipDistance = HAS("clip-distances");
 	f->dualSrcBlend = HAS("dual-source-blending");
 	f->drawIndirectFirstInstance = HAS("indirect-first-instance");
+	f->multiDrawIndirect = 1; /* GZDoom's ZVulkan takes no device without it */
 	f->occlusionQueryPrecise = 0;
 	pd->f16 = HAS("shader-f16");
 	if (HAS("timestamp-query")) {
@@ -485,7 +518,10 @@ static void pd_init(struct kw_physical_device *pd, struct kw_reply *rep)
 	m->memoryTypeCount = 2;
 	m->memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 	m->memoryTypes[0].heapIndex = 0;
-	m->memoryTypes[1].propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	/* the shadow is the guest's own RAM, so the CPU's reads of it are cached
+	 * (DDNet asks for HOST_VISIBLE | HOST_CACHED for every buffer it maps) */
+	m->memoryTypes[1].propertyFlags =
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
 	m->memoryTypes[1].heapIndex = 1;
 }
 
@@ -520,7 +556,7 @@ static API VkResult CALL kw_vkCreateInstance(const VkInstanceCreateInfo *ci, con
 	set_loader_magic_value(&inst->pd);
 	inst->link = l;
 	inst->pd.inst = inst;
-	pd_init(&inst->pd, rep);
+	pd_init(&inst->pd, rep, ai && ai->pEngineName && !strcmp(ai->pEngineName, "wgpu-hal"));
 	reply_free(rep);
 	*out = (VkInstance)inst;
 	return VK_SUCCESS;
@@ -599,6 +635,13 @@ static API void CALL kw_vkGetPhysicalDeviceFormatProperties(VkPhysicalDevice pd,
 	out->optimalTilingFeatures = fmt_features(c);
 	if (c & 64)
 		out->bufferFeatures = VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT;
+	uint8_t t = (fmt > 0 && fmt < 256) ? PD(pd)->texelcaps[fmt] : 0;
+	if (t & 1)
+		out->bufferFeatures |= VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT;
+	if (t & 2)
+		out->bufferFeatures |= VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT;
+	if (t & 4)
+		out->bufferFeatures |= VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_ATOMIC_BIT;
 }
 
 static API VkResult CALL kw_vkGetPhysicalDeviceImageFormatProperties(VkPhysicalDevice pdh, VkFormat fmt, VkImageType type,
@@ -656,6 +699,9 @@ static API VkResult CALL kw_vkCreateDevice(VkPhysicalDevice pdh, const VkDeviceC
 	pthread_mutex_init(&d->mu, NULL);
 	pthread_mutex_init(&d->rb_mu, NULL);
 	pthread_mutex_init(&d->fl_mu, NULL);
+	pthread_mutex_init(&d->q_mu, NULL);
+	pthread_cond_init(&d->q_cv, NULL);
+	d->held_tail = &d->held;
 	const char *fs = getenv("KWVK_FENCE_SYNC");
 	d->fence_sync = fs && *fs && *fs != '0';
 	d->queue = calloc(1, sizeof *d->queue);
@@ -696,13 +742,24 @@ static void inflight_reap(struct kw_device *d, int keep)
 	pthread_mutex_unlock(&d->fl_mu);
 }
 
+static void held_drop_locked(struct kw_device *d);
+static void tl_drop(struct kw_device *d);
+
 static API void CALL kw_vkDestroyDevice(VkDevice dh, const VkAllocationCallbacks *a)
 {
 	(void)a;
 	struct kw_device *d = DEV(dh);
 	if (!d)
 		return;
+	/* submits still held for timeline values nobody signalled (the app must
+	 * have waited for its work): dropped */
+	pthread_mutex_lock(&d->q_mu);
+	if (d->held)
+		kw_log("vkDestroyDevice: submits held for timeline values never signalled are dropped");
+	held_drop_locked(d);
+	pthread_mutex_unlock(&d->q_mu);
 	inflight_reap(d, 0);
+	tl_drop(d);
 	free(d->queue);
 	free(d);
 }
@@ -1331,19 +1388,31 @@ static API VkResult CALL kw_vkCreateImageView(VkDevice dh, const VkImageViewCrea
 }
 DESTROY_FN(ImageView, VkImageView)
 
+/* texel buffer views: made on the host (a storage binding of the buffer and
+ * the shader's parameters: vk/PROTOCOL.md, Amendments, "Texel buffers");
+ * kept here for the device memory tracking of the sets they are written to.
+ * A format the host does not list for the buffer's texel usages is refused. */
 static API VkResult CALL kw_vkCreateBufferView(VkDevice dh, const VkBufferViewCreateInfo *ci, const VkAllocationCallbacks *a, VkBufferView *out)
 {
 	(void)a;
 	struct kw_device *d = DEV(dh);
-	/* texel buffers: no format has buffer view features, and the
-	 * translator refuses samplerBuffer/imageBuffer (a pipeline declaring
-	 * one is created unusable). Kept creatable for apps that make views
-	 * they never use. */
-	kw_err("vkCreateBufferView: texel buffers are unsupported (format %u): a pipeline that uses this view cannot run", ci->format);
-	struct kw_obj *o = new_obj(d);
+	struct kw_buffer *b = HANDLE(struct kw_buffer, ci->buffer);
+	uint8_t t = ci->format > 0 && ci->format < 256 ? d->pd->texelcaps[ci->format] : 0;
+	int need = (b && (b->usage & VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT) ? 1 : 0) |
+		   (b && (b->usage & VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT) ? 2 : 0);
+	if (!b || !t || (need & ~t)) {
+		kw_err("vkCreateBufferView: format %u is not supported for %s texel buffers: VK_ERROR_FORMAT_NOT_SUPPORTED", ci->format,
+		       (need & ~t) == 2 ? "storage" : (need & ~t) == 1 ? "uniform" : "any");
+		return VK_ERROR_FORMAT_NOT_SUPPORTED;
+	}
+	struct kw_bview *o = calloc(1, sizeof *o);
+	o->id = link_id(d->link);
+	o->buf = b;
+	o->offset = ci->offset;
+	o->range = ci->range;
 	struct jb j = {0};
 	jb_printf(&j, "{\"op\":\"vkCreateBufferView\",\"id\":%u,\"buffer\":%u,\"format\":%u,\"offset\":%llu,\"range\":", o->id,
-		  oid((uint64_t)(uintptr_t)ci->buffer), ci->format, (unsigned long long)ci->offset);
+		  b->id, ci->format, (unsigned long long)ci->offset);
 	j_size(&j, ci->range);
 	JS(&j, "}");
 	send_msg(d, &j, NULL, 0);
@@ -1375,9 +1444,10 @@ static API VkResult CALL kw_vkCreateSampler(VkDevice dh, const VkSamplerCreateIn
 }
 DESTROY_FN(Sampler, VkSampler)
 
-/* (set << 16 | binding) of the storage buffers a SPIR-V module may write:
- * not NonWritable (on the variable or on every member of its block). Only
- * those are marked GPU-written at a draw or dispatch. -1 when unsure. */
+/* (set << 16 | binding) of the storage buffers and storage texel buffers
+ * (imageBuffer) a SPIR-V module may write: not NonWritable (on the variable
+ * or on every member of its block). Only those are marked GPU-written at a
+ * draw or dispatch. -1 when unsure. */
 static int spirv_writable(const uint32_t *w, size_t nw, uint32_t *out, int cap)
 {
 	if (nw < 5 || w[0] != 0x07230203)
@@ -1389,10 +1459,11 @@ static int spirv_writable(const uint32_t *w, size_t nw, uint32_t *out, int cap)
 	uint16_t *mnw = calloc(bound, 2);    /* struct: members decorated NonWritable */
 	uint16_t *mcount = calloc(bound, 2); /* struct: member count */
 	uint8_t *bufblock = calloc(bound, 1);
+	uint8_t *imgbuf = calloc(bound, 1); /* OpTypeImage Dim Buffer, not known sampled */
 	uint32_t *set = calloc(bound, 4), *bind = calloc(bound, 4), *ptr = calloc(bound, 4), *inner = calloc(bound, 4);
 	uint8_t *hasset = calloc(bound, 1), *hasbind = calloc(bound, 1);
 	uint32_t *vars = calloc(bound, 4), *varsc = calloc(bound, 4), *ptrsc = calloc(bound, 4);
-	int n = 0, nvars = 0, bad = !nonwr || !mnw || !mcount || !bufblock || !set || !bind || !ptr || !inner || !hasset || !hasbind || !vars || !varsc || !ptrsc;
+	int n = 0, nvars = 0, bad = !nonwr || !mnw || !mcount || !bufblock || !set || !bind || !ptr || !inner || !hasset || !hasbind || !vars || !varsc || !ptrsc || !imgbuf;
 	for (size_t i = 5; !bad && i < nw;) {
 		uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
 		if (!len || i + len > nw) {
@@ -1412,6 +1483,8 @@ static int spirv_writable(const uint32_t *w, size_t nw, uint32_t *out, int cap)
 				bind[a[0]] = a[2], hasbind[a[0]] = 1;
 		} else if (op == 72 && len >= 4 && ID(a[0]) && a[2] == 24) { /* OpMemberDecorate NonWritable */
 			mnw[a[0]]++;
+		} else if (op == 25 && len >= 9 && ID(a[0])) { /* OpTypeImage: Dim Buffer, Sampled 0 or 2 */
+			imgbuf[a[0]] = a[2] == 5 && a[6] != 1;
 		} else if (op == 30 && len >= 2 && ID(a[0])) { /* OpTypeStruct */
 			mcount[a[0]] = (uint16_t)(len - 2);
 		} else if ((op == 28 || op == 29) && len >= 3 && ID(a[0]) && ID(a[1])) { /* OpTypeArray/RuntimeArray */
@@ -1429,8 +1502,8 @@ static int spirv_writable(const uint32_t *w, size_t nw, uint32_t *out, int cap)
 		uint32_t v = vars[k], pt = varsc[k], sc = ptrsc[pt], ty = ptr[pt];
 		if (inner[ty])
 			ty = inner[ty];
-		if (sc != 12 && !(sc == 2 && bufblock[ty]))
-			continue; /* not a storage buffer */
+		if (sc != 12 && !(sc == 2 && bufblock[ty]) && !(sc == 0 && imgbuf[ty]))
+			continue; /* not a storage buffer or storage texel buffer */
 		if (nonwr[v] || (mcount[ty] && mnw[ty] >= mcount[ty]))
 			continue; /* read-only */
 		if (!hasset[v] || !hasbind[v] || n >= cap) {
@@ -1440,7 +1513,7 @@ static int spirv_writable(const uint32_t *w, size_t nw, uint32_t *out, int cap)
 		out[n++] = set[v] << 16 | (bind[v] & 0xffff);
 	}
 #undef ID
-	free(nonwr), free(mnw), free(mcount), free(bufblock), free(set), free(bind), free(ptr), free(inner);
+	free(nonwr), free(mnw), free(mcount), free(bufblock), free(imgbuf), free(set), free(bind), free(ptr), free(inner);
 	free(hasset), free(hasbind), free(vars), free(varsc), free(ptrsc);
 	return bad ? -1 : n;
 }
@@ -1680,22 +1753,109 @@ static API void CALL kw_vkGetRenderAreaGranularity(VkDevice d, VkRenderPass r, V
 	g->width = g->height = 1;
 }
 
+/*
+ * Framebuffers. The host's framebuffer is its attachments' views and size.
+ * An imageless one (imagelessFramebuffer: VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT,
+ * its views given at vkCmdBeginRenderPass) is a host framebuffer per set of
+ * views it begins with, made when a command buffer first records that set
+ * and destroyed with it.
+ */
+struct kw_fbset {
+	struct kw_fbset *next;
+	uint32_t id, n;
+	uint32_t views[];
+};
+struct kw_fb {
+	uint32_t id; /* 0 for an imageless one (first: OID reads it as a kw_obj) */
+	uint32_t rp, width, height, layers;
+	pthread_mutex_t mu;
+	struct kw_fbset *sets;
+};
+
+static void j_framebuffer(struct jb *j, uint32_t id, uint32_t rp, const uint32_t *views, uint32_t n, uint32_t w, uint32_t h, uint32_t layers)
+{
+	jb_printf(j, "{\"op\":\"vkCreateFramebuffer\",\"id\":%u,\"renderPass\":%u,\"attachments\":[", id, rp);
+	for (uint32_t i = 0; i < n; i++)
+		jb_printf(j, i ? ",%u" : "%u", views[i]);
+	jb_printf(j, "],\"width\":%u,\"height\":%u,\"layers\":%u}", w, h, layers);
+}
+
 static API VkResult CALL kw_vkCreateFramebuffer(VkDevice dh, const VkFramebufferCreateInfo *ci, const VkAllocationCallbacks *a, VkFramebuffer *out)
 {
 	(void)a;
 	struct kw_device *d = DEV(dh);
-	struct kw_obj *o = new_obj(d);
-	struct jb j = {0};
-	jb_printf(&j, "{\"op\":\"vkCreateFramebuffer\",\"id\":%u,\"renderPass\":%u,\"attachments\":[", o->id,
-		  oid((uint64_t)(uintptr_t)ci->renderPass));
-	for (uint32_t i = 0; i < ci->attachmentCount; i++)
-		jb_printf(&j, i ? ",%u" : "%u", oid((uint64_t)(uintptr_t)ci->pAttachments[i]));
-	jb_printf(&j, "],\"width\":%u,\"height\":%u,\"layers\":%u}", ci->width, ci->height, ci->layers);
-	send_msg(d, &j, NULL, 0);
-	*out = (VkFramebuffer)(uintptr_t)o;
+	struct kw_fb *fb = calloc(1, sizeof *fb);
+	fb->rp = oid((uint64_t)(uintptr_t)ci->renderPass);
+	fb->width = ci->width, fb->height = ci->height, fb->layers = ci->layers;
+	pthread_mutex_init(&fb->mu, NULL);
+	if (!(ci->flags & VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT)) {
+		fb->id = link_id(d->link);
+		uint32_t stack[16], *views = ci->attachmentCount <= 16 ? stack : malloc(ci->attachmentCount * sizeof *views);
+		for (uint32_t i = 0; i < ci->attachmentCount; i++)
+			views[i] = oid((uint64_t)(uintptr_t)ci->pAttachments[i]);
+		struct jb j = {0};
+		j_framebuffer(&j, fb->id, fb->rp, views, ci->attachmentCount, ci->width, ci->height, ci->layers);
+		send_msg(d, &j, NULL, 0);
+		if (views != stack)
+			free(views);
+	}
+	*out = (VkFramebuffer)(uintptr_t)fb;
 	return VK_SUCCESS;
 }
-DESTROY_FN(Framebuffer, VkFramebuffer)
+static API void CALL kw_vkDestroyFramebuffer(VkDevice dh, VkFramebuffer h, const VkAllocationCallbacks *a)
+{
+	(void)a;
+	struct kw_fb *fb = HANDLE(struct kw_fb, h);
+	if (!fb)
+		return;
+	if (fb->id)
+		destroy_id(DEV(dh), fb->id);
+	for (struct kw_fbset *s = fb->sets, *next; s; s = next) {
+		next = s->next;
+		destroy_id(DEV(dh), s->id);
+		free(s);
+	}
+	pthread_mutex_destroy(&fb->mu);
+	free(fb);
+}
+
+/* the host framebuffer a render pass begins with: an imageless one's for
+ * the views of its VkRenderPassAttachmentBeginInfo */
+static uint32_t fb_begin(struct kw_device *d, const VkRenderPassBeginInfo *rp)
+{
+	struct kw_fb *fb = HANDLE(struct kw_fb, rp->framebuffer);
+	if (!fb || fb->id)
+		return fb ? fb->id : 0;
+	const VkRenderPassAttachmentBeginInfo *ab = NULL;
+	for (const VkBaseInStructure *s = rp->pNext; s; s = s->pNext)
+		if (s->sType == VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO)
+			ab = (const void *)s;
+	uint32_t n = ab ? ab->attachmentCount : 0;
+	uint32_t stack[16], *views = n <= 16 ? stack : malloc(n * sizeof *views);
+	for (uint32_t i = 0; i < n; i++)
+		views[i] = oid((uint64_t)(uintptr_t)ab->pAttachments[i]);
+	pthread_mutex_lock(&fb->mu);
+	struct kw_fbset *set = fb->sets;
+	while (set && (set->n != n || memcmp(set->views, views, n * sizeof *views)))
+		set = set->next;
+	if (!set) {
+		set = calloc(1, sizeof *set + n * sizeof *views);
+		set->id = link_id(d->link);
+		set->n = n;
+		memcpy(set->views, views, n * sizeof *views);
+		set->next = fb->sets;
+		fb->sets = set;
+		/* sent now: it reaches the host before any submit of this command buffer */
+		struct jb j = {0};
+		j_framebuffer(&j, set->id, fb->rp, views, n, fb->width, fb->height, fb->layers);
+		send_msg(d, &j, NULL, 0);
+	}
+	uint32_t id = set->id;
+	pthread_mutex_unlock(&fb->mu);
+	if (views != stack)
+		free(views);
+	return id;
+}
 
 /* ---- pipelines ---- */
 
@@ -2193,12 +2353,27 @@ static API void CALL kw_vkUpdateDescriptorSets(VkDevice dh, uint32_t nw, const V
 			JS(&j, "]");
 			break;
 		}
+		case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+		case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER: {
+			/* tracked as the view's range of its buffer, as buffers are
+			 * (consecutive binding updates); a storage one may be written */
+			JS(&j, ",\"texelBufferView\":[");
+			struct dpos at;
+			dpos_init(s->layout, &at, x->dstBinding, x->dstArrayElement);
+			for (uint32_t k = 0; k < x->descriptorCount; k++) {
+				struct kw_bview *v = HANDLE(struct kw_bview, x->pTexelBufferView[k]);
+				jb_printf(&j, k ? ",%u" : "%u", v ? v->id : 0);
+				if (dpos_settle(s->layout, &at)) {
+					set_slot(s, &(struct kw_dslot){at.binding, at.elem, v ? v->buf : NULL, v ? v->offset : 0, v ? v->range : 0, -1,
+							       x->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER});
+					at.elem++;
+				}
+			}
+			JS(&j, "]");
+			break;
+		}
 		default:
 			kw_log("descriptor type %u is unsupported", x->descriptorType);
-			JS(&j, ",\"texelBufferView\":[");
-			for (uint32_t k = 0; k < x->descriptorCount; k++)
-				jb_printf(&j, k ? ",%u" : "%u", oid((uint64_t)(uintptr_t)x->pTexelBufferView[k]));
-			JS(&j, "]");
 		}
 		JS(&j, "}");
 	}
@@ -2246,6 +2421,9 @@ static API VkResult CALL kw_vkCreateFence(VkDevice d, const VkFenceCreateInfo *c
 }
 
 static int fence_wait_slice(struct kw_device *d, struct kw_fence *f, int64_t slice_ns);
+static void tl_reached(struct kw_device *d, uint64_t seq);
+static void held_forget(struct kw_device *d, const void *obj);
+static void cv_wait_ns(pthread_cond_t *cv, pthread_mutex_t *mu, int64_t ns);
 
 /* waits for f's pending submit (if any) and marks it signaled */
 static void fence_complete(struct kw_device *d, struct kw_fence *f)
@@ -2264,6 +2442,8 @@ static API void CALL kw_vkDestroyFence(VkDevice dh, VkFence fh, const VkAllocati
 		return;
 	if (f->r)
 		fence_complete(DEV(dh), f);
+	if (__atomic_load_n(&f->held, __ATOMIC_ACQUIRE))
+		held_forget(DEV(dh), f); /* not valid usage, but no dangling pointer */
 	free(f);
 }
 
@@ -2326,8 +2506,9 @@ static int fence_wait_slice(struct kw_device *d, struct kw_fence *f, int64_t sli
 		/* an "err" reply: the submit did not run (the host has also ended
 		 * the link): the device is lost, the fence counts as signaled so no
 		 * waiter hangs, and every wait reports VK_ERROR_DEVICE_LOST */
-		if (rep)
-			kw_reply_lost(d->link, rep, "vkQueueSubmit");
+		uint64_t seq = f->seq;
+		if (rep && !kw_reply_lost(d->link, rep, "vkQueueSubmit"))
+			tl_reached(d, seq); /* timeline values of its submit and earlier ones */
 		reply_free(rep);
 		uint32_t exp = r;
 		__atomic_compare_exchange_n(&f->r, &exp, 0, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
@@ -2345,13 +2526,15 @@ static API VkResult CALL kw_vkWaitForFences(VkDevice dh, uint32_t n, const VkFen
 	int waited = 0;
 	VkResult res = VK_TIMEOUT;
 	for (;;) {
-		uint32_t ready = 0, pending = 0;
+		uint32_t ready = 0, pending = 0, held = 0;
 		for (uint32_t i = 0; i < n; i++) {
 			struct kw_fence *f = HANDLE(struct kw_fence, fs[i]);
 			if (f->signaled || (f->r && link_poll(d->link, f->r) && fence_wait_slice(d, f, 0)))
 				ready++;
 			else if (f->r)
 				pending++;
+			else if (__atomic_load_n(&f->held, __ATOMIC_ACQUIRE))
+				held++;
 		}
 		if (all ? ready == n : ready > 0) {
 			res = VK_SUCCESS;
@@ -2364,6 +2547,19 @@ static API VkResult CALL kw_vkWaitForFences(VkDevice dh, uint32_t n, const VkFen
 		int64_t left = end - mono_ns();
 		if (left <= 0)
 			break;
+		if (!pending && held) {
+			/* submits held in the ICD until a timeline value is signalled
+			 * (another thread's vkSignalSemaphore): wait for a release */
+			pthread_mutex_lock(&d->q_mu);
+			int still = 0;
+			for (uint32_t i = 0; i < n; i++)
+				still |= HANDLE(struct kw_fence, fs[i])->held;
+			if (still)
+				cv_wait_ns(&d->q_cv, &d->q_mu, left < 20000000 ? left : 20000000);
+			pthread_mutex_unlock(&d->q_mu);
+			link_poll(d->link, 0); /* a lost device's last frame, when it has come */
+			continue;
+		}
 		if (!pending) { /* never submitted: only a timeout ends this */
 			if (end == INT64_MAX) {
 				kw_log("waiting forever on fences that were never submitted");
@@ -2391,19 +2587,154 @@ static API VkResult CALL kw_vkWaitForFences(VkDevice dh, uint32_t n, const VkFen
 }
 
 /*
- * Semaphores. The one queue runs in submission order, so waits and signals
- * between submits need nothing. Timeline semaphores (timelineSemaphore is
- * reported false, but ggml-vulkan makes them anyway) keep their values
- * guest-side: `submitted` is the highest value a submit signals, reached
- * once the work submitted so far is done; host waits and counter queries
- * wait for that work (kw_sync) rather than answer early.
+ * Semaphores. The one queue runs in submission order, so binary semaphores
+ * between submits need nothing. Timeline semaphores keep their values
+ * guest-side (vk/PROTOCOL.md, Amendments, "Timeline semaphores"):
+ *   - `submitted` is the highest value that sent work or vkSignalSemaphore
+ *     gives. A queue wait for a value above it holds that submit in the
+ *     ICD, with every later one, until a vkSignalSemaphore or the release
+ *     of an earlier held submit gives it (held_pump);
+ *   - `value` is the value reached. As for fences ("Fences at submit"), a
+ *     value that a submit writing no host-visible memory signals is reached
+ *     at the submit. One that a submit which may write host-visible memory
+ *     signals is reached at its reply: a sync request sent after it, kept
+ *     in kw_device.tl. A fence wait or wait-idle covering it, or a later
+ *     submit's values being reached, reaches it too (queue order). Waits
+ *     and counter queries read back what submitted work wrote to mapped
+ *     memory, as fence waits do, and report a lost device.
+ * sem_mu guards the values and every device's tl list; sem_cv is signalled
+ * when a value rises.
  */
 struct kw_sem {
 	int timeline;
 	uint64_t value; /* reached */
-	uint64_t submitted; /* signalled by submitted work */
+	uint64_t submitted; /* given by sent work or the host (value <= submitted) */
+};
+struct kw_tlsig {
+	struct kw_sem *sem; /* NULL: destroyed since */
+	uint64_t value;
+};
+struct kw_tlpend {
+	struct kw_tlpend *next;
+	uint64_t seq; /* the submit's place in the queue (kw_device.seq) */
+	uint32_t r; /* the sync request sent after it; 0 once its reply was taken */
+	int reached; /* the values were applied */
+	int claimed; /* a thread waits for r */
+	uint32_t n;
+	struct kw_tlsig sig[];
 };
 static pthread_mutex_t sem_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t sem_cv = PTHREAD_COND_INITIALIZER;
+
+/* pthread_cond_timedwait for up to ns from now */
+static void cv_wait_ns(pthread_cond_t *cv, pthread_mutex_t *mu, int64_t ns)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	int64_t t = (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec + (ns > 0 ? ns : 0);
+	ts.tv_sec = t / 1000000000;
+	ts.tv_nsec = t % 1000000000;
+	pthread_cond_timedwait(cv, mu, &ts);
+}
+
+static void sem_raise(struct kw_sem *sem, uint64_t v)
+{
+	if (sem && v > sem->value)
+		sem->value = v;
+}
+
+/* sem_mu held: every submit up to `seq` is done, so the values of the tl
+ * entries up to it are reached (in queue order); entries whose reply was
+ * taken as well are dropped */
+static void tl_reach_locked(struct kw_device *d, uint64_t seq)
+{
+	int any = 0;
+	for (struct kw_tlpend **pp = &d->tl, *e; (e = *pp) && e->seq <= seq;) {
+		if (!e->reached) {
+			for (uint32_t k = 0; k < e->n; k++)
+				sem_raise(e->sig[k].sem, e->sig[k].value);
+			e->reached = any = 1;
+		}
+		if (!e->r && !e->claimed) {
+			*pp = e->next;
+			free(e);
+		} else {
+			pp = &e->next;
+		}
+	}
+	if (any)
+		pthread_cond_broadcast(&sem_cv);
+}
+
+/* Takes the reply to the oldest tl entry not yet answered: one that has
+ * come (timeout_ns 0), or waiting up to timeout_ns for it. 1 when it took
+ * one. A reply with "err" loses the device. */
+static int tl_take(struct kw_device *d, int64_t timeout_ns)
+{
+	pthread_mutex_lock(&sem_mu);
+	struct kw_tlpend *e = d->tl;
+	while (e && !e->r)
+		e = e->next;
+	if (!e || d->link->dead) {
+		if (!e && !d->link->dead && timeout_ns > 0) /* nothing due: a value can only rise by another thread */
+			cv_wait_ns(&sem_cv, &sem_mu, timeout_ns);
+		pthread_mutex_unlock(&sem_mu);
+		return 0;
+	}
+	if (e->claimed) { /* another thread waits for it: wait for that thread */
+		if (timeout_ns > 0)
+			cv_wait_ns(&sem_cv, &sem_mu, timeout_ns);
+		pthread_mutex_unlock(&sem_mu);
+		return 0;
+	}
+	e->claimed = 1;
+	uint32_t r = e->r;
+	pthread_mutex_unlock(&sem_mu);
+	struct kw_reply *rep = NULL;
+	int got;
+	if (timeout_ns > 0) {
+		int to = 0;
+		rep = link_wait_timeout(d->link, r, timeout_ns, &to);
+		got = rep || !to; /* the reply, or a dead link */
+	} else if ((got = link_poll(d->link, r))) {
+		rep = link_wait(d->link, r);
+	}
+	int lost = got && kw_reply_lost(d->link, rep, "vkQueueSubmit");
+	reply_free(rep);
+	pthread_mutex_lock(&sem_mu);
+	e->claimed = 0;
+	if (got) {
+		e->r = 0;
+		if (!lost)
+			tl_reach_locked(d, e->seq);
+	}
+	pthread_cond_broadcast(&sem_cv);
+	pthread_mutex_unlock(&sem_mu);
+	return got && !lost;
+}
+
+/* the replies of timeline signals that have come */
+static void tl_poll(struct kw_device *d)
+{
+	while (d->tl && tl_take(d, 0))
+		;
+}
+
+/* at vkDestroyDevice: every reply still due taken, the list freed */
+static void tl_drop(struct kw_device *d)
+{
+	pthread_mutex_lock(&sem_mu);
+	struct kw_tlpend *e = d->tl;
+	d->tl = NULL;
+	pthread_mutex_unlock(&sem_mu);
+	while (e) {
+		struct kw_tlpend *next = e->next;
+		if (e->r && !d->link->dead)
+			reply_free(link_wait(d->link, e->r));
+		free(e);
+		e = next;
+	}
+}
 
 static API VkResult CALL kw_vkCreateSemaphore(VkDevice d, const VkSemaphoreCreateInfo *ci, const VkAllocationCallbacks *a, VkSemaphore *out)
 {
@@ -2419,35 +2750,27 @@ static API VkResult CALL kw_vkCreateSemaphore(VkDevice d, const VkSemaphoreCreat
 	return VK_SUCCESS;
 }
 
-/* at vkQueueSubmit: the timeline values its batches signal */
-static void sem_submitted(const VkSubmitInfo *si, uint32_t n)
+static void held_forget(struct kw_device *d, const void *obj);
+
+static API void CALL kw_vkDestroySemaphore(VkDevice dh, VkSemaphore s, const VkAllocationCallbacks *a)
 {
-	pthread_mutex_lock(&sem_mu);
-	for (uint32_t i = 0; i < n; i++)
-		for (const VkBaseInStructure *s = si[i].pNext; s; s = s->pNext) {
-			if (s->sType != VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO)
-				continue;
-			const VkTimelineSemaphoreSubmitInfo *t = (const void *)s;
-			for (uint32_t k = 0; k < t->signalSemaphoreValueCount && k < si[i].signalSemaphoreCount; k++) {
-				struct kw_sem *sem = HANDLE(struct kw_sem, si[i].pSignalSemaphores[k]);
-				if (sem && sem->timeline && t->pSignalSemaphoreValues[k] > sem->submitted)
-					sem->submitted = t->pSignalSemaphoreValues[k];
-			}
-			/* a wait for a value no submit or host signal has given yet would
-			 * need the queue to stall: this queue runs it at once */
-			for (uint32_t k = 0; k < t->waitSemaphoreValueCount && k < si[i].waitSemaphoreCount; k++) {
-				struct kw_sem *sem = HANDLE(struct kw_sem, si[i].pWaitSemaphores[k]);
-				if (sem && sem->timeline && t->pWaitSemaphoreValues[k] > sem->submitted && t->pWaitSemaphoreValues[k] > sem->value)
-					kw_err("vkQueueSubmit: a wait for timeline value %llu that nothing has signalled yet does not stall the queue (unsupported)",
-					       (unsigned long long)t->pWaitSemaphoreValues[k]);
-			}
-		}
-	pthread_mutex_unlock(&sem_mu);
-}
-static API void CALL kw_vkDestroySemaphore(VkDevice d, VkSemaphore s, const VkAllocationCallbacks *a)
-{
-	(void)d, (void)a;
-	free(HANDLE(void, s));
+	(void)a;
+	struct kw_sem *sem = HANDLE(struct kw_sem, s);
+	struct kw_device *d = DEV(dh);
+	if (!sem)
+		return;
+	if (sem->timeline && d) {
+		/* the app waited for the work that signals it, but replies may
+		 * not have been taken: forget it there */
+		held_forget(d, sem);
+		pthread_mutex_lock(&sem_mu);
+		for (struct kw_tlpend *e = d->tl; e; e = e->next)
+			for (uint32_t k = 0; k < e->n; k++)
+				if (e->sig[k].sem == sem)
+					e->sig[k].sem = NULL;
+		pthread_mutex_unlock(&sem_mu);
+	}
+	free(sem);
 }
 
 static API VkResult CALL kw_vkCreateEvent(VkDevice d, const VkEventCreateInfo *ci, const VkAllocationCallbacks *a, VkEvent *out)
@@ -2773,8 +3096,9 @@ static struct jb *cmd(VkCommandBuffer c, const char *name)
 
 static API void CALL kw_vkCmdBeginRenderPass(VkCommandBuffer c, const VkRenderPassBeginInfo *rp, VkSubpassContents contents)
 {
+	uint32_t fb = fb_begin(CB(c)->dev, rp);
 	struct jb *b = cmd(c, "vkCmdBeginRenderPass");
-	jb_printf(b, ",\"renderPass\":%u,\"framebuffer\":%u,\"renderArea\":", OID(rp->renderPass), OID(rp->framebuffer));
+	jb_printf(b, ",\"renderPass\":%u,\"framebuffer\":%u,\"renderArea\":", OID(rp->renderPass), fb);
 	j_rect(b, rp->renderArea);
 	JS(b, ",\"clearValues\":[");
 	for (uint32_t i = 0; i < rp->clearValueCount; i++) {
@@ -3277,6 +3601,360 @@ static API void CALL kw_vkCmdCopyQueryPoolResults(VkCommandBuffer c, VkQueryPool
 
 /* ---- queue ---- */
 
+/* a batch's VkTimelineSemaphoreSubmitInfo, or NULL */
+static const VkTimelineSemaphoreSubmitInfo *tl_info(const VkSubmitInfo *si)
+{
+	for (const VkBaseInStructure *s = si->pNext; s; s = s->pNext)
+		if (s->sType == VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO)
+			return (const void *)s;
+	return NULL;
+}
+
+/* the timeline semaphore and value of a batch's k-th signal (wait), or NULL */
+static struct kw_sem *tl_signal(const VkSubmitInfo *si, const VkTimelineSemaphoreSubmitInfo *t, uint32_t k, uint64_t *v)
+{
+	struct kw_sem *sem = t && k < t->signalSemaphoreValueCount ? HANDLE(struct kw_sem, si->pSignalSemaphores[k]) : NULL;
+	if (!sem || !sem->timeline)
+		return NULL;
+	*v = t->pSignalSemaphoreValues[k];
+	return sem;
+}
+static struct kw_sem *tl_wait(const VkSubmitInfo *si, const VkTimelineSemaphoreSubmitInfo *t, uint32_t k, uint64_t *v)
+{
+	struct kw_sem *sem = t && k < t->waitSemaphoreValueCount ? HANDLE(struct kw_sem, si->pWaitSemaphores[k]) : NULL;
+	if (!sem || !sem->timeline)
+		return NULL;
+	*v = t->pWaitSemaphoreValues[k];
+	return sem;
+}
+
+/*
+ * A submit held in the ICD: a batch that waits for a timeline value that
+ * nothing sent or signalled has given yet, or one after it (the queue runs
+ * in submission order). The command buffers are pending, so the app keeps
+ * them as they are until the submit completes.
+ */
+struct kw_held {
+	struct kw_held *next;
+	struct kw_fence *fence; /* on the last batch of a vkQueueSubmit */
+	uint32_t ncb, nwait, nsig;
+	struct kw_cmdbuf **cbs;
+	struct kw_tlsig *wait, *sig;
+};
+
+/* q_mu held: a device lost with submits held: they are dropped, their
+ * fences signaled (every wait reports the loss) */
+static void held_drop_locked(struct kw_device *d)
+{
+	while (d->held) {
+		struct kw_held *h = d->held;
+		d->held = h->next;
+		if (h->fence) {
+			h->fence->signaled = 1;
+			__atomic_store_n(&h->fence->held, 0, __ATOMIC_RELEASE);
+		}
+		free(h);
+	}
+	d->held_tail = &d->held;
+	pthread_cond_broadcast(&d->q_cv);
+}
+
+/* a semaphore or fence the app destroys: no held submit refers to it */
+static void held_forget(struct kw_device *d, const void *obj)
+{
+	pthread_mutex_lock(&d->q_mu);
+	for (struct kw_held *h = d->held; h; h = h->next) {
+		if (h->fence == obj)
+			h->fence = NULL;
+		for (uint32_t k = 0; k < h->nwait; k++)
+			if (h->wait[k].sem == obj)
+				h->wait[k].sem = NULL;
+		for (uint32_t k = 0; k < h->nsig; k++)
+			if (h->sig[k].sem == obj)
+				h->sig[k].sem = NULL;
+	}
+	pthread_mutex_unlock(&d->q_mu);
+}
+
+static void tl_reached(struct kw_device *d, uint64_t seq)
+{
+	pthread_mutex_lock(&sem_mu);
+	tl_reach_locked(d, seq);
+	pthread_mutex_unlock(&sem_mu);
+}
+
+/*
+ * Sends one vkQueueSubmit of the command buffers, signalling the timeline
+ * values `sig` and the fence f; under q_mu, in queue order.
+ */
+static void submit_send(struct kw_device *d, struct kw_cmdbuf *const *cbs, uint32_t ncb, const struct kw_tlsig *sig, uint32_t nsig, struct kw_fence *f)
+{
+	if (f && f->r)
+		fence_complete(d, f);
+	struct kw_tlpend *e = NULL;
+	if (nsig) {
+		e = calloc(1, sizeof *e + nsig * sizeof *sig);
+		if (!e)
+			abort();
+		e->n = nsig;
+		memcpy(e->sig, sig, nsig * sizeof *sig);
+	}
+	/* mark GPU-written buffers and send under one lock, so no readback
+	 * (another thread's fence wait) slips between: it would read the data
+	 * from before this submit and clear the mark */
+	pthread_mutex_lock(&d->mu);
+	/* host-visible memory: CPU writes to what these commands may read or
+	 * write, not every mapped byte (ggml keeps hundreds of MiB mapped) */
+	int64_t t0 = kw_now();
+	for (uint32_t k = 0; k < ncb; k++) {
+		flush_list(d, cbs[k]->reads, cbs[k]->nreads);
+		flush_list(d, cbs[k]->written, cbs[k]->nwritten);
+	}
+	kw_stats.flush_ns += kw_now() - t0;
+	t0 = kw_now();
+	struct jb j = {0};
+	JS(&j, "{\"op\":\"vkQueueSubmit\",\"cmds\":[");
+	int any = 0;
+	int writes_mapped = 0; /* the GPU may write host-visible memory (the lists hold no device-only buffer) */
+	for (uint32_t k = 0; k < ncb; k++) {
+		struct kw_cmdbuf *cb = cbs[k];
+		if (cb->cmds.n) {
+			if (any)
+				JS(&j, ",");
+			jb_put(&j, cb->cmds.p, cb->cmds.n);
+			any = 1;
+		}
+		for (size_t w = 0; w < cb->nwritten; w++)
+			for (int q = 0; q < cb->written[w].r.n; q++)
+				kw_ranges_add(&cb->written[w].buf->dirty, cb->written[w].r.lo[q], cb->written[w].r.hi[q]);
+		writes_mapped |= cb->nwritten > 0;
+	}
+	JS(&j, "]}");
+	uint64_t seq = ++d->seq;
+	/* the rule fences have (vk/PROTOCOL.md, Amendments, "Fences at
+	 * submit"): what may write memory the app can read is done at its reply */
+	int slow = d->fence_sync || writes_mapped;
+	uint32_t fast = 0;
+	if (f)
+		f->seq = seq;
+	if (f && slow) {
+		f->signaled = 0;
+		f->polls = 0;
+		f->r = link_send(d->link, &j, NULL, 0, 1);
+	} else if (f) {
+		/* nothing the app can read changes: the fence signals now (mapped
+		 * memory that earlier work wrote is read back after the wait by
+		 * requests the host answers in order, after this work, once its
+		 * validation is known) */
+		fast = link_send(d->link, &j, NULL, 0, 1);
+		f->r = 0;
+		f->signaled = 1;
+	} else {
+		link_send(d->link, &j, NULL, 0, 0);
+	}
+	if (e) {
+		e->seq = seq;
+		if (slow) { /* its values are reached at this reply */
+			struct jb s = {0};
+			JS(&s, "{\"op\":\"sync\"}");
+			e->r = link_send(d->link, &s, NULL, 0, 1);
+			jb_free(&s);
+		}
+	}
+	pthread_mutex_unlock(&d->mu);
+	while (fast) {
+		pthread_mutex_lock(&d->fl_mu);
+		if (d->ninflight < KW_INFLIGHT) {
+			d->inflight[d->ninflight++] = fast;
+			fast = 0;
+		}
+		pthread_mutex_unlock(&d->fl_mu);
+		if (fast)
+			inflight_reap(d, KW_INFLIGHT - 1); /* full: wait for the oldest */
+	}
+	if (e) {
+		pthread_mutex_lock(&sem_mu);
+		for (uint32_t k = 0; k < nsig; k++)
+			if (sig[k].sem && sig[k].value > sig[k].sem->submitted)
+				sig[k].sem->submitted = sig[k].value;
+		if (slow) {
+			struct kw_tlpend **pp = &d->tl;
+			while (*pp)
+				pp = &(*pp)->next;
+			*pp = e;
+		} else {
+			/* reached at the submit, as are the values of earlier submits */
+			for (uint32_t k = 0; k < nsig; k++)
+				sem_raise(sig[k].sem, sig[k].value);
+			free(e);
+			tl_reach_locked(d, seq);
+		}
+		pthread_cond_broadcast(&sem_cv);
+		pthread_mutex_unlock(&sem_mu);
+	}
+	kw_stats.submit_json += j.n;
+	kw_stats.submits++;
+	jb_free(&j);
+	kw_stats.submit_ns += kw_now() - t0;
+}
+
+/* q_mu held: may the held submit h go (every value it waits for given)? */
+static int held_ready(const struct kw_held *h)
+{
+	int ok = 1;
+	pthread_mutex_lock(&sem_mu);
+	for (uint32_t k = 0; k < h->nwait && ok; k++)
+		ok = !h->wait[k].sem || h->wait[k].value <= h->wait[k].sem->submitted;
+	pthread_mutex_unlock(&sem_mu);
+	return ok;
+}
+
+/* q_mu held: the held submits that may go now, in order */
+static void held_pump(struct kw_device *d)
+{
+	while (d->held) {
+		if (d->link->dead) {
+			held_drop_locked(d);
+			return;
+		}
+		struct kw_held *h = d->held;
+		if (!held_ready(h))
+			return;
+		d->held = h->next;
+		if (!d->held)
+			d->held_tail = &d->held;
+		submit_send(d, h->cbs, h->ncb, h->sig, h->nsig, h->fence);
+		if (h->fence)
+			__atomic_store_n(&h->fence->held, 0, __ATOMIC_RELEASE);
+		free(h);
+		pthread_cond_broadcast(&d->q_cv);
+	}
+}
+
+VkResult kw_queue_unhold(struct kw_device *d, const char *call)
+{
+	pthread_mutex_lock(&d->q_mu);
+	int64_t t0 = mono_ns();
+	int said = 0;
+	while (d->held && !d->link->dead) {
+		if (!said && mono_ns() - t0 > 1000000000) {
+			kw_log("%s waits for submits held until timeline values are signalled", call);
+			said = 1;
+		}
+		cv_wait_ns(&d->q_cv, &d->q_mu, 20000000);
+		link_poll(d->link, 0); /* a lost device's last frame, when it has come */
+	}
+	if (d->link->dead)
+		held_drop_locked(d);
+	pthread_mutex_unlock(&d->q_mu);
+	return d->link->dead ? VK_ERROR_DEVICE_LOST : VK_SUCCESS;
+}
+
+/* the batches si[0..n) of one vkQueueSubmit, sent as one message */
+static void submit_batches(struct kw_device *d, const VkSubmitInfo *si, uint32_t n, struct kw_fence *f)
+{
+	struct kw_cmdbuf *cb_stack[16], **cbs = cb_stack;
+	struct kw_tlsig sig_stack[8], *sig = sig_stack;
+	uint32_t ncb = 0, nsig = 0;
+	for (uint32_t i = 0; i < n; i++) {
+		ncb += si[i].commandBufferCount;
+		nsig += si[i].signalSemaphoreCount;
+	}
+	if (ncb > 16 && !(cbs = malloc(ncb * sizeof *cbs)))
+		abort();
+	if (nsig > 8 && !(sig = malloc(nsig * sizeof *sig)))
+		abort();
+	ncb = nsig = 0;
+	for (uint32_t i = 0; i < n; i++) {
+		for (uint32_t k = 0; k < si[i].commandBufferCount; k++)
+			cbs[ncb++] = CB(si[i].pCommandBuffers[k]);
+		const VkTimelineSemaphoreSubmitInfo *t = tl_info(&si[i]);
+		for (uint32_t k = 0; k < si[i].signalSemaphoreCount; k++) {
+			uint64_t v;
+			struct kw_sem *sem = tl_signal(&si[i], t, k, &v);
+			if (sem)
+				sig[nsig++] = (struct kw_tlsig){sem, v};
+		}
+	}
+	submit_send(d, cbs, ncb, sig, nsig, f);
+	if (cbs != cb_stack)
+		free(cbs);
+	if (sig != sig_stack)
+		free(sig);
+}
+
+/* q_mu held: how many of the batches may go now, the first n that wait for
+ * no timeline value beyond what sent work, the host or an earlier batch of
+ * this call gives */
+static uint32_t submit_ready(const VkSubmitInfo *si, uint32_t n)
+{
+	uint32_t i;
+	pthread_mutex_lock(&sem_mu);
+	for (i = 0; i < n; i++) {
+		const VkTimelineSemaphoreSubmitInfo *t = tl_info(&si[i]);
+		int ok = 1;
+		for (uint32_t k = 0; k < si[i].waitSemaphoreCount && ok; k++) {
+			uint64_t v, sv;
+			struct kw_sem *sem = tl_wait(&si[i], t, k, &v);
+			if (!sem || v <= sem->submitted)
+				continue;
+			ok = 0;
+			for (uint32_t b = 0; b < i && !ok; b++) {
+				const VkTimelineSemaphoreSubmitInfo *tb = tl_info(&si[b]);
+				for (uint32_t m = 0; m < si[b].signalSemaphoreCount && !ok; m++)
+					ok = tl_signal(&si[b], tb, m, &sv) == sem && sv >= v;
+			}
+		}
+		if (!ok)
+			break;
+	}
+	pthread_mutex_unlock(&sem_mu);
+	return i;
+}
+
+/* q_mu held: the batches si[0..n) held, the fence f with the last (or alone) */
+static void hold_batches(struct kw_device *d, const VkSubmitInfo *si, uint32_t n, struct kw_fence *f)
+{
+	for (uint32_t i = 0; i < n || (i == 0 && f); i++) {
+		const VkSubmitInfo *b = n ? &si[i] : NULL;
+		uint32_t ncb = b ? b->commandBufferCount : 0, nw = b ? b->waitSemaphoreCount : 0, ns = b ? b->signalSemaphoreCount : 0;
+		struct kw_held *h = calloc(1, sizeof *h + ncb * sizeof *h->cbs + (nw + ns) * sizeof(struct kw_tlsig));
+		if (!h)
+			abort();
+		h->sig = (struct kw_tlsig *)(h + 1);
+		h->wait = h->sig + ns;
+		h->cbs = (struct kw_cmdbuf **)(h->wait + nw);
+		const VkTimelineSemaphoreSubmitInfo *t = b ? tl_info(b) : NULL;
+		for (uint32_t k = 0; k < ncb; k++)
+			h->cbs[h->ncb++] = CB(b->pCommandBuffers[k]);
+		for (uint32_t k = 0; k < nw; k++) {
+			uint64_t v;
+			struct kw_sem *sem = tl_wait(b, t, k, &v);
+			if (sem)
+				h->wait[h->nwait++] = (struct kw_tlsig){sem, v};
+		}
+		for (uint32_t k = 0; k < ns; k++) {
+			uint64_t v;
+			struct kw_sem *sem = tl_signal(b, t, k, &v);
+			if (sem)
+				h->sig[h->nsig++] = (struct kw_tlsig){sem, v};
+		}
+		if (f && (n == 0 || i == n - 1)) {
+			h->fence = f;
+			f->signaled = 0;
+			f->r = 0;
+			f->polls = 0;
+			__atomic_store_n(&f->held, 1, __ATOMIC_RELEASE);
+		}
+		kw_log("vkQueueSubmit: a batch held in the ICD (%u timeline waits, the first for value %llu)", h->nwait,
+		       h->nwait ? (unsigned long long)h->wait[0].value : 0ull);
+		*d->held_tail = h;
+		d->held_tail = &h->next;
+		if (n == 0)
+			break;
+	}
+}
+
 static API VkResult CALL kw_vkQueueSubmit(VkQueue qh, uint32_t n, const VkSubmitInfo *si, VkFence fh)
 {
 	struct kw_device *d = ((struct kw_queue *)qh)->dev;
@@ -3295,76 +3973,22 @@ static API VkResult CALL kw_vkQueueSubmit(VkQueue qh, uint32_t n, const VkSubmit
 				return VK_ERROR_DEVICE_LOST;
 			}
 		}
-	sem_submitted(si, n);
 	if (f && f->r)
 		fence_complete(d, f);
-	/* mark GPU-written buffers and send under one lock, so no readback
-	 * (another thread's fence wait) slips between: it would read the data
-	 * from before this submit and clear the mark */
-	pthread_mutex_lock(&d->mu);
-	/* host-visible memory: CPU writes to what these commands may read or
-	 * write, not every mapped byte (ggml keeps hundreds of MiB mapped) */
-	int64_t t0 = kw_now();
-	for (uint32_t i = 0; i < n; i++)
-		for (uint32_t k = 0; k < si[i].commandBufferCount; k++) {
-			struct kw_cmdbuf *cb = CB(si[i].pCommandBuffers[k]);
-			flush_list(d, cb->reads, cb->nreads);
-			flush_list(d, cb->written, cb->nwritten);
-		}
-	kw_stats.flush_ns += kw_now() - t0;
-	t0 = kw_now();
-	struct jb j = {0};
-	JS(&j, "{\"op\":\"vkQueueSubmit\",\"cmds\":[");
-	int any = 0;
-	for (uint32_t i = 0; i < n; i++)
-		for (uint32_t k = 0; k < si[i].commandBufferCount; k++) {
-			struct kw_cmdbuf *cb = CB(si[i].pCommandBuffers[k]);
-			if (cb->cmds.n) {
-				if (any)
-					JS(&j, ",");
-				jb_put(&j, cb->cmds.p, cb->cmds.n);
-				any = 1;
-			}
-			for (size_t w = 0; w < cb->nwritten; w++)
-				for (int q = 0; q < cb->written[w].r.n; q++)
-					kw_ranges_add(&cb->written[w].buf->dirty, cb->written[w].r.lo[q], cb->written[w].r.hi[q]);
-		}
-	JS(&j, "]}");
-	uint32_t fast = 0;
-	int writes_mapped = 0; /* the GPU may write host-visible memory (the lists hold no device-only buffer) */
-	for (uint32_t i = 0; i < n && !writes_mapped; i++)
-		for (uint32_t k = 0; k < si[i].commandBufferCount; k++)
-			writes_mapped |= CB(si[i].pCommandBuffers[k])->nwritten > 0;
-	if (f && (d->fence_sync || writes_mapped)) {
-		f->signaled = 0;
-		f->polls = 0;
-		f->r = link_send(d->link, &j, NULL, 0, 1);
-	} else if (f) {
-		/* nothing the app can read changes: the fence signals now (mapped
-		 * memory that earlier work wrote is read back after the wait by
-		 * requests the host answers in order, after this work, once its
-		 * validation is known) */
-		fast = link_send(d->link, &j, NULL, 0, 1);
-		f->r = 0;
-		f->signaled = 1;
+	tl_poll(d); /* replies to earlier timeline signals that have come */
+	pthread_mutex_lock(&d->q_mu);
+	/* wait before signal: from the first batch that waits for a timeline
+	 * value nothing has given yet, this submit and every later one are held
+	 * (held_pump releases them) */
+	uint32_t go = d->held ? 0 : submit_ready(si, n);
+	if (go == n && !d->held) {
+		submit_batches(d, si, n, f);
 	} else {
-		link_send(d->link, &j, NULL, 0, 0);
+		if (go)
+			submit_batches(d, si, go, NULL);
+		hold_batches(d, si + go, n - go, f);
 	}
-	pthread_mutex_unlock(&d->mu);
-	while (fast) {
-		pthread_mutex_lock(&d->fl_mu);
-		if (d->ninflight < KW_INFLIGHT) {
-			d->inflight[d->ninflight++] = fast;
-			fast = 0;
-		}
-		pthread_mutex_unlock(&d->fl_mu);
-		if (fast)
-			inflight_reap(d, KW_INFLIGHT - 1); /* full: wait for the oldest */
-	}
-	kw_stats.submit_json += j.n;
-	kw_stats.submits++;
-	jb_free(&j);
-	kw_stats.submit_ns += kw_now() - t0;
+	pthread_mutex_unlock(&d->q_mu);
 	if (kw_stats_on < 0)
 		kw_stats_on = getenv("KWVK_STATS") != NULL;
 	if (kw_stats_on)
@@ -3372,24 +3996,34 @@ static API VkResult CALL kw_vkQueueSubmit(VkQueue qh, uint32_t n, const VkSubmit
 	return d->link->dead ? VK_ERROR_DEVICE_LOST : VK_SUCCESS;
 }
 
-static VkResult kw_sync(struct kw_device *d)
+static VkResult kw_sync(struct kw_device *d, const char *call)
 {
+	/* the submits held in the ICD first (another thread's vkSignalSemaphore releases them) */
+	if (kw_queue_unhold(d, call) != VK_SUCCESS)
+		return VK_ERROR_DEVICE_LOST;
 	struct jb j = {0};
 	JS(&j, "{\"op\":\"sync\"}");
-	struct kw_reply *rep = link_call(d->link, &j, NULL, 0);
+	pthread_mutex_lock(&d->q_mu);
+	uint64_t seq = d->seq;
+	uint32_t r = link_send(d->link, &j, NULL, 0, 1);
+	pthread_mutex_unlock(&d->q_mu);
 	jb_free(&j);
+	struct kw_reply *rep = link_wait(d->link, r);
 	int lost = kw_reply_lost(d->link, rep, "waiting for the queue");
 	reply_free(rep);
-	if (!lost)
+	if (!lost) {
 		inflight_reap(d, KW_INFLIGHT); /* answered by now: a failed one loses the device */
+		tl_reached(d, seq); /* every timeline value sent before */
+		tl_poll(d);
+	}
 	if (lost || d->link->dead)
 		return VK_ERROR_DEVICE_LOST;
 	kw_readback(d, NULL);
 	return d->link->dead ? VK_ERROR_DEVICE_LOST : VK_SUCCESS;
 }
 
-static API VkResult CALL kw_vkQueueWaitIdle(VkQueue q) { return kw_sync(((struct kw_queue *)q)->dev); }
-static API VkResult CALL kw_vkDeviceWaitIdle(VkDevice d) { return kw_sync(DEV(d)); }
+static API VkResult CALL kw_vkQueueWaitIdle(VkQueue q) { return kw_sync(((struct kw_queue *)q)->dev, "vkQueueWaitIdle"); }
+static API VkResult CALL kw_vkDeviceWaitIdle(VkDevice d) { return kw_sync(DEV(d), "vkDeviceWaitIdle"); }
 
 static API VkResult CALL kw_vkQueueBindSparse(VkQueue q, uint32_t n, const VkBindSparseInfo *b, VkFence f)
 {
@@ -3425,6 +4059,13 @@ static API void CALL kw_vkGetPhysicalDeviceFeatures2(VkPhysicalDevice pd, VkPhys
 			VkPhysicalDeviceVulkan12Features *x = (void *)s;
 			ZBODY(x, VkPhysicalDeviceVulkan12Features);
 			x->hostQueryReset = VK_TRUE;
+			x->timelineSemaphore = VK_TRUE;
+			x->imagelessFramebuffer = VK_TRUE; /* vkCreateFramebuffer, fb_begin */
+			x->separateDepthStencilLayouts = VK_TRUE; /* the host keeps no layouts */
+			/* no stage has subgroup operations (supportedStages 0), so
+			 * none takes these types or a dynamic broadcast id */
+			x->shaderSubgroupExtendedTypes = VK_TRUE;
+			x->subgroupBroadcastDynamicId = VK_TRUE;
 			x->shaderFloat16 = PD(pd)->f16;
 			x->storageBuffer8BitAccess = VK_TRUE; /* emulated as u32 words too */
 			break;
@@ -3439,7 +4080,16 @@ static API void CALL kw_vkGetPhysicalDeviceFeatures2(VkPhysicalDevice pd, VkPhys
 			((VkPhysicalDeviceHostQueryResetFeatures *)s)->hostQueryReset = VK_TRUE;
 			break;
 		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES:
-			((VkPhysicalDeviceTimelineSemaphoreFeatures *)s)->timelineSemaphore = VK_FALSE;
+			((VkPhysicalDeviceTimelineSemaphoreFeatures *)s)->timelineSemaphore = VK_TRUE;
+			break;
+		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGELESS_FRAMEBUFFER_FEATURES:
+			((VkPhysicalDeviceImagelessFramebufferFeatures *)s)->imagelessFramebuffer = VK_TRUE;
+			break;
+		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SEPARATE_DEPTH_STENCIL_LAYOUTS_FEATURES:
+			((VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures *)s)->separateDepthStencilLayouts = VK_TRUE;
+			break;
+		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES:
+			((VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures *)s)->shaderSubgroupExtendedTypes = VK_TRUE;
 			break;
 		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES:
 			ZBODY(s, VkPhysicalDeviceBufferDeviceAddressFeatures);
@@ -3493,6 +4143,9 @@ static API void CALL kw_vkGetPhysicalDeviceFeatures2(VkPhysicalDevice pd, VkPhys
 #define KW_DRIVER_NAME "kwvk"
 #define KW_DRIVER_INFO "unkernel Vulkan on WebGPU"
 #define KW_CONFORMANCE ((VkConformanceVersion){1, 1, 0, 0})
+/* timeline values are 64-bit counters in the guest with no window of their
+ * own (struct kw_sem): any difference */
+#define KW_TIMELINE_DIFF UINT64_MAX
 
 static API void CALL kw_vkGetPhysicalDeviceProperties2(VkPhysicalDevice pdh, VkPhysicalDeviceProperties2 *p)
 {
@@ -3519,7 +4172,7 @@ static API void CALL kw_vkGetPhysicalDeviceProperties2(VkPhysicalDevice pdh, VkP
 		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES: {
 			/* What a 1.2 caller reads in place of the structures above
 			 * (vulkaninfo's driver rows). The rest stays zero: no descriptor
-			 * indexing, no timeline semaphores, no minmax filtering. */
+			 * indexing, no minmax filtering. */
 			VkPhysicalDeviceVulkan12Properties *x = (void *)s;
 			ZBODY(x, VkPhysicalDeviceVulkan12Properties);
 			x->driverID = KW_DRIVER_ID;
@@ -3531,8 +4184,12 @@ static API void CALL kw_vkGetPhysicalDeviceProperties2(VkPhysicalDevice pdh, VkP
 			x->supportedDepthResolveModes = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
 			x->supportedStencilResolveModes = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
 			x->framebufferIntegerColorSampleCounts = VK_SAMPLE_COUNT_1_BIT;
+			x->maxTimelineSemaphoreValueDifference = KW_TIMELINE_DIFF;
 			break;
 		}
+		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_PROPERTIES:
+			((VkPhysicalDeviceTimelineSemaphoreProperties *)s)->maxTimelineSemaphoreValueDifference = KW_TIMELINE_DIFF;
+			break;
 		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES: {
 			VkPhysicalDeviceMaintenance3Properties *x = (void *)s;
 			x->maxPerSetDescriptors = 1024;
@@ -3679,13 +4336,8 @@ static API void CALL kw_vkCmdDispatchBase(VkCommandBuffer c, uint32_t bx, uint32
 static API void CALL kw_vkGetDescriptorSetLayoutSupport(VkDevice d, const VkDescriptorSetLayoutCreateInfo *ci, VkDescriptorSetLayoutSupport *s)
 {
 	(void)d;
-	VkBool32 ok = VK_TRUE;
-	for (uint32_t i = 0; i < ci->bindingCount; i++) {
-		VkDescriptorType t = ci->pBindings[i].descriptorType;
-		if (t == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER || t == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)
-			ok = VK_FALSE;
-	}
-	s->supported = ok;
+	(void)ci;
+	s->supported = VK_TRUE;
 }
 
 static API VkResult CALL kw_vkCreateSamplerYcbcrConversion(VkDevice d, const VkSamplerYcbcrConversionCreateInfo *ci, const VkAllocationCallbacks *a, VkSamplerYcbcrConversion *out)
@@ -3763,75 +4415,90 @@ static API void CALL kw_vkUpdateDescriptorSetWithTemplate(VkDevice d, VkDescript
 	free(bv);
 }
 
-/* Vulkan 1.2 core entry points whose features are reported false */
+/* Vulkan 1.2 core entry points */
 
-/* timeline semaphores (see struct kw_sem): values signalled by submitted work count once that work is done */
-static VkResult sem_settle(struct kw_device *d, struct kw_sem *sem)
+/* timeline semaphores (see struct kw_sem) */
+static API VkResult CALL kw_vkGetSemaphoreCounterValue(VkDevice dh, VkSemaphore s, uint64_t *v)
 {
-	pthread_mutex_lock(&sem_mu);
-	uint64_t want = sem->submitted, have = sem->value;
-	pthread_mutex_unlock(&sem_mu);
-	if (want <= have)
-		return VK_SUCCESS;
-	VkResult r = kw_sync(d);
-	if (r != VK_SUCCESS)
-		return r;
-	pthread_mutex_lock(&sem_mu);
-	if (sem->value < want)
-		sem->value = want;
-	pthread_mutex_unlock(&sem_mu);
-	return VK_SUCCESS;
-}
-static API VkResult CALL kw_vkGetSemaphoreCounterValue(VkDevice d, VkSemaphore s, uint64_t *v)
-{
+	struct kw_device *d = DEV(dh);
 	struct kw_sem *sem = HANDLE(struct kw_sem, s);
-	VkResult r = sem_settle(DEV(d), sem);
+	/* no round trip: the replies that have come (a lost device's last frame
+	 * among them), then the value reached */
+	link_poll(d->link, 0);
+	inflight_reap(d, KW_INFLIGHT);
+	tl_poll(d);
 	pthread_mutex_lock(&sem_mu);
 	*v = sem->value;
 	pthread_mutex_unlock(&sem_mu);
-	return r;
+	/* what submitted work wrote to mapped memory, as at a fence wait */
+	if (!d->link->dead)
+		kw_readback(d, NULL);
+	return d->link->dead ? VK_ERROR_DEVICE_LOST : VK_SUCCESS;
 }
 static API VkResult CALL kw_vkWaitSemaphores(VkDevice dh, const VkSemaphoreWaitInfo *i, uint64_t t)
 {
 	struct kw_device *d = DEV(dh);
+	int64_t t0 = kw_now();
 	int64_t end = t >= (uint64_t)INT64_MAX / 2 ? INT64_MAX : mono_ns() + (int64_t)t;
+	int any = (i->flags & VK_SEMAPHORE_WAIT_ANY_BIT) != 0;
+	VkResult res;
+	inflight_reap(d, KW_INFLIGHT);
+	tl_poll(d);
 	for (;;) {
-		uint32_t ok = 0;
+		link_poll(d->link, 0); /* a lost device's last frame, when it has come */
+		uint32_t ok = 0, coming = 0;
+		pthread_mutex_lock(&sem_mu);
 		for (uint32_t k = 0; k < i->semaphoreCount; k++) {
 			struct kw_sem *sem = HANDLE(struct kw_sem, i->pSemaphores[k]);
-			pthread_mutex_lock(&sem_mu);
-			int reached = sem->value >= i->pValues[k], coming = sem->submitted >= i->pValues[k];
-			pthread_mutex_unlock(&sem_mu);
-			if (!reached && coming) { /* signalled by submitted work: wait for it */
-				VkResult r = sem_settle(d, sem);
-				if (r != VK_SUCCESS)
-					return r;
-				reached = 1;
-			}
-			ok += reached;
+			if (sem->value >= i->pValues[k])
+				ok++;
+			else if (sem->submitted >= i->pValues[k])
+				coming++; /* signalled by sent work: at a reply */
 		}
-		if (ok == i->semaphoreCount || (ok && (i->flags & VK_SEMAPHORE_WAIT_ANY_BIT)))
-			return VK_SUCCESS;
-		if (d->link->dead)
-			return VK_ERROR_DEVICE_LOST;
-		/* a value only a host signal (another thread) can give */
+		int done = ok == i->semaphoreCount || (ok && any);
 		int64_t left = end - mono_ns();
-		if (left <= 0)
-			return VK_TIMEOUT;
-		struct timespec ts = {0, left < 1000000 ? left : 1000000};
-		nanosleep(&ts, NULL);
+		if (!done && !coming && !d->link->dead && left > 0) {
+			/* a value only a host signal (another thread) or the release of
+			 * a held submit gives */
+			cv_wait_ns(&sem_cv, &sem_mu, left < 20000000 ? left : 20000000);
+			pthread_mutex_unlock(&sem_mu);
+			continue;
+		}
+		pthread_mutex_unlock(&sem_mu);
+		if (d->link->dead) {
+			res = VK_ERROR_DEVICE_LOST;
+			break;
+		}
+		if (done) {
+			res = VK_SUCCESS;
+			break;
+		}
+		if (left <= 0) {
+			res = VK_TIMEOUT;
+			break;
+		}
+		tl_take(d, left < 20000000 ? left : 20000000);
 	}
+	inflight_reap(d, KW_INFLIGHT); /* replies that have come: a failed submit is a lost device */
+	kw_stats.wait_ns += kw_now() - t0;
+	if (res == VK_SUCCESS && !d->link->dead)
+		kw_readback(d, NULL);
+	return d->link->dead ? VK_ERROR_DEVICE_LOST : res;
 }
-static API VkResult CALL kw_vkSignalSemaphore(VkDevice d, const VkSemaphoreSignalInfo *i)
+static API VkResult CALL kw_vkSignalSemaphore(VkDevice dh, const VkSemaphoreSignalInfo *i)
 {
-	(void)d;
+	struct kw_device *d = DEV(dh);
 	struct kw_sem *sem = HANDLE(struct kw_sem, i->semaphore);
 	pthread_mutex_lock(&sem_mu);
-	if (i->value > sem->value)
-		sem->value = i->value;
+	sem_raise(sem, i->value);
 	if (i->value > sem->submitted)
 		sem->submitted = i->value;
+	pthread_cond_broadcast(&sem_cv);
 	pthread_mutex_unlock(&sem_mu);
+	/* submits held for it go now */
+	pthread_mutex_lock(&d->q_mu);
+	held_pump(d);
+	pthread_mutex_unlock(&d->q_mu);
 	return VK_SUCCESS;
 }
 static API VkDeviceAddress CALL kw_vkGetBufferDeviceAddress(VkDevice d, const VkBufferDeviceAddressInfo *i)

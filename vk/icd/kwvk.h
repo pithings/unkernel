@@ -95,6 +95,9 @@ struct kw_physical_device {
 	VkPhysicalDeviceFeatures features;
 	VkPhysicalDeviceMemoryProperties mem;
 	uint32_t fmtcaps[256];
+	/* texel buffer view formats: the hello's texelBuffers.formats (1 uniform,
+	 * 2 storage, 4 storage atomics; vk/PROTOCOL.md, Amendments, "Texel buffers") */
+	uint8_t texelcaps[256];
 	uint32_t max2d;
 	uint32_t timestamp_bits;
 	int f16;
@@ -126,6 +129,17 @@ struct kw_device {
 	int fence_sync; /* KWVK_FENCE_SYNC=1: fences signal at their submit's reply */
 	struct kw_buffer *buffers;
 	struct kw_memory *mems;
+	/* The queue's submission order (icd.c, "Semaphores"): whether a submit
+	 * is sent or held, and every send of one, under q_mu. Held submits wait
+	 * in the ICD, oldest first, for timeline values nothing has signalled
+	 * yet; q_cv is signalled whenever one leaves. */
+	pthread_mutex_t q_mu;
+	pthread_cond_t q_cv;
+	struct kw_held *held, **held_tail;
+	uint64_t seq; /* submits sent */
+	/* timeline values signalled by sent submits that may write host-visible
+	 * memory, reached at a reply (oldest first; under icd.c's sem_mu) */
+	struct kw_tlpend *tl;
 };
 struct kw_queue {
 	VK_LOADER_DATA loader;
@@ -165,6 +179,11 @@ struct kw_image {
 struct kw_obj { /* every other host object */
 	uint32_t id;
 };
+struct kw_bview { /* a texel buffer view: its range, for the device memory tracking */
+	uint32_t id; /* first, as kw_obj's */
+	struct kw_buffer *buf;
+	VkDeviceSize offset, range;
+};
 /* a descriptor set layout: its bindings sorted by number, for Vulkan's
  * consecutive binding updates and the order of dynamic offsets. Shared by
  * the sets allocated from it (a set may outlive its layout's handle). */
@@ -183,14 +202,14 @@ struct kw_dslot {
 	struct kw_buffer *buf;
 	VkDeviceSize offset, range;
 	int dyn; /* index of its dynamic offset in the set, -1: not dynamic */
-	int storage; /* a storage buffer (else a uniform buffer: read only) */
+	int storage; /* a storage buffer or storage texel buffer (else uniform: read only) */
 };
 struct kw_dset {
 	uint32_t id;
 	struct kw_dpool *pool;
 	struct kw_dsl *layout;
 	struct kw_dset *next, *prev;
-	struct kw_dslot *slots; /* uniform and storage buffers written into this set */
+	struct kw_dslot *slots; /* uniform and storage buffers (texel ones too) written into this set */
 	size_t nslots;
 };
 struct kw_dpool {
@@ -200,6 +219,8 @@ struct kw_fence {
 	int signaled;
 	uint32_t r; /* pending submit reply */
 	uint32_t polls; /* vkGetFenceStatus calls that found r pending */
+	int held; /* its submit is held in the ICD (a wait before a signal): not sent yet */
+	uint64_t seq; /* its submit's place in the queue (kw_device.seq) */
 };
 struct kw_shader {
 	uint32_t id;
@@ -249,6 +270,8 @@ struct kw_cmdpool {
 void kw_flush_writes(struct kw_device *d, struct kw_memory *only);
 void kw_readback(struct kw_device *d, struct kw_memory *only);
 uint32_t kw_create_image_msg(struct kw_device *d, const VkImageCreateInfo *ci);
+/* waits until no submit is held in the ICD (a present must follow them); VK_ERROR_DEVICE_LOST after a loss */
+VkResult kw_queue_unhold(struct kw_device *d, const char *call);
 
 /* KWVK_STATS=1: where the ICD's time goes, printed every 2 s at present */
 struct kw_stats {

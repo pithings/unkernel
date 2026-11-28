@@ -76,9 +76,48 @@ var<workgroup> s: array<u32, 64>;
 	"shared512.comp": () => {
 		throw new Error("workgroup size 512x1x1 exceeds the device's limits (maxComputeWorkgroupSize 256x256x64, maxComputeInvocationsPerWorkgroup 256) and the shader uses var<workgroup>");
 	},
-	"texel.comp": () => {
-		throw new Error("texel buffers (OpTypeImage Dim Buffer: samplerBuffer, imageBuffer) are not supported by WebGPU");
+	"arr1d.comp": () => {
+		throw new Error("WGSL: texture_storage_1d_array is not a WGSL type");
 	},
+	// test/vk/host hostCases: a 256-byte uniform block (GZDoom binds 252 bytes of one)
+	"u256.comp": () => ({
+		wgsl: `struct U { v: array<vec4u, 16> }
+@group(0) @binding(0) var<uniform> u: U;
+@group(0) @binding(2) var<storage, read_write> o: array<u32>;
+@compute @workgroup_size(64) fn main(@builtin(local_invocation_index) i: u32) { o[i] = u.v[i / 4u][i % 4u]; }`,
+		bindings: [{ set: 0, binding: 0, group: 0, wgslBinding: 0, kind: "uniform" }, { set: 0, binding: 1, group: 0, wgslBinding: 2, kind: "storage" }],
+	}),
+	// a texture and a sampler the app may leave unwritten, read into a buffer
+	"tex.comp": () => ({
+		wgsl: `@group(0) @binding(0) var t: texture_2d<f32>;
+@group(0) @binding(2) var s: sampler;
+@group(0) @binding(4) var<storage, read_write> o: array<f32>;
+@compute @workgroup_size(1) fn main() { let c = textureSampleLevel(t, s, vec2f(0.5), 0.0); o[0] = c.r; o[1] = c.g; o[2] = c.b; o[3] = c.a; o[4] = 7.0; }`,
+		bindings: [
+			{ set: 0, binding: 0, group: 0, wgslBinding: 0, kind: "texture", sampleType: "float", viewDimension: "2d" },
+			{ set: 0, binding: 1, group: 0, wgslBinding: 2, kind: "sampler" },
+			{ set: 0, binding: 2, group: 0, wgslBinding: 4, kind: "storage" },
+		],
+	}),
+	// o[i] = a[i] for 64 words, a read-only
+	"copyro.comp": () => ({
+		wgsl: `@group(0) @binding(0) var<storage, read> a: array<u32>;
+@group(0) @binding(2) var<storage, read_write> o: array<u32>;
+@compute @workgroup_size(64) fn main(@builtin(local_invocation_index) i: u32) { o[i] = a[i]; }`,
+		bindings: [{ set: 0, binding: 0, group: 0, wgslBinding: 0, kind: "read-only-storage" }, { set: 0, binding: 1, group: 0, wgslBinding: 2, kind: "storage" }],
+	}),
+	// position from the vertex buffer, no bindings
+	"pos.vert": (o) => ({
+		wgsl: `@vertex fn main(@location(0) pos: vec2f) -> @builtin(position) vec4f { return vec4f(pos.x, ${o.flipY ? "-" : ""}pos.y, 0.0, 1.0); }`,
+		bindings: [],
+	}),
+	"red.frag": () => ({ wgsl: `@fragment fn main() -> @location(0) vec4f { return vec4f(1.0, 0.0, 0.0, 1.0); }`, bindings: [] }),
+	// a fragment stage reading a storage buffer
+	"sbo.frag": () => ({
+		wgsl: `@group(0) @binding(0) var<storage, read> a: array<vec4f>;
+@fragment fn main() -> @location(0) vec4f { return a[0]; }`,
+		bindings: [{ set: 0, binding: 0, group: 0, wgslBinding: 0, kind: "read-only-storage" }],
+	}),
 	"double.comp": (o) => ({
 		wgsl: `const MUL = ${o.spec?.[0] ?? 1}u;
 struct B { v: array<u32> }
@@ -1145,10 +1184,10 @@ async function loud(renderer, label, shaderBytes) {
 		check("fake pipeline refused: adjacency topology (VK_ERROR_FEATURE_NOT_PRESENT)", err && err.result === -8 && /topology 8/.test(err.message), err ? `${err.message} (${err.result})` : "created");
 		cl.conn.close();
 	}
-	// a pipeline declaring a texel buffer: made "unusable"; binding it in a submit loses the device
+	// a pipeline declaring a 1D-array storage image: made "unusable"; binding it in a submit loses the device
 	{
-		const { cl, err, reply } = await computePipe("texel.comp");
-		check("fake pipeline unusable: texel buffer", !err && /texel buffers/.test(reply?.json?.unusable), err?.message ?? JSON.stringify(reply?.json));
+		const { cl, err, reply } = await computePipe("arr1d.comp");
+		check("fake pipeline unusable: 1D-array storage image", !err && /_1d_array/.test(reply?.json?.unusable), err?.message ?? JSON.stringify(reply?.json));
 		const serr = await cl.req({ op: "vkQueueSubmit", cmds: [{ c: "vkCmdBindPipeline", pipelineBindPoint: 1, pipeline: 4 }, { c: "vkCmdDispatch", groupCountX: 1 }] }).then(() => "ran", (e) => e.message);
 		check("fake unusable pipeline bound: device lost", /cannot run/.test(cl.lost) && /cannot run/.test(serr) && cl.closedByHost === 1, `lost ${cl.lost} | submit ${serr}`);
 	}
@@ -1169,6 +1208,515 @@ async function loud(renderer, label, shaderBytes) {
 		cl.post({ op: "writeBuffer", buffer: 77, offset: 0 }, new Uint8Array(8));
 		const serr = await cl.req({ op: "sync" }).then(() => "answered", (e) => e.message);
 		check("fake failed writeBuffer: device lost", /writeBuffer: no buffer 77/.test(cl.lost) && serr !== "answered" && cl.closedByHost === 1, `lost ${cl.lost} | sync ${serr}`);
+	}
+}
+
+// --- texel buffers (vk/PROTOCOL.md, Amendments, "Texel buffers"): views of
+// several formats at offsets off the storage alignment, a storage texel
+// buffer written and read back, refused formats, a stage out of storage
+// buffers, the hello's formats -------------------------------------------------
+async function texelCases(device, adapter, translatorP, spirvUrls) {
+	const fakeR = new VkRenderer({ device, adapter, shaders: fakeTranslator, log: (l) => log(`[texel] ${l}`) });
+	const fresh = (r) => {
+		const cl = new Client(r);
+		cl.chunky = false;
+		return cl;
+	};
+	const sync = (cl) => cl.req({ op: "sync" }).then(() => "answered", (e) => e.message);
+	const h = (await fresh(fakeR).req({ op: "hello", version: 1 })).json;
+	const tb = h.texelBuffers || {};
+	check("texel: hello lists texel buffer formats and maxElements", tb.formats?.[122] === 1 && tb.formats?.[9] === 3 && tb.formats?.[109] === 3 && tb.formats?.[98] === 7 && !tb.formats?.[43] && tb.maxElements >= 65536, JSON.stringify(tb).slice(0, 200));
+	// a stage with every storage buffer slot taken and a texel buffer more: refused, named
+	{
+		const lim = h.limits.maxStorageBuffersPerShaderStage;
+		const bindings = [];
+		for (let b = 0; b < lim; b++) bindings.push({ set: 0, binding: b, group: 0, wgslBinding: 2 * b, kind: "storage" });
+		bindings.push({ set: 0, binding: lim, group: 0, wgslBinding: 2 * lim, kind: "read-only-storage", texel: "data" }, { set: 0, binding: lim, group: 0, wgslBinding: 2 * lim + 1, kind: "uniform", texel: "params" });
+		FAKE["many.comp"] = () => ({ wgsl: "@compute @workgroup_size(1) fn main() {}", bindings });
+		const cl = fresh(fakeR);
+		cl.post({ op: "vkCreateShaderModule", id: 1 }, new TextEncoder().encode("FAKE:many.comp"));
+		cl.post({ op: "vkCreateDescriptorSetLayout", id: 2, bindings: bindings.filter((b) => b.texel !== "params").map((b) => ({ binding: b.binding, descriptorType: b.texel ? 4 : 7, descriptorCount: 1, stageFlags: 0x20 })) });
+		cl.post({ op: "vkCreatePipelineLayout", id: 3, setLayouts: [2], pushConstantRanges: [] });
+		const err = await cl.req({ op: "vkCreateComputePipelines", id: 4, layout: 3, stage: { stage: 0x20, module: 1, pName: "main" } }).then(() => undefined, (e) => e);
+		check(`texel: a compute stage with ${lim} storage buffers and a texel buffer refused, named`, err && new RegExp(`compute stage needs ${lim + 1} storage and 1 uniform buffers, 1 texel buffers taking one of each, over the device's maxStorageBuffersPerShaderStage \\(${lim}\\)`).test(err.message) && !cl.closedByHost, err?.message ?? "created");
+		cl.conn.close();
+	}
+	// a view of a format that is not a texel buffer format (R8G8B8A8_SRGB): its creation fails, a write of it loses the device
+	{
+		const cl = fresh(fakeR);
+		cl.post({ op: "vkCreateBuffer", id: 10, size: 1024, usage: 0x4 });
+		cl.post({ op: "vkCreateBufferView", id: 11, buffer: 10, format: 43, offset: 0, range: -1 });
+		cl.post({ op: "vkCreateDescriptorSetLayout", id: 2, bindings: [{ binding: 0, descriptorType: 4, descriptorCount: 1, stageFlags: 0x20 }] });
+		cl.post({ op: "vkAllocateDescriptorSets", sets: [{ id: 5, layout: 2 }] });
+		cl.post({ op: "vkUpdateDescriptorSets", descriptorWrites: [{ dstSet: 5, dstBinding: 0, descriptorType: 4, texelBufferView: [11] }] });
+		const serr = await sync(cl);
+		check("texel: a view of R8G8B8A8_SRGB refused, its write loses the device, named", /format 43 is not a texel buffer format/.test(cl.lost) && serr !== "answered", `lost ${cl.lost}`);
+	}
+	// B10G11R11_UFLOAT is a uniform texel buffer format only: as a storage texel buffer descriptor it loses the device
+	{
+		const cl = fresh(fakeR);
+		cl.post({ op: "vkCreateBuffer", id: 10, size: 1024, usage: 0x8 });
+		cl.post({ op: "vkCreateBufferView", id: 11, buffer: 10, format: 122, offset: 0, range: -1 });
+		cl.post({ op: "vkCreateDescriptorSetLayout", id: 2, bindings: [{ binding: 0, descriptorType: 5, descriptorCount: 1, stageFlags: 0x20 }] });
+		cl.post({ op: "vkAllocateDescriptorSets", sets: [{ id: 5, layout: 2 }] });
+		cl.post({ op: "vkUpdateDescriptorSets", descriptorWrites: [{ dstSet: 5, dstBinding: 0, descriptorType: 5, texelBufferView: [11] }] });
+		const serr = await sync(cl);
+		check("texel: B10G11R11_UFLOAT as a storage texel buffer loses the device, named", /format 122 is not a storage texel buffer format/.test(cl.lost) && serr !== "answered", `lost ${cl.lost}`);
+	}
+	if (!translatorP) {
+		log("skip texel buffer runs (no translator or glslangValidator)");
+		return;
+	}
+	const tr = await translatorP;
+	const renderer = new VkRenderer({ device, adapter, shaders: tr, log: (l) => log(`[texel] ${l}`) });
+	const spv = {};
+	for (const name of ["tbfetch.comp", "tbstore.comp"]) spv[name] = new Uint8Array(await (await fetch(spirvUrls[name])).arrayBuffer());
+	const f2h = (v) => {
+		const u = new Uint32Array(new Float32Array([v]).buffer)[0];
+		return v === 0 ? 0 : ((u >>> 16) & 0x8000) | ((((u >>> 23) & 255) - 112) << 10) | ((u >>> 13) & 1023);
+	};
+	const h2f = (h) => {
+		const e = (h >> 10) & 31, m = h & 1023;
+		const v = e === 0 ? m * 2 ** -24 : (1 + m / 1024) * 2 ** (e - 15);
+		return h & 0x8000 ? -v : v;
+	};
+	// fetches: one buffer, views of several formats at offsets that are multiples of 16 but not of 256
+	{
+		const cl = fresh(renderer);
+		cl.post({ op: "vkCreateShaderModule", id: 1 }, spv["tbfetch.comp"]);
+		cl.post({ op: "vkCreateDescriptorSetLayout", id: 2, bindings: [0, 1, 2, 3].map((b) => ({ binding: b, descriptorType: b < 3 ? 4 : 7, descriptorCount: 1, stageFlags: 0x20 })) });
+		cl.post({ op: "vkCreatePipelineLayout", id: 3, setLayouts: [2], pushConstantRanges: [] });
+		const perr = await cl.req({ op: "vkCreateComputePipelines", id: 4, layout: 3, stage: { stage: 0x20, module: 1, pName: "main" } }).then(() => undefined, (e) => e.message);
+		check("texel: a pipeline fetching three texel buffers is made", !perr, perr);
+		const bytes = new Uint8Array(8192).map((_, j) => (j * 37 + 11) & 255);
+		const dv = new DataView(bytes.buffer);
+		const halves = [1.5, -2.25, 0.125, 1000, -0.5, 3, 7.75, -64, 0.25, 2, 12, -1, 5, 6, 0.75, 9];
+		halves.forEach((v, j) => dv.setUint16(4496 + 2 * j, f2h(v), true));
+		for (let j = 0; j < 24; j++) dv.setFloat32(16 + 4 * j, j * 1.25 - 7, true);
+		cl.post({ op: "vkCreateBuffer", id: 10, size: 8192, usage: 0x4 });
+		cl.post({ op: "writeBuffer", buffer: 10, offset: 0 }, bytes);
+		cl.post({ op: "vkCreateBuffer", id: 11, size: 400, usage: 0x20 });
+		cl.post({ op: "vkAllocateDescriptorSets", sets: [{ id: 5, layout: 2 }] });
+		const u8at = (o) => bytes[o], s8at = (o) => (bytes[o] << 24) >> 24;
+		// [float view, int view, uint view]: [format, offset, range, expected element k (count from the range)]
+		const runs = [
+			[[9, 4096 + 400, 6, (o, k) => [u8at(o + k) / 255, 0, 0, 1]], [42, 272, 32, (o, k) => [0, 1, 2, 3].map((c) => s8at(o + 4 * k + c))], [74, 16, 10, (o, k) => [dv.getUint16(o + 2 * k, true), 0, 0, 1]]],
+			[[83, 4496, 32, (o, k) => [h2f(dv.getUint16(o + 4 * k, true)), h2f(dv.getUint16(o + 4 * k + 2, true)), 0, 1]], [75, 4112, 14, (o, k) => [dv.getInt16(o + 2 * k, true), 0, 0, 1]], [104, 16, 96, (o, k) => [0, 1, 2].map((c) => dv.getUint32(o + 12 * k + 4 * c, true)).concat(1)]],
+			[[106, 16, 96, (o, k) => [0, 1, 2].map((c) => dv.getFloat32(o + 12 * k + 4 * c, true)).concat(1)], [99, 8000, -1, (o, k) => [dv.getInt32(o + 4 * k, true), 0, 0, 1]], [41, 4352, 20, (o, k) => [0, 1, 2, 3].map((c) => bytes[o + 4 * k + c])]],
+			[[44, 256, 32, (o, k) => [2, 1, 0, 3].map((c) => bytes[o + 4 * k + c] / 255)], [14, 4097 + 15, 5, (o, k) => [s8at(o + k), 0, 0, 1]], [98, 8176, -1, (o, k) => [dv.getUint32(o + 4 * k, true), 0, 0, 1]]],
+		];
+		const SIZE = { 9: 1, 42: 4, 74: 2, 83: 4, 75: 2, 104: 12, 106: 12, 99: 4, 41: 4, 44: 4, 14: 1, 98: 4 };
+		let id = 20;
+		const bad = [];
+		for (const views of runs) {
+			const ids = views.map(([fmt, offset, range]) => {
+				cl.post({ op: "vkCreateBufferView", id: id, buffer: 10, format: fmt, offset, range });
+				return id++;
+			});
+			cl.post({ op: "vkUpdateDescriptorSets", descriptorWrites: [
+				{ dstSet: 5, dstBinding: 0, descriptorType: 4, descriptorCount: 3, texelBufferView: ids },
+				{ dstSet: 5, dstBinding: 3, descriptorType: 7, bufferInfo: [{ buffer: 11, offset: 0, range: -1 }] },
+			] });
+			cl.post({ op: "vkQueueSubmit", cmds: [
+				{ c: "vkCmdBindPipeline", pipelineBindPoint: 1, pipeline: 4 },
+				{ c: "vkCmdBindDescriptorSets", pipelineBindPoint: 1, layout: 3, firstSet: 0, descriptorSets: [5], dynamicOffsets: [] },
+				{ c: "vkCmdDispatch", groupCountX: 1, groupCountY: 1, groupCountZ: 1 },
+			] });
+			const got = await cl.req({ op: "readBuffer", buffer: 11, offset: 0, size: 400 }).then((r) => r.bin, (e) => (bad.push(e.message), undefined));
+			if (!got) break;
+			const gv = new DataView(got.buffer, got.byteOffset, got.length);
+			views.forEach(([fmt, offset, range, want], slot) => {
+				const count = Math.floor((range === -1 ? 8192 - offset : range) / SIZE[fmt]);
+				const n = gv.getInt32(384 + 4 * slot, true);
+				if (n !== count) bad.push(`format ${fmt}: size ${n} != ${count}`);
+				for (let k = 0; k < 8; k++) {
+					const w = k < count ? want(offset, k) : [0, 0, 0, 0];
+					for (let c = 0; c < 4; c++) {
+						const at = slot * 128 + k * 16 + c * 4;
+						const g = slot === 0 ? gv.getFloat32(at, true) : slot === 1 ? gv.getInt32(at, true) : gv.getUint32(at, true);
+						const ok = slot === 0 ? Math.abs(g - w[c]) <= 1e-6 * Math.max(1, Math.abs(w[c])) : g === w[c];
+						if (!ok && bad.length < 6) bad.push(`format ${fmt} at ${offset} element ${k}.${c}: ${g} != ${w[c]}`);
+					}
+				}
+			});
+		}
+		check("texel: fetches of 12 formats at offsets off the storage alignment (4496, 272, 4112, 8176, ...), sizes, zeros past the count", !bad.length && !cl.closedByHost, `${bad.join(", ")} | lost ${cl.lost}`);
+		cl.conn.close();
+	}
+	// a storage texel buffer written by compute (RGBA32F, then RGBA8 at an offset off the alignment), read back; the bytes around the view kept
+	{
+		const cl = fresh(renderer);
+		cl.post({ op: "vkCreateShaderModule", id: 1 }, spv["tbstore.comp"]);
+		cl.post({ op: "vkCreateDescriptorSetLayout", id: 2, bindings: [{ binding: 0, descriptorType: 4, descriptorCount: 1, stageFlags: 0x20 }, { binding: 1, descriptorType: 5, descriptorCount: 1, stageFlags: 0x20 }] });
+		cl.post({ op: "vkCreatePipelineLayout", id: 3, setLayouts: [2], pushConstantRanges: [] });
+		const perr = await cl.req({ op: "vkCreateComputePipelines", id: 4, layout: 3, stage: { stage: 0x20, module: 1, pName: "main" } }).then(() => undefined, (e) => e.message);
+		const src = new Float32Array(32).map((_, j) => j / 64 - 0.125);
+		cl.post({ op: "vkCreateBuffer", id: 10, size: 128, usage: 0x4 });
+		cl.post({ op: "writeBuffer", buffer: 10, offset: 0 }, u8(src));
+		cl.post({ op: "vkCreateBufferView", id: 11, buffer: 10, format: 109, offset: 0, range: -1 });
+		cl.post({ op: "vkCreateBuffer", id: 12, size: 4400, usage: 0x8 });
+		cl.post({ op: "writeBuffer", buffer: 12, offset: 0 }, new Uint8Array(4400).fill(0xee));
+		cl.post({ op: "vkCreateBufferView", id: 13, buffer: 12, format: 109, offset: 48, range: 128 });
+		cl.post({ op: "vkCreateBufferView", id: 14, buffer: 12, format: 37, offset: 4112, range: 32 });
+		cl.post({ op: "vkAllocateDescriptorSets", sets: [{ id: 5, layout: 2 }] });
+		const bad = [];
+		for (const [view, fmt, off] of [[13, 109, 48], [14, 37, 4112]]) {
+			cl.post({ op: "vkUpdateDescriptorSets", descriptorWrites: [{ dstSet: 5, dstBinding: 0, descriptorType: 4, texelBufferView: [11] }, { dstSet: 5, dstBinding: 1, descriptorType: 5, texelBufferView: [view] }] });
+			cl.post({ op: "vkQueueSubmit", cmds: [
+				{ c: "vkCmdBindPipeline", pipelineBindPoint: 1, pipeline: 4 },
+				{ c: "vkCmdBindDescriptorSets", pipelineBindPoint: 1, layout: 3, firstSet: 0, descriptorSets: [5], dynamicOffsets: [] },
+				{ c: "vkCmdDispatch", groupCountX: 1, groupCountY: 1, groupCountZ: 1 },
+			] });
+			const got = await cl.req({ op: "readBuffer", buffer: 12, offset: 0, size: 4400 }).then((r) => r.bin, (e) => (bad.push(e.message), undefined));
+			if (!got) break;
+			const gv = new DataView(got.buffer, got.byteOffset, got.length);
+			const end = off + (fmt === 109 ? 128 : 32);
+			for (let j = 0; j < 4400 && bad.length < 6; j++) {
+				if (j >= 48 && j < 176 && fmt === 37) continue; // the first run's
+				if (j >= off && j < end) continue;
+				if (got[j] !== 0xee) bad.push(`byte ${j} outside the view written: ${got[j]}`);
+			}
+			for (let j = 0; j < (fmt === 109 ? 32 : 32) && bad.length < 6; j++) {
+				const w = src[j] * 2 + 1;
+				const g = fmt === 109 ? gv.getFloat32(off + 4 * j, true) : got[off + j];
+				const want = fmt === 109 ? w : Math.round(Math.min(1, Math.max(0, w)) * 255);
+				if (Math.abs(g - want) > 1e-6) bad.push(`format ${fmt} component ${j}: ${g} != ${want}`);
+			}
+		}
+		check("texel: a storage texel buffer written by compute (RGBA32F at 48, RGBA8 at 4112) and read back, nothing around it written", !perr && !bad.length && !cl.closedByHost, `${perr || ""} ${bad.join(", ")} | lost ${cl.lost}`);
+		cl.conn.close();
+	}
+}
+
+// --- host rules: uniform sizes, compressed copies, unwritten bindings,
+// multi-draw indirect, misaligned storage offsets ------------------------------
+
+async function hostCases(device, adapter) {
+	const renderer = new VkRenderer({ device, adapter, shaders: fakeTranslator, log: (l) => log(`[rules] ${l}`) });
+	const fake = (name) => new TextEncoder().encode(`FAKE:${name}`);
+	const words = (bin) => new Uint32Array(bin.buffer.slice(bin.byteOffset, bin.byteOffset + bin.length));
+	const fresh = () => {
+		const cl = new Client(renderer);
+		cl.chunky = false;
+		return cl;
+	};
+	const sync = (cl) => cl.req({ op: "sync" }).then(() => "answered", (e) => e.message);
+	// one compute pipeline over set 0 (descriptor types as given), its set and a dispatch
+	const compute = (cl, shader, types, extra = {}) => {
+		cl.post({ op: "vkCreateShaderModule", id: 1 }, fake(shader));
+		cl.post({ op: "vkCreateDescriptorSetLayout", id: 2, bindings: types.map((t, i) => ({ binding: i, descriptorType: t, descriptorCount: 1, stageFlags: 0x20, ...(extra[i] || {}) })) });
+		cl.post({ op: "vkCreatePipelineLayout", id: 3, setLayouts: [2], pushConstantRanges: [] });
+		cl.post({ op: "vkCreateComputePipelines", id: 4, layout: 3, stage: { stage: 0x20, module: 1, pName: "main" } });
+		cl.post({ op: "vkAllocateDescriptorSets", sets: [{ id: 5, layout: 2 }] });
+	};
+	const dispatch = (cl, set = 5) => cl.post({ op: "vkQueueSubmit", cmds: [
+		{ c: "vkCmdBindPipeline", pipelineBindPoint: 1, pipeline: 4 },
+		{ c: "vkCmdBindDescriptorSets", pipelineBindPoint: 1, layout: 3, firstSet: 0, descriptorSets: [set], dynamicOffsets: [] },
+		{ c: "vkCmdDispatch", groupCountX: 1, groupCountY: 1, groupCountZ: 1 },
+	] });
+	const h = (await fresh().req({ op: "hello", version: 1 })).json;
+	log(`[rules] adapter features: ${[...adapter.features].filter((f) => f.startsWith("texture-compression")).join(" ")}; minStorageBufferOffsetAlignment ${h.limits.minStorageBufferOffsetAlignment}, minUniformBufferOffsetAlignment ${h.limits.minUniformBufferOffsetAlignment}`);
+
+	// #4: a 252-byte uniform buffer bound with range 252 (GZDoom) and whole,
+	// read by a shader whose block is 256 bytes: the binding grows to 256
+	// within the buffer's GPU buffer; reads, writes and readback keep 252
+	{
+		const cl = fresh();
+		compute(cl, "u256.comp", [6, 7]);
+		cl.post({ op: "vkCreateBuffer", id: 10, size: 252, usage: 0x10 | 0x2 });
+		cl.post({ op: "vkCreateBuffer", id: 11, size: 256, usage: 0x20 });
+		const vals = new Uint32Array(63).map((_, i) => 1000 + i);
+		cl.post({ op: "writeBuffer", buffer: 10, offset: 0 }, u8(vals));
+		const res = [];
+		for (const range of [252, -1]) {
+			cl.post({ op: "vkUpdateDescriptorSets", descriptorWrites: [
+				{ dstSet: 5, dstBinding: 0, descriptorType: 6, bufferInfo: [{ buffer: 10, offset: 0, range }] },
+				{ dstSet: 5, dstBinding: 1, descriptorType: 7, bufferInfo: [{ buffer: 11, offset: 0, range: -1 }] },
+			] });
+			dispatch(cl);
+			const o = words((await cl.req({ op: "readBuffer", buffer: 11, offset: 0, size: 256 })).bin);
+			res.push(o.slice(0, 63).every((v, i) => v === 1000 + i) && o[63] === 0 ? "ok" : `${o[0]},${o[62]},${o[63]}`);
+		}
+		const rb = await cl.req({ op: "readBuffer", buffer: 10, offset: 0, size: -1 });
+		check("uniform binding of 252 bytes read by a 256-byte block (range 252 and whole)", res.join() === "ok,ok" && rb.bin.length === 252 && !cl.closedByHost, `${res.join(" ")}; readback ${rb.bin.length} bytes; lost ${cl.lost}`);
+		cl.post({ op: "writeBuffer", buffer: 10, offset: 252 }, new Uint8Array(4));
+		const past = await sync(cl);
+		check("uniform buffer: a write past its Vulkan size into the padding is refused: device lost", /write past the end \(252\+4 > 252\)/.test(cl.lost) && past !== "answered", `lost ${cl.lost}`);
+	}
+	// a uniform range that 16-byte steps do not bring up to the block (200 of 256) is still refused: device lost
+	{
+		const cl = fresh();
+		compute(cl, "u256.comp", [6, 7]);
+		cl.post({ op: "vkCreateBuffer", id: 10, size: 512, usage: 0x10 });
+		cl.post({ op: "vkCreateBuffer", id: 11, size: 256, usage: 0x20 });
+		cl.post({ op: "vkUpdateDescriptorSets", descriptorWrites: [
+			{ dstSet: 5, dstBinding: 0, descriptorType: 6, bufferInfo: [{ buffer: 10, offset: 0, range: 200 }] },
+			{ dstSet: 5, dstBinding: 1, descriptorType: 7, bufferInfo: [{ buffer: 11, offset: 0, range: -1 }] },
+		] });
+		dispatch(cl);
+		const serr = await sync(cl);
+		check("uniform range 200 for a 256-byte block: device lost", /too small|bound with size 208/.test(cl.lost) && serr !== "answered", `lost ${cl.lost}`);
+	}
+
+	// #6: block-compressed copies that end mid-block at a level's edge,
+	// both directions, and between images (same format, and BC1 to and
+	// from R32G32_UINT: the same 8 bytes a block)
+	if (adapter.features.has("texture-compression-bc")) {
+		const cl = fresh();
+		// BC1 8x8, 4 levels (8, 4, 2, 1)
+		cl.post({ op: "vkCreateImage", id: 20, imageType: 1, format: 133, extent: { width: 8, height: 8, depth: 1 }, mipLevels: 4, arrayLayers: 1, samples: 1, usage: 0x1 | 0x2 | 0x4 });
+		cl.post({ op: "vkCreateImage", id: 21, imageType: 1, format: 133, extent: { width: 8, height: 8, depth: 1 }, mipLevels: 4, arrayLayers: 1, samples: 1, usage: 0x1 | 0x2 | 0x4 });
+		cl.post({ op: "vkCreateImage", id: 22, imageType: 1, format: 101, extent: { width: 2, height: 2, depth: 1 }, mipLevels: 1, arrayLayers: 1, samples: 1, usage: 0x1 | 0x2 });
+		cl.post({ op: "vkCreateBuffer", id: 30, size: 256, usage: 0x1 | 0x2 });
+		cl.post({ op: "vkCreateBuffer", id: 31, size: 256, usage: 0x1 | 0x2 });
+		const blocks = new Uint8Array(256).map((_, i) => (i * 37 + 11) & 255);
+		cl.post({ op: "writeBuffer", buffer: 30, offset: 0 }, blocks);
+		const sub = (mip) => ({ aspectMask: 1, mipLevel: mip, baseArrayLayer: 0, layerCount: 1 });
+		const reg = (off, mip, w, hh) => ({ bufferOffset: off, bufferRowLength: 0, bufferImageHeight: 0, imageSubresource: sub(mip), imageOffset: { x: 0, y: 0, z: 0 }, imageExtent: { width: w, height: hh, depth: 1 } });
+		cl.post({ op: "vkQueueSubmit", cmds: [
+			// level 2 (2x2) and level 3 (1x1): one block each, from bytes 0 and 8
+			{ c: "vkCmdCopyBufferToImage", srcBuffer: 30, dstImage: 20, dstImageLayout: 7, regions: [reg(0, 2, 2, 2), reg(8, 3, 1, 1)] },
+			// and back into another buffer at 16 and 24
+			{ c: "vkCmdCopyImageToBuffer", srcImage: 20, srcImageLayout: 6, dstBuffer: 31, regions: [reg(16, 2, 2, 2), reg(24, 3, 1, 1)] },
+			// level 2 to the other BC1 image's level 2 (extent 2x2), then out at 32
+			{ c: "vkCmdCopyImage", srcImage: 20, srcImageLayout: 6, dstImage: 21, dstImageLayout: 7, regions: [{ srcSubresource: sub(2), srcOffset: { x: 0, y: 0, z: 0 }, dstSubresource: sub(2), dstOffset: { x: 0, y: 0, z: 0 }, extent: { width: 2, height: 2, depth: 1 } }] },
+			{ c: "vkCmdCopyImageToBuffer", srcImage: 21, srcImageLayout: 6, dstBuffer: 31, regions: [reg(32, 2, 2, 2)] },
+		] });
+		const o = (await cl.req({ op: "readBuffer", buffer: 31, offset: 0, size: 40 })).bin;
+		const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+		check("BC1 levels 2x2 and 1x1: buffer to image and back, and image to image (extents mid-block)", same(o.subarray(16, 24), blocks.subarray(0, 8)) && same(o.subarray(24, 32), blocks.subarray(8, 16)) && same(o.subarray(32, 40), blocks.subarray(0, 8)) && !cl.closedByHost, `lost ${cl.lost}; ${[...o.subarray(16, 40)].join(",")}`);
+		// BC1 level 0 (8x8: 2x2 blocks) into R32G32_UINT 2x2 and back into BC1 level 1 (4x4: one block)
+		cl.post({ op: "vkQueueSubmit", cmds: [
+			{ c: "vkCmdCopyBufferToImage", srcBuffer: 30, dstImage: 20, dstImageLayout: 7, regions: [reg(64, 0, 8, 8)] },
+			{ c: "vkCmdCopyImage", srcImage: 20, srcImageLayout: 6, dstImage: 22, dstImageLayout: 7, regions: [{ srcSubresource: sub(0), srcOffset: { x: 0, y: 0, z: 0 }, dstSubresource: sub(0), dstOffset: { x: 0, y: 0, z: 0 }, extent: { width: 8, height: 8, depth: 1 } }] },
+			{ c: "vkCmdCopyImageToBuffer", srcImage: 22, srcImageLayout: 6, dstBuffer: 31, regions: [{ ...reg(64, 0, 2, 2), imageSubresource: sub(0) }] },
+			{ c: "vkCmdCopyImage", srcImage: 22, srcImageLayout: 6, dstImage: 21, dstImageLayout: 7, regions: [{ srcSubresource: sub(0), srcOffset: { x: 1, y: 1, z: 0 }, dstSubresource: sub(1), dstOffset: { x: 0, y: 0, z: 0 }, extent: { width: 1, height: 1, depth: 1 } }] },
+			{ c: "vkCmdCopyImageToBuffer", srcImage: 21, srcImageLayout: 6, dstBuffer: 31, regions: [reg(96, 1, 4, 4)] },
+		] });
+		const o2 = (await cl.req({ op: "readBuffer", buffer: 31, offset: 64, size: 40 })).bin;
+		check("BC1 to R32G32_UINT and back (size-compatible formats through a buffer)", same(o2.subarray(0, 32), blocks.subarray(64, 96)) && same(o2.subarray(32, 40), blocks.subarray(88, 96)) && !cl.closedByHost, `lost ${cl.lost}; ${[...o2].join(",")}`);
+		// a copy extent past the level (8x8 into level 1, 4x4): device lost, named
+		cl.post({ op: "vkQueueSubmit", cmds: [{ c: "vkCmdCopyBufferToImage", srcBuffer: 30, dstImage: 20, dstImageLayout: 7, regions: [reg(0, 1, 8, 8)] }] });
+		const serr = await sync(cl);
+		check("BC1 copy extent past the level: device lost", /copy extent 8x8x1 out of range/.test(cl.lost) && serr !== "answered", `lost ${cl.lost}`);
+	} else check("BC copies: skipped (no texture-compression-bc)", true);
+	if (adapter.features.has("texture-compression-astc")) {
+		// ASTC 6x6 (format 165) 24x24, levels 24, 12, 6, 3: level 3 is half a block
+		const cl = fresh();
+		cl.post({ op: "vkCreateImage", id: 20, imageType: 1, format: 165, extent: { width: 24, height: 24, depth: 1 }, mipLevels: 4, arrayLayers: 1, samples: 1, usage: 0x1 | 0x2 | 0x4 });
+		cl.post({ op: "vkCreateBuffer", id: 30, size: 64, usage: 0x1 | 0x2 });
+		const blk = new Uint8Array(64).map((_, i) => (i * 53 + 5) & 255);
+		cl.post({ op: "writeBuffer", buffer: 30, offset: 0 }, blk);
+		const r = (off, w) => ({ bufferOffset: off, imageSubresource: { aspectMask: 1, mipLevel: 3, baseArrayLayer: 0, layerCount: 1 }, imageOffset: { x: 0, y: 0, z: 0 }, imageExtent: { width: w, height: w, depth: 1 } });
+		cl.post({ op: "vkQueueSubmit", cmds: [
+			{ c: "vkCmdCopyBufferToImage", srcBuffer: 30, dstImage: 20, dstImageLayout: 7, regions: [r(0, 3)] },
+			{ c: "vkCmdCopyImageToBuffer", srcImage: 20, srcImageLayout: 6, dstBuffer: 30, regions: [r(32, 3)] },
+		] });
+		const o = (await cl.req({ op: "readBuffer", buffer: 30, offset: 32, size: 16 })).bin;
+		check("ASTC 6x6 level 3x3: buffer to image and back", o.every((v, i) => v === blk[i]) && !cl.closedByHost, `lost ${cl.lost}`);
+	} else check("ASTC copies: skipped (no texture-compression-astc)", true);
+
+	// #3: a texture and a sampler left unwritten get placeholders (logged
+	// once, the shader reads zeros); a sampler binding with immutable
+	// samplers needs no write
+	{
+		const cl = fresh();
+		compute(cl, "tex.comp", [2, 0, 7]);
+		cl.post({ op: "vkCreateBuffer", id: 10, size: 64, usage: 0x20 });
+		cl.post({ op: "vkUpdateDescriptorSets", descriptorWrites: [{ dstSet: 5, dstBinding: 2, descriptorType: 7, bufferInfo: [{ buffer: 10, offset: 0, range: -1 }] }] });
+		const before = logs.length;
+		dispatch(cl);
+		dispatch(cl);
+		const o = new Float32Array(words((await cl.req({ op: "readBuffer", buffer: 10, offset: 0, size: 20 })).bin).buffer);
+		const lines = logs.slice(before).filter((l) => /^\[rules\] kwvk:.*not written/.test(l));
+		check("unwritten texture and sampler: placeholders bound, zeros read, logged once", [...o].join() === "0,0,0,0,7" && lines.length === 1 && /set binding 0 not written: a placeholder texture/.test(lines[0]) && !cl.closedByHost, `${[...o].join()} | ${lines.join(" / ")} | lost ${cl.lost}`);
+		cl.conn.close();
+	}
+	{
+		const cl = fresh();
+		cl.post({ op: "vkCreateSampler", id: 40, magFilter: 0, minFilter: 0 });
+		compute(cl, "tex.comp", [2, 0, 7], { 1: { immutableSamplers: [40] } });
+		cl.post({ op: "vkCreateBuffer", id: 10, size: 64, usage: 0x20 });
+		cl.post({ op: "vkCreateImage", id: 41, imageType: 1, format: 37, extent: { width: 1, height: 1, depth: 1 }, mipLevels: 1, arrayLayers: 1, samples: 1, usage: 0x4 | 0x2 });
+		cl.post({ op: "vkCreateImageView", id: 42, image: 41, viewType: 1, format: 37, subresourceRange: { aspectMask: 1, levelCount: 1, layerCount: 1 } });
+		cl.post({ op: "vkUpdateDescriptorSets", descriptorWrites: [
+			{ dstSet: 5, dstBinding: 0, descriptorType: 2, imageInfo: [{ imageView: 42, imageLayout: 5 }] },
+			{ dstSet: 5, dstBinding: 2, descriptorType: 7, bufferInfo: [{ buffer: 10, offset: 0, range: -1 }] },
+		] });
+		cl.post({ op: "vkQueueSubmit", cmds: [{ c: "vkCmdClearColorImage", image: 41, color: { float32: [1, 0, 0, 1] }, ranges: [{ aspectMask: 1, levelCount: 1, layerCount: 1 }] }] });
+		const before = logs.length;
+		dispatch(cl);
+		const o = new Float32Array(words((await cl.req({ op: "readBuffer", buffer: 10, offset: 0, size: 20 })).bin).buffer);
+		const lines = logs.slice(before).filter((l) => /^\[rules\] kwvk:/.test(l));
+		check("immutable sampler unwritten: the layout's sampler bound, the texture read, nothing logged", [...o].join() === "1,0,0,1,7" && !lines.length && !cl.closedByHost, `${[...o].join()} | ${lines.join(" / ")} | lost ${cl.lost}`);
+		cl.conn.close();
+	}
+
+	// #1: vkCmdDrawIndirect / vkCmdDrawIndexedIndirect with drawCount > 1 and
+	// a stride larger than the record: each record drawn, the bytes between
+	// records never read; a drawCount past the buffer's end draws its whole records
+	{
+		const cl = fresh();
+		const W = 64;
+		cl.post({ op: "vkCreateImage", id: 50, imageType: 1, format: 37, extent: { width: W, height: W, depth: 1 }, mipLevels: 1, arrayLayers: 1, samples: 1, usage: 0x10 | 0x1 });
+		cl.post({ op: "vkCreateImageView", id: 51, image: 50, viewType: 1, format: 37, subresourceRange: { aspectMask: 1, levelCount: 1, layerCount: 1 } });
+		cl.post({ op: "vkCreateRenderPass", id: 52, pAttachments: [{ format: 37, samples: 1, loadOp: 1, storeOp: 0, stencilLoadOp: 2, stencilStoreOp: 1, initialLayout: 0, finalLayout: 6 }], pSubpasses: [{ pipelineBindPoint: 0, pColorAttachments: [{ attachment: 0, layout: 2 }] }] });
+		cl.post({ op: "vkCreateFramebuffer", id: 53, renderPass: 52, attachments: [51], width: W, height: W, layers: 1 });
+		cl.post({ op: "vkCreateShaderModule", id: 54 }, fake("pos.vert"));
+		cl.post({ op: "vkCreateShaderModule", id: 55 }, fake("red.frag"));
+		cl.post({ op: "vkCreatePipelineLayout", id: 56, setLayouts: [], pushConstantRanges: [] });
+		cl.post({
+			op: "vkCreateGraphicsPipelines", id: 57, layout: 56, renderPass: 52, subpass: 0,
+			stages: [{ stage: 1, module: 54, pName: "main" }, { stage: 0x10, module: 55, pName: "main" }],
+			vertexInputState: { vertexBindingDescriptions: [{ binding: 0, stride: 8, inputRate: 0 }], vertexAttributeDescriptions: [{ location: 0, binding: 0, format: 103, offset: 0 }] },
+			inputAssemblyState: { topology: 3 }, rasterizationState: { polygonMode: 0, cullMode: 0, frontFace: 0, lineWidth: 1 },
+			viewportState: { viewports: [{ x: 0, y: 0, width: W, height: W, minDepth: 0, maxDepth: 1 }], scissors: [{ offset: { x: 0, y: 0 }, extent: { width: W, height: W } }] },
+			multisampleState: { rasterizationSamples: 1 }, colorBlendState: { attachments: [{ blendEnable: 0, colorWriteMask: 15 }] },
+		});
+		// six small triangles, one around each of six cells (8 px from the centre of cell k at x = 8 + 10k... in clip space)
+		const cells = [0, 1, 2, 3, 4, 5].map((k) => [-0.9 + k * 0.3, 0]);
+		const tri = (cx, cy) => [cx - 0.1, cy - 0.1, cx + 0.1, cy - 0.1, cx, cy + 0.1];
+		cl.post({ op: "vkCreateBuffer", id: 58, size: 6 * 24, usage: 0x80 });
+		cl.post({ op: "writeBuffer", buffer: 58, offset: 0 }, u8(new Float32Array(cells.flatMap(([x, y]) => tri(x, y)))));
+		cl.post({ op: "vkCreateBuffer", id: 59, size: 64, usage: 0x40 });
+		cl.post({ op: "writeBuffer", buffer: 59, offset: 0 }, u8(new Uint32Array(16).map((_, i) => i)));
+		// non-indexed: records {3, 1, 3k, 0} for k = 0, 1, 2 at stride 32; the gap holds {3, 1, 15, 0} (cell 5), never to be drawn
+		const ind = new Uint32Array(64);
+		for (let k = 0; k < 3; k++) ind.set([3, 1, 3 * k, 0, 3, 1, 15, 0], 8 * k);
+		// indexed at 112: records {3, 1, 9, 0, 0} and {3, 1, 12, 0, 0} at stride 28; the gap's two words would shift a packed read
+		ind.set([3, 1, 9, 0, 0, 7, 7, 3, 1, 12, 0, 0], 28);
+		cl.post({ op: "vkCreateBuffer", id: 60, size: 256, usage: 0x100 });
+		cl.post({ op: "writeBuffer", buffer: 60, offset: 0 }, u8(ind));
+		cl.post({ op: "vkCreateBuffer", id: 61, size: W * W * 4, usage: 0x2 });
+		cl.post({ op: "vkQueueSubmit", cmds: [
+			{ c: "vkCmdBeginRenderPass", renderPass: 52, framebuffer: 53, renderArea: { offset: { x: 0, y: 0 }, extent: { width: W, height: W } }, clearValues: [{ color: { float32: [0, 0, 1, 1] } }] },
+			{ c: "vkCmdBindPipeline", pipelineBindPoint: 0, pipeline: 57 },
+			{ c: "vkCmdBindVertexBuffers", firstBinding: 0, buffers: [58], offsets: [0] },
+			{ c: "vkCmdBindIndexBuffer", buffer: 59, offset: 0, indexType: 1 },
+			{ c: "vkCmdDrawIndirect", buffer: 60, offset: 0, drawCount: 3, stride: 32 },
+			{ c: "vkCmdDrawIndexedIndirect", buffer: 60, offset: 112, drawCount: 2, stride: 28 },
+			{ c: "vkCmdEndRenderPass" },
+			{ c: "vkCmdCopyImageToBuffer", srcImage: 50, srcImageLayout: 6, dstBuffer: 61, regions: [{ bufferOffset: 0, imageSubresource: { aspectMask: 1, mipLevel: 0, baseArrayLayer: 0, layerCount: 1 }, imageOffset: { x: 0, y: 0, z: 0 }, imageExtent: { width: W, height: W, depth: 1 } }] },
+		] });
+		const px = (await cl.req({ op: "readBuffer", buffer: 61, offset: 0, size: W * W * 4 })).bin;
+		const red = cells.map(([x]) => px[(32 * W + Math.round((x + 1) * 32)) * 4] === 255 ? 1 : 0).join("");
+		check("multi-draw indirect: drawCount 3 at stride 32, indexed drawCount 2 at stride 28", red === "111110" && !cl.closedByHost, `cells drawn ${red} (want 111110) | lost ${cl.lost}`);
+		// drawCount 5 on a buffer with 3 whole records at stride 32 and 4 bytes of a fourth: 3 drawn, nothing refused
+		cl.post({ op: "vkCreateBuffer", id: 62, size: 100, usage: 0x100 });
+		cl.post({ op: "writeBuffer", buffer: 62, offset: 0 }, u8(ind.slice(0, 25)));
+		cl.post({ op: "vkQueueSubmit", cmds: [
+			{ c: "vkCmdBeginRenderPass", renderPass: 52, framebuffer: 53, renderArea: { offset: { x: 0, y: 0 }, extent: { width: W, height: W } }, clearValues: [{ color: { float32: [0, 0, 1, 1] } }] },
+			{ c: "vkCmdBindPipeline", pipelineBindPoint: 0, pipeline: 57 },
+			{ c: "vkCmdBindVertexBuffers", firstBinding: 0, buffers: [58], offsets: [0] },
+			{ c: "vkCmdDrawIndirect", buffer: 62, offset: 0, drawCount: 5, stride: 32 },
+			{ c: "vkCmdEndRenderPass" },
+			{ c: "vkCmdCopyImageToBuffer", srcImage: 50, srcImageLayout: 6, dstBuffer: 61, regions: [{ bufferOffset: 0, imageSubresource: { aspectMask: 1, mipLevel: 0, baseArrayLayer: 0, layerCount: 1 }, imageOffset: { x: 0, y: 0, z: 0 }, imageExtent: { width: W, height: W, depth: 1 } }] },
+		] });
+		const px2 = (await cl.req({ op: "readBuffer", buffer: 61, offset: 0, size: W * W * 4 })).bin;
+		const red2 = cells.map(([x]) => px2[(32 * W + Math.round((x + 1) * 32)) * 4] === 255 ? 1 : 0).join("");
+		check("multi-draw indirect: drawCount past the buffer's end draws its whole records", red2 === "111000" && !cl.closedByHost, `cells drawn ${red2} (want 111000) | lost ${cl.lost}`);
+		// indexed triangle fans with primitive restart (uint16, firstIndex 1): two
+		// quads [0,1,2,3] and [4,5,6,7] rewritten as lists before the pass; as
+		// plain lists each quad would be half drawn
+		cl.post({
+			op: "vkCreateGraphicsPipelines", id: 80, layout: 56, renderPass: 52, subpass: 0,
+			stages: [{ stage: 1, module: 54, pName: "main" }, { stage: 0x10, module: 55, pName: "main" }],
+			vertexInputState: { vertexBindingDescriptions: [{ binding: 0, stride: 8, inputRate: 0 }], vertexAttributeDescriptions: [{ location: 0, binding: 0, format: 103, offset: 0 }] },
+			inputAssemblyState: { topology: 5, primitiveRestartEnable: 1 }, rasterizationState: { polygonMode: 0, cullMode: 0, frontFace: 0, lineWidth: 1 },
+			viewportState: { viewports: [{ x: 0, y: 0, width: W, height: W, minDepth: 0, maxDepth: 1 }], scissors: [{ offset: { x: 0, y: 0 }, extent: { width: W, height: W } }] },
+			multisampleState: { rasterizationSamples: 1 }, colorBlendState: { attachments: [{ blendEnable: 0, colorWriteMask: 15 }] },
+		});
+		const quad = (x0, x1) => [x0, -0.5, x1, -0.5, x1, 0.5, x0, 0.5];
+		cl.post({ op: "vkCreateBuffer", id: 81, size: 64, usage: 0x80 });
+		cl.post({ op: "writeBuffer", buffer: 81, offset: 0 }, u8(new Float32Array([...quad(-0.9, -0.1), ...quad(0.1, 0.9)])));
+		cl.post({ op: "vkCreateBuffer", id: 82, size: 20, usage: 0x40 });
+		cl.post({ op: "writeBuffer", buffer: 82, offset: 0 }, u8(new Uint16Array([99, 0, 1, 2, 3, 0xffff, 4, 5, 6, 7])));
+		const before = logs.length;
+		cl.post({ op: "vkQueueSubmit", cmds: [
+			{ c: "vkCmdBeginRenderPass", renderPass: 52, framebuffer: 53, renderArea: { offset: { x: 0, y: 0 }, extent: { width: W, height: W } }, clearValues: [{ color: { float32: [0, 0, 1, 1] } }] },
+			{ c: "vkCmdBindPipeline", pipelineBindPoint: 0, pipeline: 80 },
+			{ c: "vkCmdBindVertexBuffers", firstBinding: 0, buffers: [81], offsets: [0] },
+			{ c: "vkCmdBindIndexBuffer", buffer: 82, offset: 0, indexType: 0 },
+			{ c: "vkCmdDrawIndexed", indexCount: 9, instanceCount: 1, firstIndex: 1, vertexOffset: 0, firstInstance: 0 },
+			{ c: "vkCmdEndRenderPass" },
+			{ c: "vkCmdCopyImageToBuffer", srcImage: 50, srcImageLayout: 6, dstBuffer: 61, regions: [{ bufferOffset: 0, imageSubresource: { aspectMask: 1, mipLevel: 0, baseArrayLayer: 0, layerCount: 1 }, imageOffset: { x: 0, y: 0, z: 0 }, imageExtent: { width: W, height: W, depth: 1 } }] },
+		] });
+		const px3 = (await cl.req({ op: "readBuffer", buffer: 61, offset: 0, size: W * W * 4 })).bin;
+		const at3 = (x, y) => (px3[(Math.floor((1 - y) * 32) * W + Math.floor((x + 1) * 32)) * 4] === 255 ? 1 : 0);
+		const corners = [-0.5, 0.5].map((cx) => [at3(cx - 0.3, -0.35), at3(cx + 0.3, -0.35), at3(cx + 0.3, 0.35), at3(cx - 0.3, 0.35)].join("")).join(" ") + ` outside ${at3(0, 0)}${at3(-0.5, 0.8)}`;
+		const fanLogs = logs.slice(before).filter((l) => /^\[rules\] kwvk:.*fan/.test(l));
+		check("indexed triangle fans with primitive restart drawn as their triangles", corners === "1111 1111 outside 00" && !fanLogs.length && !cl.closedByHost, `${corners} (want 1111 1111 outside 00) | ${fanLogs.join(" / ")} | lost ${cl.lost}`);
+		// a misaligned storage binding in a draw: device lost, named (a render pass cannot copy it aside)
+		cl.post({ op: "vkCreateShaderModule", id: 70 }, fake("sbo.frag"));
+		cl.post({ op: "vkCreateDescriptorSetLayout", id: 71, bindings: [{ binding: 0, descriptorType: 7, descriptorCount: 1, stageFlags: 0x10 }] });
+		cl.post({ op: "vkCreatePipelineLayout", id: 72, setLayouts: [71], pushConstantRanges: [] });
+		cl.post({
+			op: "vkCreateGraphicsPipelines", id: 73, layout: 72, renderPass: 52, subpass: 0,
+			stages: [{ stage: 1, module: 54, pName: "main" }, { stage: 0x10, module: 70, pName: "main" }],
+			vertexInputState: { vertexBindingDescriptions: [{ binding: 0, stride: 8, inputRate: 0 }], vertexAttributeDescriptions: [{ location: 0, binding: 0, format: 103, offset: 0 }] },
+			inputAssemblyState: { topology: 3 }, rasterizationState: { polygonMode: 0, cullMode: 0, frontFace: 0, lineWidth: 1 },
+			viewportState: { viewports: [{ x: 0, y: 0, width: W, height: W, minDepth: 0, maxDepth: 1 }], scissors: [{ offset: { x: 0, y: 0 }, extent: { width: W, height: W } }] },
+			multisampleState: { rasterizationSamples: 1 }, colorBlendState: { attachments: [{ blendEnable: 0, colorWriteMask: 15 }] },
+		});
+		cl.post({ op: "vkCreateBuffer", id: 74, size: 8192, usage: 0x20 });
+		cl.post({ op: "vkAllocateDescriptorSets", sets: [{ id: 75, layout: 71 }] });
+		cl.post({ op: "vkUpdateDescriptorSets", descriptorWrites: [{ dstSet: 75, dstBinding: 0, descriptorType: 7, bufferInfo: [{ buffer: 74, offset: 4480, range: 256 }] }] });
+		cl.post({ op: "vkQueueSubmit", cmds: [
+			{ c: "vkCmdBeginRenderPass", renderPass: 52, framebuffer: 53, renderArea: { offset: { x: 0, y: 0 }, extent: { width: W, height: W } }, clearValues: [{ color: { float32: [0, 0, 1, 1] } }] },
+			{ c: "vkCmdBindPipeline", pipelineBindPoint: 0, pipeline: 73 },
+			{ c: "vkCmdBindDescriptorSets", pipelineBindPoint: 0, layout: 72, firstSet: 0, descriptorSets: [75], dynamicOffsets: [] },
+			{ c: "vkCmdBindVertexBuffers", firstBinding: 0, buffers: [58], offsets: [0] },
+			{ c: "vkCmdDraw", vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0 },
+			{ c: "vkCmdEndRenderPass" },
+		] });
+		const serr = await sync(cl);
+		check("storage binding at offset 4480 in a draw: device lost, named", /at offset 4480, not a multiple of minStorageBufferOffsetAlignment \(256\)/.test(cl.lost) && serr !== "answered", `lost ${cl.lost}`);
+	}
+
+	// storage bindings at offsets WebGPU refuses (4480: ggml-vulkan's matmul
+	// views; 4482: off a word boundary) in a dispatch: bound as scratch
+	// copies, the writable one copied back; the bytes around stay
+	{
+		const cl = fresh();
+		cl.post({ op: "vkCreateShaderModule", id: 1 }, fake("double.comp"));
+		cl.post({ op: "vkCreateDescriptorSetLayout", id: 2, bindings: [{ binding: 0, descriptorType: 7, descriptorCount: 1, stageFlags: 0x20 }] });
+		cl.post({ op: "vkCreatePipelineLayout", id: 3, setLayouts: [2], pushConstantRanges: [] });
+		cl.post({ op: "vkCreateComputePipelines", id: 4, layout: 3, stage: { stage: 0x20, module: 1, pName: "main", pSpecializationInfo: { mapEntries: [{ constantID: 0, offset: 0, size: 4 }], data: [3, 0, 0, 0] } } });
+		cl.post({ op: "vkAllocateDescriptorSets", sets: [{ id: 5, layout: 2 }, { id: 6, layout: 2 }] });
+		const N = 8192;
+		const init = new Uint8Array(N).map((_, i) => (i * 29 + 3) & 255);
+		cl.post({ op: "vkCreateBuffer", id: 10, size: N, usage: 0x20 });
+		cl.post({ op: "writeBuffer", buffer: 10, offset: 0 }, init);
+		cl.post({ op: "vkUpdateDescriptorSets", descriptorWrites: [
+			{ dstSet: 5, dstBinding: 0, descriptorType: 7, bufferInfo: [{ buffer: 10, offset: 4480, range: 256 }] },
+			{ dstSet: 6, dstBinding: 0, descriptorType: 7, bufferInfo: [{ buffer: 10, offset: 6146, range: 256 }] },
+		] });
+		dispatch(cl, 5);
+		dispatch(cl, 6);
+		const got = (await cl.req({ op: "readBuffer", buffer: 10, offset: 0, size: N })).bin;
+		// expected: 64 little-endian words at 4480 and at 6146 tripled
+		const want = init.slice();
+		const dv = new DataView(want.buffer);
+		for (const base of [4480, 6146]) for (let i = 0; i < 64; i++) dv.setUint32(base + 4 * i, Math.imul(dv.getUint32(base + 4 * i, true), 3) >>> 0, true);
+		const bad = want.findIndex((v, i) => v !== got[i]);
+		check("storage bindings at offsets 4480 and 6146 in dispatches: scratch copies, written back exactly", bad < 0 && !cl.closedByHost, bad < 0 ? "" : `byte ${bad}: ${got[bad]} != ${want[bad]} | lost ${cl.lost}`);
+		cl.conn.close();
+	}
+	{
+		const cl = fresh();
+		compute(cl, "copyro.comp", [7, 7]);
+		cl.post({ op: "vkCreateBuffer", id: 10, size: 8192, usage: 0x20 });
+		cl.post({ op: "vkCreateBuffer", id: 11, size: 256, usage: 0x20 });
+		const init = new Uint32Array(2048).map((_, i) => i * 7 + 1);
+		cl.post({ op: "writeBuffer", buffer: 10, offset: 0 }, u8(init));
+		cl.post({ op: "vkUpdateDescriptorSets", descriptorWrites: [
+			{ dstSet: 5, dstBinding: 0, descriptorType: 7, bufferInfo: [{ buffer: 10, offset: 4480, range: 256 }] },
+			{ dstSet: 5, dstBinding: 1, descriptorType: 7, bufferInfo: [{ buffer: 11, offset: 0, range: -1 }] },
+		] });
+		dispatch(cl);
+		const o = words((await cl.req({ op: "readBuffer", buffer: 11, offset: 0, size: 256 })).bin);
+		check("read-only storage binding at offset 4480 in a dispatch", o.every((v, i) => v === init[1120 + i]) && !cl.closedByHost, `${o[0]} ${o[63]} | lost ${cl.lost}`);
+		cl.conn.close();
 	}
 }
 
@@ -1524,6 +2072,8 @@ async function main() {
 			for (const name of Object.keys(cfg.spirv)) spv[name] = new Uint8Array(await (await fetch(cfg.spirv[name])).arrayBuffer());
 			await suite(device, adapter, tr, "spirv", (name) => spv[name]);
 		} else log("skip spirv suite (no translator or glslangValidator)");
+		await hostCases(device, adapter);
+		await texelCases(device, adapter, cfg.spirv ? (await import("/js/core/vk-shader.ts")).loadVkShader(new URL("/naga.wasm", location.href)) : undefined, cfg.spirv);
 		await robustness(device, adapter);
 		await timestamps(device, adapter);
 		await externalPresent(device, adapter);

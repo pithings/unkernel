@@ -1,0 +1,19 @@
+#version 450
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+// Every element of three uniform texel buffers stored to storage texel
+// buffers without a format: the encoding of each view format round-trips
+// its decoding (run.ts), narrow texels through atomicAnd + atomicOr.
+layout(local_size_x = 16) in;
+layout(set = 0, binding = 0) uniform samplerBuffer fs;
+layout(set = 0, binding = 1) uniform isamplerBuffer is;
+layout(set = 0, binding = 2) uniform usamplerBuffer us;
+layout(set = 0, binding = 3) uniform writeonly imageBuffer fd;
+layout(set = 0, binding = 4) uniform writeonly iimageBuffer id;
+layout(set = 0, binding = 5) uniform writeonly uimageBuffer ud;
+void main() {
+	int n = int(gl_GlobalInvocationID.x);
+	imageStore(fd, n, texelFetch(fs, n));
+	imageStore(id, n, texelFetch(is, n));
+	imageStore(ud, n, texelFetch(us, n));
+}

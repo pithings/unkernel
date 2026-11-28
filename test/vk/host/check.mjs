@@ -52,7 +52,7 @@ async function findChrome() {
 // SPIR-V for the real-translator suite
 const naga = join(root, "vendor/build/vk/kwvk-naga.wasm");
 const spirv = {};
-const SHADERS = ["tri.vert", "tri.frag", "double.comp", "quad.vert", "quad.frag", "fs.vert", "ia.frag", "arr.frag", "store.comp", "flat.vert", "flat.frag", "wide.comp", "dead.comp", "barrier.comp", "shared512.comp", "shared512fn.comp", "earlyro.comp", "sgids.comp"];
+const SHADERS = ["tri.vert", "tri.frag", "double.comp", "quad.vert", "quad.frag", "fs.vert", "ia.frag", "arr.frag", "store.comp", "flat.vert", "flat.frag", "wide.comp", "dead.comp", "barrier.comp", "shared512.comp", "shared512fn.comp", "earlyro.comp", "sgids.comp", "tbfetch.comp", "tbstore.comp"];
 const work = await mkdtemp(join(tmpdir(), "kwvk-host-"));
 // glslangValidator, else vk/glslc.sh's glslc (vendor/toolchain/glslc)
 const glslc = join(root, "vendor/toolchain/glslc/bin/glslc");

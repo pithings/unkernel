@@ -9,8 +9,8 @@
 // fails the whole submit (VkDeviceLost: the guest's device is lost) rather
 // than being skipped.
 
-import { BU, TU, UNUSED, isWhole, dkey, pipelineVariant, computeVariant, effectiveExt, noGpu, VkDeviceLost, type Conn } from "./vk-host.ts";
-import { hasDepth, hasStencil, texFormatInfo } from "./vk-formats.ts";
+import { BU, TU, UNUSED, alignDown, alignUp, isWhole, dkey, pipelineVariant, computeVariant, effectiveExt, noGpu, VkDeviceLost, type Conn } from "./vk-host.ts";
+import { hasDepth, hasStencil, srgbTwin, texFormatInfo } from "./vk-formats.ts";
 
 const ALIGN = 256;
 
@@ -112,6 +112,17 @@ function reinterpret(v: number[] | undefined, to: string): number[] | undefined 
 	// v holds integer words (uint32 or int32 members): keep the bits
 	for (let k = 0; k < 4; k++) src[k] = (v[k] ?? 0) >>> 0;
 	return to === "u" ? [...src] : to === "i" ? [...i] : [...f];
+}
+
+/** n texels rounded up to whole blocks of b texels (b = 1: unchanged) */
+function blockAlign(n: number, b: number): number {
+	return b > 1 ? Math.ceil(n / b) * b : n;
+}
+
+/** A mip level's width and height in texels of whole blocks (its physical size; WebGPU's bound for copies). */
+function levelBlocks(img: any, mip: number): [number, number] {
+	const info = img.info || {};
+	return [blockAlign(Math.max(1, Math.floor(img.width / 2 ** mip)), info.bw || 1), blockAlign(Math.max(1, Math.floor(img.height / 2 ** mip)), info.bh || 1)];
 }
 
 function depthClearOf(v: any): { depth: number; stencil: number } {
@@ -245,6 +256,7 @@ class Exec {
 				break;
 			}
 		}
+		this.prepareFans();
 		this.pass = this.enc.beginRenderPass(desc);
 		this.passKind = "render";
 		this.bound = { groups: [], vbs: [] };
@@ -381,12 +393,29 @@ class Exec {
 	 */
 	byteScratch?: any;
 
-	byteCopy(src: any, so: number, dst: any, dO: number, size: number): void {
+	/**
+	 * A helper pass's uniform parameters: in the upload buffer when the
+	 * submit's scan counted them (scanSize: vkCmdCopyBuffer's byte copies),
+	 * else in a buffer of their own (helpers the scan cannot foresee:
+	 * misaligned bindings, fans), so they never take room a later command
+	 * was counted for.
+	 */
+	params(words: Uint32Array, counted: boolean): { buf: any; offset: number; size: number } {
+		const bytes = new Uint8Array(words.buffer, words.byteOffset, words.byteLength);
+		if (counted) return { buf: this.up.buf, offset: this.up.alloc(bytes, ALIGN), size: bytes.length };
+		const buf = this.dev.createBuffer({ size: alignUp(bytes.length, 16), usage: BU.UNIFORM, mappedAtCreation: true, label: "kwvk helper parameters" });
+		new Uint8Array(buf.getMappedRange()).set(bytes);
+		buf.unmap();
+		this.scratch.push(buf);
+		return { buf, offset: 0, size: bytes.length };
+	}
+
+	byteCopy(src: any, so: number, dst: any, dO: number, size: number, counted = true): void {
 		if (!size) return;
-		const a0 = so & ~3;
-		const a1 = Math.min((so + size + 3) & ~3, src.size);
+		const a0 = alignDown(so, 4);
+		const a1 = Math.min(alignUp(so + size, 4), src.size);
 		// one scratch per submit, reused: the encoder runs the copies and passes in order
-		const need = Math.max(256, (a1 - a0 + 3) & ~3);
+		const need = Math.max(256, alignUp(a1 - a0, 4));
 		if (!this.byteScratch || this.byteScratch.size < need) {
 			this.byteScratch = this.dev.createBuffer({ size: need, usage: BU.STORAGE | BU.COPY_DST, label: "kwvk byte copy" });
 			this.scratch.push(this.byteScratch);
@@ -394,16 +423,16 @@ class Exec {
 		const scratch = this.byteScratch;
 		this.enc.copyBufferToBuffer(src, a0, scratch, 0, a1 - a0);
 		const h = byteCopyPipeline(this.c);
-		const off = this.up.alloc(new Uint8Array(new Uint32Array([so - a0, dO, size, 0]).buffer), ALIGN);
+		const pb = this.params(new Uint32Array([so - a0, dO, size, 0]), counted);
 		const bg = this.dev.createBindGroup({
 			layout: h.bgl,
 			entries: [
 				{ binding: 0, resource: { buffer: scratch } },
 				{ binding: 1, resource: { buffer: dst } },
-				{ binding: 2, resource: { buffer: this.up.buf, offset: off, size: 16 } },
+				{ binding: 2, resource: { buffer: pb.buf, offset: pb.offset, size: pb.size } },
 			],
 		});
-		const words = ((dO + size + 3) >> 2) - (dO >> 2);
+		const words = Math.ceil((dO + size) / 4) - Math.floor(dO / 4);
 		const pass = this.enc.beginComputePass({ label: "kwvk byte copy" });
 		pass.setPipeline(h.pipeline);
 		pass.setBindGroup(0, bg);
@@ -428,6 +457,79 @@ class Exec {
 		const q = k.query | 0;
 		if (q < 0 || q >= p.count) throw new Error(`query ${k.query} out of range`);
 		return { p, q };
+	}
+
+	/** this pass's indexed triangle fans rewritten as lists (prepareFans), by command index */
+	fanLists = new Map<number, { ib: any; buf: any; offset: number; count: number }>();
+
+	/**
+	 * Indexed triangle fans, which WebGPU has not, drawn as the lists they
+	 * describe. Before a render pass begins (a compute pass cannot run inside
+	 * one), its indexed fan draws are found by replaying the pass's pipeline,
+	 * topology and index buffer binds, and a compute pass rewrites each
+	 * draw's indices as (fan's first, previous, current) triples, a
+	 * primitive restart (when the pipeline enables it) starting a new fan
+	 * and the triangles it saves left degenerate. The draw then reads those
+	 * (vkCmdDrawIndexed); the index data is what the draw sees, as no
+	 * transfer runs inside a render pass.
+	 */
+	prepareFans(): void {
+		this.fanLists.clear();
+		let p = this.gfx.pipeline;
+		let ext = this.ext;
+		let ib = this.ib;
+		const jobs: { i: number; ib: any; first: number; count: number; restart: boolean }[] = [];
+		for (let i = this.index + 1; i < this.cmds.length; i++) {
+			const k = this.cmds[i];
+			const kc = k?.c;
+			if (typeof kc !== "string" || kc === "vkCmdEndRenderPass" || kc === "vkCmdEndRenderPass2" || kc === "vkCmdEndRendering" || kc === "vkCmdNextSubpass" || kc === "vkCmdNextSubpass2") break;
+			if (kc === "vkCmdBindPipeline") {
+				const o = this.c.objs.get(k.pipeline);
+				if (o?.t === "pipeline" && o.kind !== "compute") p = o;
+			} else if (kc === "vkCmdSetPrimitiveTopology") ext = { ...ext, topology: k.primitiveTopology };
+			else if (kc === "vkCmdBindIndexBuffer") {
+				const b = this.c.objs.get(k.buffer);
+				ib = b?.t === "buffer" && (k.indexType === 0 || k.indexType === 1) ? { buf: b.buf, offset: k.offset || 0, format: k.indexType === 0 ? "uint16" : "uint32" } : undefined;
+			} else if (kc === "vkCmdDrawIndexed" && p && ib && (effectiveExt(p, ext).topology ?? p.topology) === 5) {
+				const count = k.indexCount;
+				const first = k.firstIndex || 0;
+				if (!(Number.isInteger(count) && count >= 3 && count <= 1 << 24 && Number.isInteger(first) && first >= 0)) continue;
+				jobs.push({ i, ib, first, count, restart: !!p.msg?.inputAssemblyState?.primitiveRestartEnable });
+			}
+		}
+		if (!jobs.length) return;
+		let total = 0;
+		const at = jobs.map((j) => {
+			const o = total;
+			total += alignUp(3 * (j.count - 2) * 4, ALIGN);
+			return o;
+		});
+		const out = this.dev.createBuffer({ size: total, usage: BU.INDEX | BU.STORAGE, label: "kwvk fan lists" });
+		this.scratch.push(out);
+		const h = fanPipeline(this.c);
+		const pass = this.enc.beginComputePass({ label: "kwvk fan lists" });
+		pass.setPipeline(h.pipeline);
+		jobs.forEach((j, n) => {
+			const isz = j.ib.format === "uint16" ? 2 : 4;
+			const start = j.ib.offset + j.first * isz;
+			// the indices as a storage binding at a 256-byte aligned offset, clamped to the buffer (indices past it read 0)
+			const base = alignDown(start, ALIGN);
+			const size = Math.min(alignUp(start - base + j.count * isz, 4), j.ib.buf.size - base);
+			if (!(size > 0)) return;
+			const pb = this.params(new Uint32Array([start - base, j.count, isz, j.restart ? 1 : 0, size >> 2, 0, 0, 0]), false);
+			const bg = this.dev.createBindGroup({
+				layout: h.bgl,
+				entries: [
+					{ binding: 0, resource: { buffer: j.ib.buf, offset: base, size } },
+					{ binding: 1, resource: { buffer: out, offset: at[n], size: 3 * (j.count - 2) * 4 } },
+					{ binding: 2, resource: { buffer: pb.buf, offset: pb.offset, size: pb.size } },
+				],
+			});
+			pass.setBindGroup(0, bg);
+			pass.dispatchWorkgroups(1);
+			this.fanLists.set(j.i, { ib: j.ib, buf: out, offset: at[n]!, count: 3 * (j.count - 2) });
+		});
+		pass.end();
 	}
 
 	/** A list index buffer for a fan of n vertices (relative indices; the draw's base vertex is the fan's first). */
@@ -526,6 +628,8 @@ class Exec {
 
 	/** alias copies of this submit by index within a dispatch (destroyed with the submit's scratch) */
 	aliasScratch: any[] = [];
+	/** scratch copies of writable bindings to copy back after the dispatch (copyBack) */
+	backs: { sc: any; buf: any; off: number; size: number }[] = [];
 	/**
 	 * WebGPU refuses a buffer range bound writable twice (or read-only and
 	 * writable) in one dispatch; Vulkan allows it (ggml-vulkan's in-place
@@ -534,14 +638,23 @@ class Exec {
 	 * from a scratch copy made just before the dispatch. So is a binding a
 	 * pipeline keeps "read-only-storage" (vk-host.ts readOnlyRetry) whose
 	 * buffer the dispatch also binds writable anywhere (one usage scope).
+	 * A binding at an offset that is not a multiple of the device's
+	 * min{Storage,Uniform}BufferOffsetAlignment (ggml-vulkan's matmul binds
+	 * a tensor view where it lies, 4480, with 256 reported: invalid in
+	 * Vulkan, but drivers that report less take it) is bound as a scratch
+	 * copy at offset 0 too, and copied back after the dispatch when the
+	 * shader may write it (copyBack).
 	 */
 	aliasFix(layout: any, st: { sets: any[]; dyn: number[][] }): Map<number, Map<number, any>> | undefined {
 		const ents: any[] = [];
+		const lim = this.dev.limits || {};
 		layout.sets.forEach((slot: any, s: number) => {
 			const set = st.sets[s];
 			if (!set) return;
 			for (const e of slot.entries) {
-				if (!e.buffer || e.buffer.type === "uniform") continue;
+				// a texel buffer's parameters are the host's own buffer, never the app's
+				if (!e.buffer || e.kwTexel === "params") continue;
+				const uniform = e.buffer.type === "uniform";
 				const [vkb, el] = slot.src.get(e.binding) || [e.binding >> 1, 0];
 				const d = set.desc.get(dkey(vkb, el));
 				if (!d) continue;
@@ -552,31 +665,53 @@ class Exec {
 					if (e.buffer.type === "storage") ents.push({ s, binding: e.binding, dyn: true, w: true, buf: b.buf });
 					continue;
 				}
-				const size = Math.min(((isWhole(d.range) ? b.size - d.offset : d.range) + 3) & ~3, b.buf.size - d.offset);
-				ents.push({ s, binding: e.binding, ro: !!e.kwRO, kept: e.buffer.type === "read-only-storage", w: e.buffer.type === "storage", buf: b.buf, off: d.offset, size });
+				const mis = d.offset % ((uniform ? lim.minUniformBufferOffsetAlignment : lim.minStorageBufferOffsetAlignment) || 256) !== 0;
+				if (uniform && !mis) continue;
+				const range = Math.min(isWhole(d.range) ? b.size - d.offset : d.range, b.size - d.offset);
+				const size = Math.min(alignUp(range, uniform ? 16 : 4), b.buf.size - d.offset);
+				ents.push({ s, binding: e.binding, ro: !!e.kwRO, kept: e.buffer.type === "read-only-storage", w: e.buffer.type === "storage", mis, uniform, buf: b.buf, off: d.offset, size, range });
 			}
 		});
 		let over: Map<number, Map<number, any>> | undefined;
 		let n = 0;
 		for (const a of ents) {
-			if (!a.ro && !a.kept) continue;
-			const clash = a.kept
-				? ents.some((x) => x.w && x.buf === a.buf)
-				: ents.some((x) => x !== a && !x.dyn && x.buf === a.buf && x.off < a.off + a.size && a.off < x.off + x.size);
+			if (!a.ro && !a.kept && !a.mis) continue;
+			const clash =
+				a.mis ||
+				(a.kept
+					? ents.some((x) => x.w && x.buf === a.buf)
+					: ents.some((x) => x !== a && !x.dyn && x.buf === a.buf && x.off < a.off + a.size && a.off < x.off + x.size));
 			if (!clash) continue;
+			if (!(a.size > 0)) throw new Error(`buffer binding at offset ${a.off} past the end of its buffer`);
 			if (this.passKind === "compute") this.endPass();
+			// the binding's size in whole words (16 bytes for a uniform)
+			const bsize = alignUp(a.size, a.uniform ? 16 : 4);
 			let sc = this.aliasScratch[n];
-			if (!sc || sc.size < a.size) {
-				sc = this.dev.createBuffer({ size: Math.max(a.size, 256), usage: BU.STORAGE | BU.COPY_DST, label: "kwvk alias scratch" });
+			if (!sc || sc.size < bsize) {
+				sc = this.dev.createBuffer({ size: Math.max(bsize, 256), usage: BU.STORAGE | BU.UNIFORM | BU.COPY_SRC | BU.COPY_DST, label: "kwvk alias scratch" });
 				this.aliasScratch[n] = sc;
 				this.scratch.push(sc); // destroyed when the submit is done
 			}
 			n++;
-			this.enc.copyBufferToBuffer(a.buf, a.off, sc, 0, a.size);
-			((over ||= new Map()).get(a.s) || over.set(a.s, new Map()).get(a.s)!).set(a.binding, { buf: sc, size: a.size });
+			// a binding off a word boundary (only a misaligned one can be) goes by bytes
+			if (a.off % 4) this.byteCopy(a.buf, a.off, sc, 0, a.size, false);
+			else this.enc.copyBufferToBuffer(a.buf, a.off, sc, 0, a.size);
+			// back: the app's range exactly
+			if (a.mis && a.w && a.range > 0) this.backs.push({ sc, buf: a.buf, off: a.off, size: a.range });
+			((over ||= new Map()).get(a.s) || over.set(a.s, new Map()).get(a.s)!).set(a.binding, { buf: sc, size: bsize });
 		}
 		if (over) this.bound.groups = [];
 		return over;
+	}
+
+	/** After a dispatch: the writable misaligned bindings' scratch copies back where the app bound them (aliasFix). */
+	copyBack(): void {
+		if (!this.backs.length) return;
+		this.endPass();
+		for (const k of this.backs.splice(0)) {
+			if (k.off % 4 || k.size % 4) this.byteCopy(k.sc, 0, k.buf, k.off, k.size, false);
+			else this.enc.copyBufferToBuffer(k.sc, 0, k.buf, k.off, k.size);
+		}
 	}
 
 	outside(): void {
@@ -593,13 +728,18 @@ class Exec {
 		const sub = r.imageSubresource || {};
 		const ext = r.imageExtent || { width: img.width, height: img.height, depth: 1 };
 		const off = r.imageOffset || { x: 0, y: 0, z: 0 };
-		const w = ext.width;
-		const h = ext.height;
+		// Vulkan lets a copy of a block-compressed image end mid-block at the
+		// mip level's edge (a 2x2 level of a BC texture); WebGPU wants whole
+		// blocks, the level's physical size: the extent in whole blocks (the
+		// buffer's footprint is in blocks either way)
+		const w = blockAlign(ext.width, info.bw);
+		const h = blockAlign(ext.height, info.bh);
 		const d = img.is3D ? ext.depth || 1 : sub.layerCount || 1;
 		const z0 = img.is3D ? off.z || 0 : sub.baseArrayLayer || 0;
 		const rowLen = r.bufferRowLength || w;
 		const imgH = r.bufferImageHeight || h;
-		if (!(w >= 1 && h >= 1 && d >= 1 && w <= img.width && h <= img.height && d <= Math.max(img.layers, img.depth))) throw new Error(`copy extent ${w}x${h}x${d} out of range`);
+		const [lw, lh] = levelBlocks(img, sub.mipLevel || 0);
+		if (!(w >= 1 && h >= 1 && d >= 1 && w <= lw && h <= lh && d <= Math.max(img.layers, img.depth))) throw new Error(`copy extent ${w}x${h}x${d} out of range`);
 		const bytesPerRow = Math.ceil(rowLen / info.bw) * info.bpb;
 		const rowsPerImage = Math.ceil(imgH / info.bh);
 		let aspect = "all";
@@ -625,6 +765,40 @@ class Exec {
 				copy(base + (k * rowsPerImage + row) * bytesPerRow, undefined, undefined, off.x || 0, (off.y || 0) + y, z0 + k, w, Math.min(info.bh, h - y), 1);
 			}
 		}
+	}
+
+	/**
+	 * One region of vkCmdCopyImage. The extent is in the source's texels and
+	 * covers the same blocks of both images; a compressed side's extent is
+	 * in whole blocks (it may end mid-block at a level's edge in Vulkan, not
+	 * in WebGPU). Formats WebGPU copies between (equal, or sRGB twins) copy
+	 * directly; other size-compatible ones (BC1 and R32G32_UINT, R32_UINT
+	 * and RGBA8) through a scratch buffer, the same bytes per block.
+	 */
+	copyImg(s: any, d: any, r: any): void {
+		const ss = r.srcSubresource || {};
+		const ds = r.dstSubresource || {};
+		const e = r.extent || {};
+		const si = s.info;
+		const di = d.info;
+		const bx = Math.ceil((e.width ?? 0) / si.bw);
+		const by = Math.ceil((e.height ?? 0) / si.bh);
+		const n = s.is3D ? e.depth || 1 : ss.layerCount || 1;
+		const src = { texture: s.tex, mipLevel: ss.mipLevel || 0, origin: [r.srcOffset?.x || 0, r.srcOffset?.y || 0, s.is3D ? r.srcOffset?.z || 0 : ss.baseArrayLayer || 0] };
+		const dst = { texture: d.tex, mipLevel: ds.mipLevel || 0, origin: [r.dstOffset?.x || 0, r.dstOffset?.y || 0, d.is3D ? r.dstOffset?.z || 0 : ds.baseArrayLayer || 0] };
+		const sSize = [bx * si.bw, by * si.bh, n];
+		if (s.format === d.format || srgbTwin(s.format) === d.format) {
+			this.enc.copyTextureToTexture(src, dst, sSize);
+			return;
+		}
+		const ds2 = hasDepth(s.format) || hasStencil(s.format) || hasDepth(d.format) || hasStencil(d.format);
+		if (ds2 || si.bpb !== di.bpb || s.samples > 1) throw new Error(`vkCmdCopyImage from ${s.format} to ${d.format} is unsupported (not size-compatible, or depth/stencil or multisampled)`);
+		const bytesPerRow = alignUp(bx * si.bpb, 256);
+		const tmp = this.dev.createBuffer({ size: Math.max(4, bytesPerRow * by * n), usage: BU.COPY_SRC | BU.COPY_DST, label: "kwvk image copy" });
+		this.scratch.push(tmp);
+		const layout = { buffer: tmp, offset: 0, bytesPerRow, rowsPerImage: by };
+		this.enc.copyTextureToBuffer(src, layout, sSize);
+		this.enc.copyBufferToTexture(layout, dst, [bx * di.bw, by * di.bh, n]);
 	}
 
 	renderableView(img: any, mip: number, layer: number): any {
@@ -1051,7 +1225,16 @@ class Exec {
 				break;
 			case "vkCmdDrawIndexed":
 				if ((k.vertexOffset || k.firstInstance) && this.gfx.pipeline?.usesBase) this.baseWarn();
-				if (this.fan()) this.c.log("kwvk: vkCmdDrawIndexed: indexed triangle fans are unsupported (drawn as lists)");
+				if (this.fan()) {
+					// rewritten as a list before the pass (prepareFans), for the index buffer bound now
+					const f = this.fanLists.get(this.index);
+					const ib = this.ib;
+					if (f && ib && f.ib.buf === ib.buf && f.ib.offset === ib.offset && f.ib.format === ib.format) {
+						if (this.flushDraw(true, { buf: f.buf, offset: f.offset, format: "uint32" })) this.pass.drawIndexed(f.count, k.instanceCount ?? 1, 0, k.vertexOffset || 0, k.firstInstance || 0);
+						break;
+					}
+					if (k.indexCount >= 3) this.c.log("kwvk: vkCmdDrawIndexed: an indexed triangle fan not rewritten before its render pass (drawn as a list)");
+				}
 				if (this.flushDraw(true)) this.pass.drawIndexed(k.indexCount, k.instanceCount ?? 1, k.firstIndex || 0, k.vertexOffset || 0, k.firstInstance || 0);
 				break;
 			case "vkCmdDrawIndirect":
@@ -1059,8 +1242,13 @@ class Exec {
 				const indexed = k.c === "vkCmdDrawIndexedIndirect";
 				this.flushDraw(indexed);
 				const b = this.buffer(k.buffer).buf;
-				const stride = Math.max(4, k.stride || (indexed ? 20 : 16));
-				const n = Math.min(k.drawCount ?? 1, Math.floor((b.size - (k.offset || 0)) / stride) + 1);
+				// drawCount records `stride` bytes apart (multiDrawIndirect), one
+				// WebGPU indirect draw each; stride is unused (may be 0) at one.
+				// Only whole records inside the buffer are drawn (Vulkan's rule)
+				const rec = indexed ? 20 : 16;
+				const stride = Math.max(4, k.stride || rec);
+				const n = Math.max(0, Math.min(k.drawCount ?? 1, Math.floor((b.size - (k.offset || 0) - rec) / stride) + 1));
+				if (this.fan()) this.c.log("kwvk: indirect draws of triangle fans are unsupported (drawn as lists)");
 				for (let i = 0; i < n; i++) {
 					if (indexed) this.pass.drawIndexedIndirect(b, (k.offset || 0) + i * stride);
 					else this.pass.drawIndirect(b, (k.offset || 0) + i * stride);
@@ -1072,12 +1260,14 @@ class Exec {
 				const ds = this.comp.pipeline?.stage?.res?.dispatchScale || [1, 1, 1];
 				const pass = this.flushDispatch();
 				if (!noGpu()) pass.dispatchWorkgroups((k.groupCountX ?? 1) * ds[0], (k.groupCountY ?? 1) * ds[1], (k.groupCountZ ?? 1) * ds[2]);
+				this.copyBack();
 				break;
 			}
 			case "vkCmdDispatchIndirect":
 				// the group counts live in GPU memory and cannot be scaled: 1/k of the work would run
 				if (this.comp.pipeline?.stage?.res?.dispatchScale) throw new Error("vkCmdDispatchIndirect of a pipeline whose workgroup was split to fit the device (dispatchScale) is unsupported");
 				this.flushDispatch().dispatchWorkgroupsIndirect(this.buffer(k.buffer).buf, k.offset || 0);
+				this.copyBack();
 				break;
 			case "vkCmdCopyBuffer": {
 				this.outside();
@@ -1090,11 +1280,11 @@ class Exec {
 					const dO = r.dstOffset || 0;
 					const size = r.size;
 					if (!(so >= 0 && dO >= 0 && size >= 0 && so + size <= sb.size && dO + size <= db.size)) throw new Error("buffer copy out of range");
-					if (!((so | dO) & 3)) {
+					if (!(so % 4) && !(dO % 4)) {
 						// WebGPU copies whole words: the aligned part directly, an unaligned tail exactly (byteCopy)
-						const head = size & ~3;
+						const head = alignDown(size, 4);
 						if (head) this.enc.copyBufferToBuffer(s, so, d, dO, head);
-						if (size & 3) this.byteCopy(s, so + head, d, dO + head, size & 3);
+						if (size % 4) this.byteCopy(s, so + head, d, dO + head, size % 4);
 					} else this.byteCopy(s, so, d, dO, size);
 				}
 				break;
@@ -1111,16 +1301,7 @@ class Exec {
 				this.outside();
 				const s = this.c.get(k.srcImage, "image");
 				const d = this.c.get(k.dstImage, "image");
-				for (const r of k.regions || []) {
-					const ss = r.srcSubresource || {};
-					const ds = r.dstSubresource || {};
-					const e = r.extent;
-					this.enc.copyTextureToTexture(
-						{ texture: s.tex, mipLevel: ss.mipLevel || 0, origin: [r.srcOffset?.x || 0, r.srcOffset?.y || 0, s.is3D ? r.srcOffset?.z || 0 : ss.baseArrayLayer || 0] },
-						{ texture: d.tex, mipLevel: ds.mipLevel || 0, origin: [r.dstOffset?.x || 0, r.dstOffset?.y || 0, d.is3D ? r.dstOffset?.z || 0 : ds.baseArrayLayer || 0] },
-						[e.width, e.height, s.is3D ? e.depth || 1 : ss.layerCount || 1],
-					);
-				}
+				for (const r of k.regions || []) this.copyImg(s, d, r);
 				break;
 			}
 			case "vkCmdBlitImage":
@@ -1156,7 +1337,7 @@ class Exec {
 				this.outside();
 				const b = this.buffer(k.dstBuffer);
 				const off = k.dstOffset || 0;
-				const size = isWhole(k.size) ? (b.size - off) & ~3 : k.size;
+				const size = isWhole(k.size) ? alignDown(b.size - off, 4) : k.size;
 				if (!(off >= 0 && size >= 0 && off + size <= b.buf.size)) throw new Error("fill out of range");
 				if (!k.data) this.enc.clearBuffer(b.buf, off, size);
 				else {
@@ -1264,6 +1445,65 @@ function nopPipeline(c: Conn): any {
 	const module = c.dev.createShaderModule({ code: "@compute @workgroup_size(1) fn main() {}" });
 	h = c.dev.createComputePipeline({ layout: c.dev.createPipelineLayout({ bindGroupLayouts: [] }), compute: { module, entryPoint: "main" } });
 	c.r.helpers.set("nop", h);
+	return h;
+}
+
+/**
+ * prepareFans' rewrite: one invocation walks a fan draw's indices (u16 or
+ * u32 words of `src` from byte `start`) and writes (first, previous,
+ * current) for each vertex past a fan's second; a restart index (with
+ * restart on) starts a new fan; the slots left over are degenerate.
+ */
+function fanPipeline(c: Conn): any {
+	let h = c.r.helpers.get("fanlists");
+	if (h) return h;
+	const dev = c.dev;
+	const module = dev.createShaderModule({
+		code: `
+struct P { start: u32, count: u32, isz: u32, restart: u32, words: u32, pad0: u32, pad1: u32, pad2: u32 }
+@group(0) @binding(0) var<storage, read> src: array<u32>;
+@group(0) @binding(1) var<storage, read_write> dst: array<u32>;
+@group(0) @binding(2) var<uniform> p: P;
+fn index(k: u32) -> u32 {
+	let b = p.start + k * p.isz;
+	let w = b >> 2u;
+	if (w >= p.words) { return 0u; }
+	if (p.isz == 2u) { return (src[w] >> ((b & 2u) * 8u)) & 0xffffu; }
+	return src[w];
+}
+@compute @workgroup_size(1) fn main() {
+	let rv = select(0xffffffffu, 0xffffu, p.isz == 2u);
+	var o = 0u;
+	var have = 0u;
+	var first = 0u;
+	var prev = 0u;
+	for (var k = 0u; k < p.count; k++) {
+		let v = index(k);
+		if (p.restart != 0u && v == rv) { have = 0u; continue; }
+		if (have == 0u) { first = v; }
+		if (have >= 2u) {
+			dst[o] = first;
+			dst[o + 1u] = prev;
+			dst[o + 2u] = v;
+			o += 3u;
+		}
+		prev = v;
+		have += 1u;
+	}
+	for (; o < 3u * (p.count - 2u); o++) { dst[o] = first; }
+}`,
+		label: "kwvk fan lists",
+	});
+	const bgl = dev.createBindGroupLayout({
+		entries: [
+			{ binding: 0, visibility: 4, buffer: { type: "read-only-storage" } },
+			{ binding: 1, visibility: 4, buffer: { type: "storage" } },
+			{ binding: 2, visibility: 4, buffer: { type: "uniform" } },
+		],
+	});
+	const pipeline = dev.createComputePipeline({ layout: dev.createPipelineLayout({ bindGroupLayouts: [bgl] }), compute: { module, entryPoint: "main" } });
+	h = { pipeline, bgl };
+	c.r.helpers.set("fanlists", h);
 	return h;
 }
 

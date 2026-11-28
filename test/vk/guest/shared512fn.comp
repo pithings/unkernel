@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+#version 450
+// shared512.comp with its barriers in a function (as spirv-opt leaves
+// llama.cpp's rms_norm_mul_rope_*_512): on a device allowing 256 invocations
+// virtual invocations do not take it, so no pipeline.
+layout(local_size_x = 512) in;
+layout(set = 0, binding = 0) buffer B { float v[]; } b;
+shared float s[512];
+void step(uint i, uint k) {
+	if (i < k) s[i] += s[i + k];
+	barrier();
+}
+void main() {
+	uint i = gl_LocalInvocationID.x;
+	s[i] = b.v[i];
+	barrier();
+	for (uint k = 256u; k > 0u; k >>= 1)
+		step(i, k);
+	if (i == 0u) b.v[0] = s[0];
+}

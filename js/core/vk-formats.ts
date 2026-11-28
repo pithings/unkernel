@@ -169,6 +169,35 @@ export function formatTable(features: { has(name: string): boolean }): Record<st
 	return out;
 }
 
+// Texel buffer view formats (vk/PROTOCOL.md, Amendments, "Texel buffers"):
+// the translator decodes and encodes them by VkFormat number
+// (vk/naga/src/texel.rs, the same list); B10G11R11 is not stored, atomics
+// are on R32.
+export const TEXEL_UNIFORM = 1;
+export const TEXEL_STORAGE = 2;
+export const TEXEL_ATOMIC = 4;
+const texel = new Map<number, number>();
+texel.set(122, TEXEL_UNIFORM);
+for (const vk of [9, 10, 13, 14, 16, 17, 20, 21, 37, 38, 41, 42, 44, 51, 52, 55, 56, 64, 68, 70, 71, 74, 75, 76, 77, 78, 81, 82, 83, 91, 92, 95, 96, 97, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109])
+	texel.set(vk, TEXEL_UNIFORM | TEXEL_STORAGE);
+texel.set(98, TEXEL_UNIFORM | TEXEL_STORAGE | TEXEL_ATOMIC);
+texel.set(99, TEXEL_UNIFORM | TEXEL_STORAGE | TEXEL_ATOMIC);
+
+/** A texel buffer format's caps (TEXEL_*) and texel size in bytes, or undefined. */
+export function texelFormat(vk: number): { caps: number; size: number } | undefined {
+	const caps = texel.get(vk);
+	return caps ? { caps, size: table.get(vk)!.bpb } : undefined;
+}
+
+/** The hello reply's "texelBuffers" object: formats and the most elements a view may have. */
+export function texelTable(maxStorageBufferBindingSize: number): { formats: Record<string, number>; maxElements: number } {
+	const formats: Record<string, number> = {};
+	for (const [vk, caps] of texel) formats[vk] = caps;
+	// any format's view (16-byte texels at most) plus the alignment slack of its binding fits a storage binding
+	const maxElements = Math.max(65536, Math.floor((Math.min(maxStorageBufferBindingSize, 2 ** 32) - 256) / 16));
+	return { formats, maxElements };
+}
+
 export function hasDepth(tex: string): boolean {
 	return tex.startsWith("depth");
 }

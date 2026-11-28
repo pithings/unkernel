@@ -18,7 +18,7 @@
 // use fails with the reason. Pipelines are requests with a reply that waits
 // for WGSL compilation and pipeline validation (pipelineCheck).
 
-import { formatTable, formatCaps, CAP_FILTER, vkFormat, texFormatInfo, hasDepth, hasStencil, srgbTwin, type VkFormatInfo } from "./vk-formats.ts";
+import { formatTable, formatCaps, CAP_FILTER, vkFormat, texFormatInfo, hasDepth, hasStencil, srgbTwin, texelFormat, texelTable, TEXEL_UNIFORM, TEXEL_STORAGE, type VkFormatInfo } from "./vk-formats.ts";
 import { runSubmit, resolveQueries } from "./vk-exec.ts";
 
 // The translator's interface (js/core/vk-shader.ts), restated so this
@@ -53,6 +53,8 @@ export interface VkShaderBinding {
 	format?: string;
 	access?: string;
 	arrayIndex?: number;
+	/** a texel buffer's words ("data", a storage buffer) or parameters ("params", a uniform): vk/PROTOCOL.md, Amendments, "Texel buffers" */
+	texel?: "data" | "params";
 }
 export interface VkShaderResult {
 	wgsl: string;
@@ -212,6 +214,13 @@ export const UNUSED = 0xffffffff;
 export function isWhole(v: any): boolean {
 	return v === undefined || v === null || v < 0 || v >= 2 ** 52;
 }
+/** v rounded up (alignDown: down) to a multiple of a, exact past 2^31 (buffer sizes and offsets; `&` is 32-bit) */
+export function alignUp(v: number, a: number): number {
+	return Math.ceil(v / a) * a;
+}
+export function alignDown(v: number, a: number): number {
+	return v - (v % a);
+}
 
 const COMPARE = ["never", "less", "equal", "less-equal", "greater", "not-equal", "greater-equal", "always"];
 const ADDRESS = ["repeat", "mirror-repeat", "clamp-to-edge", "clamp-to-edge", "mirror-repeat"];
@@ -242,11 +251,11 @@ const CREATE_OPS = new Set([
 
 /**
  * Pipeline failures that make the pipeline unusable rather than refused:
- * resource kinds WebGPU lacks (texel buffers, 1D-array storage images),
- * which apps such as vkd3d declare in pipelines they make at start-up and
- * may never run. Binding one in a submit loses the device.
+ * resource kinds WebGPU lacks (1D-array storage images), which apps such
+ * as vkd3d declare in pipelines they make at start-up and may never run.
+ * Binding one in a submit loses the device.
  */
-const UNUSABLE = /texel buffers|_1d_array/;
+const UNUSABLE = /_1d_array/;
 
 /**
  * Debugging only, never set by the SDK: globalThis.KWVK_NO_GPU = true makes
@@ -819,6 +828,7 @@ export class Conn implements VkConnection {
 			if (o.set) this.r.gpuDestroy(o.set);
 			this.r.gpuDestroy(o.results);
 		}
+		if (o.t === "bufferView") this.r.gpuDestroy(o.params);
 	}
 
 	// --- views -----------------------------------------------------------
@@ -995,6 +1005,25 @@ export class Conn implements VkConnection {
 			pushGroup = sets.length;
 			groups.push(this.pushBGL);
 		}
+		// each texel buffer takes a storage and a uniform buffer slot of its
+		// stages: past WebGPU's per-stage limits the pipeline is refused, named
+		// (WebGPU would refuse the layout less plainly)
+		if (sets.some((s) => s.entries.some((e: any) => e.kwTexel))) {
+			const l = this.dev.limits || {};
+			for (const [bit, stage] of [[SS.VERTEX, "vertex"], [SS.FRAGMENT, "fragment"], [SS.COMPUTE, "compute"]] as const) {
+				let storage = 0, uniform = pushSize > 0 ? 1 : 0, texels = 0;
+				for (const s of sets)
+					for (const e of s.entries) {
+						if (!(e.visibility & bit) || !e.buffer) continue;
+						if (e.buffer.type === "uniform") uniform++;
+						else storage++;
+						if (e.kwTexel === "data") texels++;
+					}
+				const sl = l.maxStorageBuffersPerShaderStage ?? 8, ul = l.maxUniformBuffersPerShaderStage ?? 12;
+				if (storage > sl || uniform > ul)
+					throw new Error(`the ${stage} stage needs ${storage} storage and ${uniform} uniform buffers, ${texels} texel buffers taking one of each, over the device's maxStorageBuffersPerShaderStage (${sl}) or maxUniformBuffersPerShaderStage (${ul})`);
+			}
+		}
 		const layout = this.dev.createPipelineLayout({ bindGroupLayouts: groups });
 		const hasFloatTex = sets.some((s) => s.entries.some((e: any) => e.texture?.sampleType === "float"));
 		const hasStorageTex = sets.some((s) => s.entries.some((e: any) => e.storageTexture));
@@ -1002,7 +1031,31 @@ export class Conn implements VkConnection {
 	}
 
 	placeholders = new Map<string, any>();
-	unwrittenBufs = new Map<number, any>();
+	/** placeholders for unwritten bindings (bindGroup), by binding (buffers, storage textures) and kind */
+	unwritten = new Map<string, any>();
+	/**
+	 * A placeholder resource for a bind group layout entry: a zeroed 64 KiB
+	 * buffer, a 1x1 texture's view of the entry's dimension, sample type
+	 * and sample count (a storage texture of its format), or a sampler.
+	 */
+	placeholderResource(e: any): any {
+		if (e.buffer) return { buffer: this.dev.createBuffer({ size: 65536, usage: BU.STORAGE | BU.UNIFORM, label: "kwvk placeholder buffer" }) };
+		if (e.sampler) return this.dev.createSampler(e.sampler.type === "comparison" ? { compare: "less" } : {});
+		const t = e.texture || e.storageTexture;
+		const formats: Record<string, string> = { float: "rgba8unorm", "unfilterable-float": "r32float", uint: "r32uint", sint: "r32sint", depth: "depth32float" };
+		const dim = t.viewDimension || "2d";
+		const layers = dim === "cube" || dim === "cube-array" ? 6 : 1;
+		const tex = this.dev.createTexture({
+			size: [1, 1, layers],
+			dimension: dim === "1d" ? "1d" : dim === "3d" ? "3d" : "2d",
+			format: e.texture ? formats[t.sampleType] || "rgba8unorm" : t.format,
+			sampleCount: e.texture?.multisampled ? 4 : 1,
+			usage: e.texture ? (e.texture.multisampled ? TU.TEXTURE_BINDING | TU.RENDER_ATTACHMENT : TU.TEXTURE_BINDING) : TU.STORAGE_BINDING,
+			label: "kwvk placeholder texture",
+		});
+		return tex.createView({ dimension: dim });
+	}
+
 	/**
 	 * A set the pipeline's shaders declare but the app never bound (GTK 4:
 	 * a set its shaders only use under a specialization it does not take;
@@ -1014,28 +1067,7 @@ export class Conn implements VkConnection {
 		let bg = this.placeholders.get(slot.key);
 		if (bg) return bg;
 		this.log(`kwvk: descriptor set ${s} not bound but declared by the pipeline's shaders: placeholder resources bound`);
-		const formats: Record<string, string> = { float: "rgba8unorm", "unfilterable-float": "r32float", uint: "r32uint", sint: "r32sint", depth: "depth32float" };
-		const entries: any[] = [];
-		for (const e of slot.entries) {
-			if (e.buffer) {
-				const buf = this.dev.createBuffer({ size: 65536, usage: 64 | 128 });
-				entries.push({ binding: e.binding, resource: { buffer: buf } });
-			} else if (e.sampler) {
-				entries.push({ binding: e.binding, resource: this.dev.createSampler(e.sampler.type === "comparison" ? { compare: "less" } : {}) });
-			} else if (e.texture || e.storageTexture) {
-				const t = e.texture || e.storageTexture;
-				const dim = t.viewDimension || "2d";
-				const layers = dim === "cube" || dim === "cube-array" ? 6 : 1;
-				const tex = this.dev.createTexture({
-					size: [1, 1, layers],
-					dimension: dim === "1d" ? "1d" : dim === "3d" ? "3d" : "2d",
-					format: e.texture ? formats[t.sampleType] || "rgba8unorm" : t.format,
-					sampleCount: e.texture?.multisampled ? 4 : 1,
-					usage: e.texture ? (e.texture.multisampled ? 4 | 16 : 4) : 8,
-				});
-				entries.push({ binding: e.binding, resource: tex.createView({ dimension: dim }) });
-			}
-		}
+		const entries = slot.entries.map((e: any) => ({ binding: e.binding, resource: this.placeholderResource(e) }));
 		bg = this.dev.createBindGroup({ layout: slot.layout, entries });
 		this.placeholders.set(slot.key, bg);
 		return bg;
@@ -1051,26 +1083,54 @@ export class Conn implements VkConnection {
 		for (const e of slot.entries) {
 			const [vkb, el] = slot.src.get(e.binding) || [e.binding >> 1, 0];
 			const d = set.desc.get(dkey(vkb, el));
-			if (!d && e.buffer) {
-				// Vulkan lets a binding the shader does not access stay unwritten
-				// (ggml-vulkan leaves its unused operands): a zeroed placeholder
-				// one per WGSL binding number, so two of them never alias in a dispatch
-				let ub = this.unwrittenBufs.get(e.binding);
-				if (!ub) {
-					if (!this.unwrittenBufs.size) this.log(`kwvk: set binding ${vkb}${el ? `[${el}]` : ""} not written: a placeholder buffer bound (logged once)`);
-					ub = this.dev.createBuffer({ size: 65536, usage: BU.STORAGE | BU.UNIFORM, label: "kwvk unwritten binding" });
-					this.unwrittenBufs.set(e.binding, ub);
-				}
-				entries.push({ binding: e.binding, resource: { buffer: ub } });
+			const immutable = e.sampler ? set.layout.bindings.get(vkb)?.immutable?.[el] : undefined;
+			if (!d && immutable) {
+				// a sampler binding with immutable samplers needs no write
+				entries.push({ binding: e.binding, resource: this.get(immutable, "sampler").gpu });
 				continue;
 			}
-			if (!d) throw new Error(`set binding ${vkb}${el ? `[${el}]` : ""} not written`);
-			if (e.buffer) {
+			if (!d) {
+				// Vulkan lets a binding the shader does not access stay unwritten
+				// (ggml-vulkan leaves its unused operands; a shader may sample a
+				// texture only on a branch the app never takes): a placeholder,
+				// a zeroed buffer, a 1x1 texture or a sampler. Buffers and storage
+				// textures get one per WGSL binding number, so two of them never
+				// alias in a dispatch; logged once per connection.
+				const own = e.buffer || e.storageTexture;
+				const key = `${own ? e.binding : ""}:${JSON.stringify(e.buffer || e.sampler || e.texture || e.storageTexture)}:${e.buffer ? "b" : e.sampler ? "s" : e.texture ? "t" : "st"}`;
+				let res = this.unwritten.get(key);
+				if (!res) {
+					if (!this.unwritten.size) this.log(`kwvk: set binding ${vkb}${el ? `[${el}]` : ""} not written: a placeholder ${e.buffer ? "buffer" : e.sampler ? "sampler" : "texture"} bound (logged once)`);
+					res = this.placeholderResource(e);
+					this.unwritten.set(key, res);
+				}
+				entries.push({ binding: e.binding, resource: res });
+				continue;
+			}
+			if (e.kwTexel === "params") {
+				if (!d.view) throw new Error(`set binding ${vkb}${el ? `[${el}]` : ""}: the shader reads a texel buffer, the descriptor is not one`);
+				entries.push({ binding: e.binding, resource: { buffer: this.get(d.view, "bufferView").params, offset: 0, size: 16 } });
+			} else if (e.buffer) {
+				if (e.kwTexel && !d.view) throw new Error(`set binding ${vkb}${el ? `[${el}]` : ""}: the shader reads a texel buffer, the descriptor is not one`);
 				const b = this.get(d.buffer, "buffer");
 				const size = isWhole(d.range) ? b.size - d.offset : d.range;
 				const sub = override?.get(e.binding);
+				// WebGPU sizes a uniform binding by its WGSL struct, a multiple of 16
+				// bytes, Vulkan by the bytes the app names (GZDoom binds 252): a
+				// uniform range grows to 16-byte steps within the GPU buffer, which
+				// for a uniform buffer ends on a 16-byte boundary (vkCreateBuffer);
+				// offsets (and dynamic offsets) are multiples of
+				// minUniformBufferOffsetAlignment, so the grown range fits wherever
+				// the app's did
+				const step = e.buffer.type === "uniform" ? 16 : 4;
+				if (!sub && !e.buffer.hasDynamicOffset) {
+					// a dispatch binds such a binding as a scratch copy (vk-exec.ts aliasFix); a draw cannot copy inside its render pass
+					const name = e.buffer.type === "uniform" ? "minUniformBufferOffsetAlignment" : "minStorageBufferOffsetAlignment";
+					const al = this.dev.limits?.[name] || 256;
+					if (d.offset % al) throw new Error(`set binding ${vkb}${el ? `[${el}]` : ""} at offset ${d.offset}, not a multiple of ${name} (${al}): taken by compute dispatches only`);
+				}
 				if (sub) entries.push({ binding: e.binding, resource: { buffer: sub.buf, offset: 0, size: sub.size } });
-				else entries.push({ binding: e.binding, resource: { buffer: b.buf, offset: d.offset, size: Math.min((size + 3) & ~3, b.buf.size - d.offset) } });
+				else entries.push({ binding: e.binding, resource: { buffer: b.buf, offset: d.offset, size: Math.min(alignUp(size, step), b.buf.size - d.offset) } });
 			} else if (e.sampler) {
 				const sid = d.sampler || set.layout.bindings.get(vkb)?.immutable?.[el];
 				entries.push({ binding: e.binding, resource: this.get(sid, "sampler").gpu });
@@ -1455,6 +1515,8 @@ export function dkey(binding: number, element: number): number {
 
 function entryFromReflection(b: VkShaderBinding, stage: number, dsl: any): any {
 	const e: any = { binding: b.wgslBinding, visibility: stage };
+	// a texel buffer: its words (a storage buffer) or its parameters (a uniform), bound from the view (bindGroup)
+	if (b.texel) e.kwTexel = b.texel;
 	const vkd = dsl.bindings.get(b.binding);
 	const dyn = vkd && (vkd.type === DT.UNIFORM_DYN || vkd.type === DT.STORAGE_DYN);
 	switch (b.kind) {
@@ -1487,6 +1549,19 @@ function entryFromReflection(b: VkShaderBinding, stage: number, dsl: any): any {
 			break;
 	}
 	return e;
+}
+
+/**
+ * A texel buffer descriptor: the view's buffer as the storage binding the
+ * shader's words are (offset and range as bound, vk-exec.ts aliasFix sees
+ * them as any storage buffer), and the view for its parameters. A view
+ * whose format lacks the descriptor type's feature is refused.
+ */
+function texelDescriptor(c: Conn, viewId: number, type: number): any {
+	const v = c.get(viewId, "bufferView");
+	const need = type === DT.STORAGE_TEXEL ? TEXEL_STORAGE : TEXEL_UNIFORM;
+	if (!(v.caps & need)) throw new Error(`buffer view ${viewId}: format ${v.format} is not a ${type === DT.STORAGE_TEXEL ? "storage" : "uniform"} texel buffer format here`);
+	return { view: viewId, buffer: v.buffer, offset: v.bindOffset, range: v.bindSize };
 }
 
 function entriesFromVk(binding: number, d: any, visibility: number): any[] {
@@ -1575,6 +1650,8 @@ const handlers: Record<string, Handler> = {
 				limits,
 				features,
 				formats: formatTable(dev.features),
+				// texel buffer view formats and limits (vk/PROTOCOL.md, Amendments, "Texel buffers")
+				texelBuffers: texelTable(dev.limits.maxStorageBufferBindingSize),
 				subgroupSize: c.subgroupSize,
 				...(c.token ? { external: { token: c.token } } : {}),
 			},
@@ -1612,7 +1689,16 @@ const handlers: Record<string, Handler> = {
 	},
 
 	vkCreateBuffer(c, msg) {
-		const size = Math.max(4, (msg.size + 3) & ~3);
+		if (!(msg.size >= 0)) throw new Error(`bad buffer size ${msg.size}`);
+		let size = Math.max(4, alignUp(msg.size, 4));
+		// a uniform buffer's GPU buffer ends on a 16-byte boundary, so that a
+		// uniform binding of it can grow to the 16-byte multiple WebGPU
+		// sizes it by (bindGroup); the Vulkan size (`size` below) stays the
+		// bound of writes, reads and copies
+		if ((msg.usage || 0) & 0x10 && msg.size > 0) {
+			const padded = Math.max(16, alignUp(msg.size, 16));
+			if (padded <= c.dev.limits.maxBufferSize) size = padded;
+		}
 		// STORAGE always: vkCmdCopyBuffer patches unaligned bytes with a compute pass (vk-exec.ts byteCopy)
 		let usage = BU.COPY_SRC | BU.COPY_DST | BU.STORAGE;
 		const u = msg.usage || 0;
@@ -1621,8 +1707,7 @@ const handlers: Record<string, Handler> = {
 		if (u & 0x40) usage |= BU.INDEX;
 		if (u & 0x80) usage |= BU.VERTEX;
 		if (u & 0x100) usage |= BU.INDIRECT;
-		if (u & 0x8) usage |= BU.UNIFORM; // uniform texel: unsupported, keep valid
-		if (u & 0x4) usage |= BU.STORAGE;
+		// texel buffers (0x4 uniform, 0x8 storage) are bound as storage buffers of words
 		if (!(size <= c.dev.limits.maxBufferSize)) throw new Error(`buffer size ${msg.size} over maxBufferSize`);
 		const buf = c.dev.createBuffer({ size, usage, label: `kwvk buffer ${msg.id}` });
 		c.r.gpuCreated();
@@ -1633,9 +1718,9 @@ const handlers: Record<string, Handler> = {
 	writeBuffer(c, msg, bin) {
 		const b = c.get(msg.buffer, "buffer");
 		const off = msg.offset || 0;
-		if (off & 3 || bin.length & 3) {
+		if (off % 4 || bin.length & 3) {
 			// pad an unaligned tail with zeros only where it lies past the Vulkan size
-			if (off & 3) throw new Error(`unaligned offset ${off}`);
+			if (off % 4) throw new Error(`unaligned offset ${off}`);
 			const end = off + bin.length;
 			if (end >= b.size) {
 				const p = new Uint8Array((bin.length + 3) & ~3);
@@ -1643,7 +1728,9 @@ const handlers: Record<string, Handler> = {
 				bin = p;
 			} else throw new Error(`unaligned size ${bin.length}`);
 		}
-		if (off + bin.length > b.buf.size) throw new Error(`write past the end (${off}+${bin.length} > ${b.buf.size})`);
+		// the Vulkan size in whole words bounds it, not a uniform buffer's 16-byte padding
+		const room = Math.min(alignUp(b.size, 4), b.buf.size);
+		if (off + bin.length > room) throw new Error(`write past the end (${off}+${bin.length} > ${room})`);
 		c.dev.queue.writeBuffer(b.buf, off, bin);
 		c.stats.bytesWritten += bin.length;
 		return undefined;
@@ -1654,8 +1741,8 @@ const handlers: Record<string, Handler> = {
 		const off = msg.offset || 0;
 		if (!(off >= 0 && off <= b.size)) throw new Error(`offset ${off} out of range`);
 		const size = Math.min(isWhole(msg.size) ? b.size - off : msg.size, b.size - off);
-		const start = off & ~3;
-		const end = Math.min((off + size + 3) & ~3, b.buf.size);
+		const start = alignDown(off, 4);
+		const end = Math.min(alignUp(off + size, 4), b.buf.size);
 		const len = Math.max(4, end - start);
 		const stage = c.dev.createBuffer({ size: len, usage: BU.MAP_READ | BU.COPY_DST });
 		const e = c.dev.createCommandEncoder();
@@ -1763,7 +1850,6 @@ const handlers: Record<string, Handler> = {
 	vkCreateDescriptorSetLayout(c, msg) {
 		const bindings = new Map<number, any>();
 		for (const b of msg.bindings || []) {
-			if (b.descriptorType === DT.UNIFORM_TEXEL || b.descriptorType === DT.STORAGE_TEXEL) c.log("kwvk: vkCreateDescriptorSetLayout: texel buffers are unsupported");
 			bindings.set(b.binding, { type: b.descriptorType, count: b.descriptorCount ?? 1, stages: b.stageFlags, immutable: b.immutableSamplers });
 		}
 		const order = [...bindings.keys()].sort((a, b) => a - b);
@@ -1830,6 +1916,15 @@ const handlers: Record<string, Handler> = {
 				const d: any = { type: w.descriptorType };
 				if (w.imageInfo?.length) Object.assign(d, { sampler: info.sampler, imageView: info.imageView });
 				else if (w.bufferInfo?.length) Object.assign(d, { buffer: info.buffer, offset: info.offset || 0, range: info.range });
+				else if (w.texelBufferView?.length) {
+					if (!info) {
+						// a null view: as if unwritten (a placeholder if the shader reaches it)
+						set.desc.delete(dkey(b, el));
+						el++;
+						continue;
+					}
+					Object.assign(d, texelDescriptor(c, info, w.descriptorType));
+				}
 				const k = dkey(b, el);
 				const prev = set.desc.get(k);
 				// a sampler-only write keeps a combined binding's view and vice versa
@@ -2015,9 +2110,29 @@ const handlers: Record<string, Handler> = {
 		};
 	},
 
+	/**
+	 * A texel buffer view: bound as a storage buffer from its offset rounded
+	 * down to minStorageBufferOffsetAlignment, with a 16-byte uniform of
+	 * parameters the translated shader decodes by (vk/naga/src/texel.rs):
+	 * [VkFormat, first byte in the binding, element count, texel size].
+	 */
 	vkCreateBufferView(c, msg) {
-		c.log("kwvk: vkCreateBufferView: texel buffers are unsupported");
-		c.put(msg.id, { t: "bufferView" });
+		const b = c.get(msg.buffer, "buffer");
+		const tf = texelFormat(msg.format);
+		if (!tf) throw new Error(`format ${msg.format} is not a texel buffer format`);
+		const offset = msg.offset || 0;
+		if (!(offset >= 0 && offset < b.size)) throw new Error(`offset ${offset} past the buffer's ${b.size} bytes`);
+		const bytes = isWhole(msg.range) ? b.size - offset : Math.min(msg.range, b.size - offset);
+		const count = Math.floor(bytes / tf.size);
+		const al = c.dev.limits?.minStorageBufferOffsetAlignment || 256;
+		const bindOffset = alignDown(offset, al);
+		const bindSize = Math.max(4, Math.min(alignUp(offset + count * tf.size, 4), b.buf.size) - bindOffset);
+		const max = c.dev.limits?.maxStorageBufferBindingSize;
+		if (max && bindSize > max) throw new Error(`${count} elements (${bindSize} bytes bound) over maxStorageBufferBindingSize (${max})`);
+		const params = c.dev.createBuffer({ size: 16, usage: BU.UNIFORM | BU.COPY_DST, label: `kwvk buffer view ${msg.id}` });
+		c.r.gpuCreated();
+		c.dev.queue.writeBuffer(params, 0, new Uint32Array([msg.format, offset - bindOffset, count, tf.size]));
+		c.put(msg.id, { t: "bufferView", buffer: msg.buffer, format: msg.format, caps: tf.caps, bindOffset, bindSize, params });
 		return undefined;
 	},
 

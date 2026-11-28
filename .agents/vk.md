@@ -18,16 +18,17 @@ app -> Vulkan loader (Debian libvulkan1) -> /usr/lib/kw/libvulkan_kw.so (vk/icd)
 
 - **ICD** (`vk/icd/`, GPL-2.0-or-later, C): thin. Instance, physical
   device, device, queue, memory (a device-local type without a shadow and a
-  host-visible coherent one with a malloc'd shadow; Device memory below),
+  host-visible coherent, cached one with a malloc'd shadow; Device memory below),
   fences, semaphores, command recording and
   presentation are guest-side; every other object is made on the host by a
   message. Command buffers go as JSON at submit; host-visible memory is
   diffed and sent before each submit, over the ranges the submit's commands
   may read or write (vk/PROTOCOL.md, Amendments, "Submit flush"); the ranges of mapped buffers that
-  submitted work may write (copy regions, storage buffers the bound
-  pipeline's SPIR-V may write, as bound) are read back at fence waits. Its physical device is an
+  submitted work may write (copy regions, storage buffers and storage
+  texel buffers the bound pipeline's SPIR-V may write, as bound) are read
+  back at fence waits. Its physical device is an
   integrated GPU whose limits, features and formats come from the host's
-  hello reply (WebGPU's), as does its subgroup size (32; no subgroup
+  hello reply (WebGPU's; texel buffer formats from its `texelBuffers`), as does its subgroup size (32; no subgroup
   operation, supportedStages 0, which Vulkan 1.1 does not allow: it wants
   COMPUTE there). WSI: VK_KHR_wayland_surface (external buffers
   on the page's wland, else wl_shm buffers; pre-multiplied alpha;
@@ -77,14 +78,30 @@ app -> Vulkan loader (Debian libvulkan1) -> /usr/lib/kw/libvulkan_kw.so (vk/icd)
   WGSL enables). Specialization constants are baked, vertex output gets
   the Y flip, descriptor arrays are flattened, input attachments become
   textures, 8/16-bit and float16 storage is lowered to u32 words (float16
-  computed in f32 without `shader-f16`), and a block whose members are all
+  computed in f32 without `shader-f16`), texel buffers (samplerBuffer,
+  imageBuffer) become storage buffers of u32 words plus a uniform of the
+  view's format, first byte, count and texel size, decoded and encoded by
+  a switch on the format (`src/texel.rs`; vk/PROTOCOL.md, Amendments,
+  "Texel buffers"), and a block whose members are all
   NonWritable (or NonReadable), as older glslang marks `readonly buffer`,
   is read-only (write-only) as a whole: naga reads only the variable's
   decorations, and WebGPU refuses a read_write buffer bound over the range
-  of another binding. Compute helpers that read num_workgroups or
-  workgroup_id through spv-in's private copies get them as arguments
-  (`src/builtins.rs`), and a workgroup over the device's limits that
-  shares memory or has barriers runs each invocation as 2 to 8 virtual
+  of another binding. A storage buffer the module never writes (no
+  pointer into any view of its binding reaches a store, an atomic, a
+  call or any instruction but a load, OpArrayLength or an access chain;
+  modules with variable pointers left alone) is read-only too (GZDoom's plain `buffer` blocks in vertex
+  stages, where WebGPU has no read_write storage). Every stage's WGSL and
+  `bindings` hold only the resources its entry point reaches, after
+  branches on baked constants and statements after a return, break or
+  continue are dropped. OpLine/OpNoLine are dropped (Taisei's `-g`
+  modules), OpSpecConstantOp is folded (every Shader-capability operation
+  on integers and booleans, scalar and vector; Select, FConvert,
+  QuantizeToF16 and the composite operations on floats: vkQuake),
+  isinf/isnan become bit tests and an `int[1]` gl_SampleMask(In) a u32.
+  Compute helpers that read num_workgroups or workgroup_id through
+  spv-in's private copies get them as arguments (`src/builtins.rs`), and
+  a workgroup over the device's limits that shares memory or has barriers
+  runs each invocation as 2 to 8 virtual
   ones (`src/virt.rs`; vk/PROTOCOL.md, Amendments, "Virtual
   invocations"). Compute modules that read the subgroup builtins without
   any subgroup operation (llama.cpp's gated_delta_net and ssm_scan) get
@@ -119,7 +136,7 @@ app -> Vulkan loader (Debian libvulkan1) -> /usr/lib/kw/libvulkan_kw.so (vk/icd)
   the translator on `test/vk/guest/double.comp` (skipped without
   `kwvk-naga.wasm`).
 - `node test/vk/host/check.mjs`: the host renderer alone in headless Chrome
-  with a fake client (131 cases, the failures that must reach the guest
+  with a fake client (153 cases, the failures that must reach the guest
   included: refused and unusable pipelines, lost devices; a pipeline made
   with its read-only buffers kept and dispatched with them in a buffer it
   also writes; a 512-wide shared-memory reduction on 256 invocations;
@@ -127,18 +144,33 @@ app -> Vulkan loader (Debian libvulkan1) -> /usr/lib/kw/libvulkan_kw.so (vk/icd)
   timestamps over
   several submits under a conversion that changes per resolve, and a
   sample that reads 0, never going backwards; descriptor copies
-  past a binding's end; external present:
+  past a binding's end; uniform bindings of 252 bytes read by a 256-byte
+  block; block-compressed copies ending mid-block (BC1, ASTC 6x6) and
+  BC1 to and from R32G32_UINT; unwritten textures and samplers, unwritten
+  immutable samplers; multi-draw indirect at strides past the record;
+  indexed fans with primitive restart; storage bindings at offsets 4480
+  and 6146; texel buffers: the hello's formats, fetches of 12 view formats
+  at offsets off the storage alignment (4496, 272, 8176, ...), a storage
+  texel buffer written by compute and read back, a format refused at view
+  creation and one refused as a storage texel buffer, a compute stage
+  with every storage buffer slot taken and a texel buffer more (refused,
+  named); external present:
   tokens, export ids, pictures premultiplied and opaque, every ref that
   must resolve to null). `vk/naga/test/run.ts`: the translator on the shaders
   in `vk/naga/test/shaders/`, validated in a real WebGPU (pushpack.comp
   also runs and compares every value of a repacked push block, and
   subgroup.v13.comp every value of lowered subgroup builtins, under
-  virtual invocations too);
+  virtual invocations too, texel.comp every element of 45 texel buffer
+  view formats at a nonzero first byte, texelrt.comp every storage format
+  stored back to its bytes, texelimg.comp storage texel buffers with and
+  without a format, atomics and narrow stores);
   `corpus.sh`: a real-world corpus (Sascha Willems' examples, vkmark,
-  GTK 4, SDL 3). `cargo run --release --features check --example check
-  --manifest-path vk/naga/Cargo.toml -- DIR...` parses and validates
-  WGSL files with naga's WGSL front end under WebGPU's capabilities, as
-  Firefox does (2026-11-24: every translated ggml-vulkan variant of
+  GTK 4, SDL 3). `vk/naga/test/compile.sh` (the test shaders' SPIR-V;
+  `*.g.*` with `-g`) and `corpus.sh` need glslangValidator and spirv-opt
+  (`sudo dnf install glslang spirv-tools`; reset with the image).
+  `cargo run --release --features check --example check --manifest-path
+  vk/naga/Cargo.toml -- DIR...` parses and validates WGSL files with
+  naga's WGSL front end under WebGPU's capabilities, as Firefox does (2026-11-24: every translated ggml-vulkan variant of
   llama.cpp's b12674 release and source builds, with and without
   `shader-f16`, and the corpus pass; subgroup variants are skipped,
   naga 30 refuses `enable subgroups`, which gated_delta_net and ssm_scan,
@@ -156,10 +188,22 @@ app -> Vulkan loader (Debian libvulkan1) -> /usr/lib/kw/libvulkan_kw.so (vk/icd)
   `--kernel FILE`: another bundle). Steps: h (a raw hello over `kwbox
   vsock`), a (`vulkaninfo --summary` names kwvk), b (every
   `$KW_BUILD/vk/vk-*` test program exits 0: compute, triangle, headless,
-  dynamic state, threads, depth, flat varyings, loud failures: refused
-  pipelines and lost devices, descriptor sets: consecutive binding updates
+  dynamic state, threads, depth (also with vkCreateRenderPass2,
+  depth-only layouts and an imageless framebuffer begun with two sets of
+  views), flat varyings, loud failures: refused pipelines (a barrier in
+  non-uniform control flow; a 512-wide workgroup with its barriers in a
+  function), a 512-wide shared-memory reduction run as virtual
+  invocations, lost devices, descriptor sets: consecutive binding updates
   by a write, a copy and a template, dynamic offsets, mapped results read
-  directly), c (`vkcube --wsi wayland`
+  directly, texel buffers: format features, a refused view format, a
+  uniform texel buffer gathered through an index one into a storage one
+  with image atomics, set by a write, a copy and a template, the results
+  read from the mapping, timeline semaphores: values reached at the submit without a
+  sync request (counted in `KWVK_TRACE`), wait before signal held and
+  released in order by another thread's vkSignalSemaphore or an earlier
+  held submit, wait-idle across a release, wait any and all, timeouts,
+  device loss with a held submit, and the inter-stage limit per engine),
+  c (`vkcube --wsi wayland`
   under `weston --backend=headless --renderer=pixman --debug`, started by
   the page's `/usr/local/bin/kwvk-wl CMD`; then a running vkcube's frame
   taken by `weston-screenshooter` and judged: many colours, the LunarG
@@ -175,8 +219,10 @@ app -> Vulkan loader (Debian libvulkan1) -> /usr/lib/kw/libvulkan_kw.so (vk/icd)
   programs work), `--snapshot` (a snapshot with a running vkcube,
   restored), `--cpus N` (SMP; the page cross-origin isolated). `--apps`
   boots the second-stage disk (`debian-disk.mjs --apps`: vkmark,
-  gtk-4-examples, SDL 2 and 3 tests, vkd3d demos, Xvfb, x11-apps) for
-  `--cmd '...'` runs, whose files in `/tmp/kwvk-out` come back to the out
+  gtk-4-examples, SDL 2 and 3 tests, vkd3d demos, Xvfb, x11-apps), or
+  with `--disk $KW_BUILD/vk/debian-vk-games.img` the third
+  (`debian-disk.mjs --games`: mpv, mesa-utils, taisei, ddnet; 1284 MiB,
+  78 s), for `--cmd '...'` runs, whose files in `/tmp/kwvk-out` come back to the out
   dir; `--capture-shaders` (with `--source`) writes SPIR-V the translator
   refuses; `--disk FILE` boots another prepared disk; `--mem MIB` sets the
   guest's memory; `--nogpu` encodes dispatches without running them
@@ -212,7 +258,17 @@ kwemu, except the subgroup size's effect on the user's GPU (below).
   `testgpu_spinning_cube`, 27-31 FPS); GTK 4.18 with
   `GSK_RENDERER=vulkan` (gtk4-demo: as with the cairo renderer, shadow
   included; GTK's default renderer stays GL); vkd3d-gears (Direct3D 12 on
-  vkd3d) under Xvfb.
+  vkd3d) under Xvfb (2026-11-28: its texel buffer UAV-clear pipelines are
+  made; the two for 1D-array images stay unusable, Unsupported below).
+- 2026-11-28, under weston headless: mpv 0.40 with `--vo=gpu-next
+  --gpu-api=vulkan` (libplacebo 7.349 takes kwvk: it needs
+  timelineSemaphore and hostQueryReset) draws a 320x240 yuv420p clip
+  right, 196 presents in 20 s; with an rgb24 source (lavfi testsrc,
+  320x240), which libplacebo uploads through a storage texel buffer of
+  R8_UNORM into an emulated RGBA8 texture, the frames are right too, more
+  slowly (about 2 s of video in the 10 s the yuv420p source plays 5);
+  the DDNet 19.1 client on Vulkan with its own SPIR-V (Unsupported
+  below) draws its menu.
 - llama.cpp (ggml-vulkan; not packaged in trixie: forky's wants glibc
   2.43): ggml selects kwvk and generates, cross-built for aarch64 by
   `test/vk/guest/build-llama.sh` and as llama.cpp's own release build
@@ -259,8 +315,10 @@ kwemu, except the subgroup size's effect on the user's GPU (below).
   storage buffers, a barrier WebGPU takes as non-uniform) pass; SSM_SCAN
   is not supported (ggml wants subgroup operations); MUL_MAT's mat-vec
   cases (n up to 8) of f32, f16, q4_0, q5_0, q8_0, q4_K and q6_K pass,
-  449 of them, until a storage binding at offset 4480, which WebGPU
-  refuses (not a multiple of 256), loses the device. GATED_DELTA_NET
+  449 of them, until a storage binding at offset 4480 (ggml's matmul
+  binds a tensor view where it lies; 256 is reported), which WebGPU
+  refuses; a dispatch now binds such a binding as a scratch copy (Errors
+  below), and the cases after it have not been run with that. GATED_DELTA_NET
   failed all 16 cases tried at 32 before its subgroup builtins were
   lowered (SwiftShader's subgroups are not 32 wide).
 - Ollama 0.40.18: its runner is llama.cpp's llama-server (b12651). It runs
@@ -299,7 +357,10 @@ kwemu, except the subgroup size's effect on the user's GPU (below).
 vk/PROTOCOL.md, Amendments, "Device memory tracking", is the contract.
 
 - Memory type 0 is DEVICE_LOCAL without a shadow, type 1 HOST_VISIBLE |
-  HOST_COHERENT with one; there is no DEVICE_LOCAL | HOST_VISIBLE type.
+  HOST_COHERENT | HOST_CACHED with one (the shadow is the guest's RAM;
+  DDNet maps only HOST_CACHED memory; ggml-vulkan, SDL3's GPU API and
+  vkd3d pick type 0 and 1 for the same uses with or without the flag);
+  there is no DEVICE_LOCAL | HOST_VISIBLE type.
   CPU writes to mapped memory are found by diffing the shadow against a
   last-sent copy at each submit, over the ranges its commands may read or
   write (descriptors as bound, copy regions, vertex, index and indirect
@@ -309,7 +370,9 @@ vk/PROTOCOL.md, Amendments, "Device memory tracking", is the contract.
   wait-idle for mapped memory, else at vkMapMemory). Storage buffers
   count where Vulkan's consecutive binding updates put them (a write,
   copy or template entry spilling past a binding), at the range they were
-  bound with plus the dynamic offset. A rule that must hold: a range only
+  bound with plus the dynamic offset; texel buffers at their view's range
+  (2026-11-28: read when bound, written when storage and the pipeline may
+  write them). A rule that must hold: a range only
   shrinks to what the command says exactly; when unsure, the whole buffer.
   Words the CPU changed meanwhile keep the CPU's value.
 - Why no DEVICE_LOCAL | HOST_VISIBLE type: kwvk is an integrated GPU, and
@@ -351,6 +414,15 @@ vk/PROTOCOL.md, Amendments, "Device memory tracking", is the contract.
   reply; vkGetFenceStatus of a pending fence waits up to 1 ms in the
   kernel from its second call (vk/PROTOCOL.md, Amendments, "Fences at
   submit"; `KWVK_FENCE_SYNC=1` waits for every reply).
+- Timeline semaphores (timelineSemaphore, VK_KHR_timeline_semaphore):
+  values follow the fences' rule, so vkGetSemaphoreCounterValue and
+  vkWaitSemaphores answer without a round trip for submits that write no
+  host-visible memory (mpv's libplacebo, 2026-11-28: 981 submits, one sync
+  request, in 20 s). A queue wait for a value nothing has given yet holds
+  that submit and every later one in the ICD until vkSignalSemaphore or an
+  earlier held submit gives it; vkQueueWaitIdle, vkDeviceWaitIdle and
+  vkQueuePresentKHR wait for the release (vk/PROTOCOL.md, Amendments,
+  "Timeline semaphores"; `KWVK_DEBUG` logs each hold).
 - Open: two VkBuffers bound to overlapping ranges of one memory are two
   GPU buffers on the host: a GPU write through one is not seen through the
   other.
@@ -454,22 +526,62 @@ also waited for the GPU's queue (`onSubmittedWorkDone`).
 
 ## Unsupported and open (2026-11-24)
 
-- Not offered: geometry and tessellation shaders, texel buffers
-  (samplerBuffer, imageBuffer: vkd3d's internal UAV-clear pipelines, DXVK),
+- Not offered: geometry and tessellation shaders,
   1D-array storage images (WGSL has none), linear-tiling images,
-  robustBufferAccess, logicOp, multiDrawIndirect, fillModeNonSolid, wide
+  robustBufferAccess, logicOp, fillModeNonSolid, wide
   lines, large points, shaderInt16/Int64/Float64, pipeline statistics
   queries, sparse resources; subgroup clustered reductions, elect and
   ballot counts in shaders (naga lacks them).
-- Mesa's zink: it connects and gives up after the hello, with no message;
-  it wants many more features. Low priority (guest GL has virgl). Mesa
-  (25.0 in Debian 13) never picks zink while virgl works; after a virgl
-  failure, GLX on a DRI3 X server tries zink on the first Vulkan device
-  (kwvk) and falls back to software only because kwvk has no timeline
-  semaphores, and EGL on Wayland skips kwvk only because it has no
-  VK_EXT_physical_device_drm. Before offering either, export
-  `LIBGL_KOPPER_DISABLE=1` in the base profile (and keep zink off EGL), or
-  GL would draw through zink on kwvk.
+- vkQuake 1.34 (2026-11-28, its 51 shaders compiled with glslang 16.2,
+  translated and compiled in WebGPU): 42 pass. Image atomics (storage
+  class Image) stop the 4 ssao_mip shaders, physical storage buffers
+  mesh_interpolate and skinning, ray queries ray_debug, Tint's
+  uniformity rule update_lightmap (a barrier in non-uniform control
+  flow); world.vert uses set 4 and push constants, more bind groups than
+  WebGPU's default maxBindGroups (4).
+- Texel buffers (2026-11-28; vk/PROTOCOL.md, Amendments, "Texel
+  buffers"): each takes one storage buffer and one uniform buffer slot of
+  every stage that uses it (WebGPU's maxStorageBuffersPerShaderStage,
+  often 8, and maxUniformBuffersPerShaderStage, 12): past either the
+  pipeline is refused, naming the counts, where a Vulkan driver counts
+  texel buffers apart from storage buffers. A storage texel buffer a
+  vertex stage writes cannot work (WebGPU has no writable storage in
+  vertex shaders: refused). Not supported: descriptor arrays of texel
+  buffers, texel buffers passed to functions, view formats outside the
+  hello's list (sRGB, 3-byte, 64-bit, packed 16-bit and E5B9G9R9 among
+  them; B10G11R11 is uniform only), atomics other than on R32_UINT and
+  R32_SINT. A storage texel buffer the module writes whose SPIR-V format
+  is 8/16-bit or Unknown (vkd3d's UAV clears) has atomic words, every
+  access to it atomic. Measured only on SwiftShader.
+- Vulkan 1.2 requirements left: uniformBufferStandardLayout is false (it
+  needs every std430 uniform block translated for every engine; the
+  translator leaves blocks with 8/16/64-bit or bool members, or used other
+  than through access chains and loads, to Chrome's
+  uniform_buffer_standard_layout, which Firefox and Safari lack), and
+  VkPhysicalDeviceSubgroupProperties.supportedStages is 0, where Vulkan
+  1.1 wants COMPUTE (it needs subgroupElect, subgroupBarrier,
+  subgroupMemoryBarrier* and the subgroup builtins in compute shaders on
+  every adapter: the builtins are lowered only in modules without
+  subgroup operations, naga lacks elect, WGSL has no subgroup barrier).
+- Mesa's zink: low priority (guest GL has virgl). Mesa 25.0 (Debian 13)
+  never picks zink while virgl works, and with no DRM device EGL (Wayland,
+  surfaceless) and GLX (Xvfb) take llvmpipe (2026-11-28). Forced
+  (`GALLIUM_DRIVER=zink`; not run since texel buffers work), zink takes kwvk and warns that logicOp,
+  fillModeNonSolid, scalarBlockLayout, custom border colours and line
+  rasterization are missing. After a virgl failure GLX on a DRI3 X server
+  would try zink on the first Vulkan device (kwvk), so the base profile
+  (`guest/base/rootfs/etc/profile.d/kw-gl.sh`) exports
+  `LIBGL_KOPPER_DISABLE=1`; that path is unconfirmed (no DRI3 X server in
+  the tests: Xvfb has none, Xwayland is not on the disks). EGL on Wayland
+  skips kwvk only because it has no VK_EXT_physical_device_drm: keep zink
+  off EGL before offering it.
+- Debian's games (trixie, 2026-11-28): taisei 1.4.1 has no Vulkan
+  renderer (SDL2; `--renderer {gl33,null}`); ddnet 19.1-2 ships no Vulkan
+  SPIR-V (data/shader/vulkan is missing), so its client falls back to
+  OpenGL; with the 38 modules compiled from its 19.1 sources by host
+  glslang 16.2 placed where it looks ($CURRENTDIR/shader/vulkan), it
+  draws its first-run menu on kwvk (699 presents, 18402 draws in about
+  60 s, no errors). vkQuake is only in forky and sid.
 - llama.cpp: some pipelines are refused, and ggml aborts at the first it
   needs (2026-11-24, every variant ggml declares on a 256-invocation
   device: 1807 of 1854 compile). Tint's uniformity analysis
@@ -495,15 +607,27 @@ also waited for the GPU's queue (`onSubmittedWorkDone`).
   `requires` names it and other browsers refuse the pipeline with that
   name). Firefox and Safari have not been run: the WGSL is checked
   against naga's WGSL front end (Firefox's compiler) only.
-- A descriptor set that the pipeline's shaders declare but the app never
-  binds (GTK binds no set 1) gets placeholder resources, logged once.
+- A descriptor set that the pipeline's shaders use but the app never
+  binds (GTK binds no set 1; 3 of GTK 4.18's 17 fragment shaders use
+  it, 2026-11-28) gets placeholder resources, logged once. So does a
+  binding of a bound set that the app left unwritten (a buffer, texture
+  or sampler; logged once per connection); a sampler binding with
+  immutable samplers needs no write.
 - Rendering approximations kept, logged by the host (not errors): polygon
   modes drawn filled, logic ops, component swizzles without the feature,
-  view formats other than the image's (or its sRGB twin), indexed triangle
-  fans drawn as lists, CLAMP_TO_BORDER as clamp-to-edge,
+  view formats other than the image's (or its sRGB twin), indirect draws
+  of triangle fans drawn as lists (indexed fans are rewritten as lists
+  before their render pass), CLAMP_TO_BORDER as clamp-to-edge,
   unnormalizedCoordinates ignored, timestamps inside render passes read 0,
   layered rendering to layer 0 only. Not logged: events set by a command
   buffer never reach vkGetEventStatus.
+- Open in the host (2026-11-28): block-compressed images whose base size
+  is not a whole number of blocks (Vulkan allows a 6x6 BC image) fail at
+  creation, as WebGPU wants whole blocks; a storage or uniform binding at
+  an offset that is not a multiple of the device's alignment loses the
+  device in a draw (a render pass cannot copy it aside), and a misaligned
+  dynamic offset anywhere; the rewrite of an indexed fan runs on one GPU
+  invocation per draw, so it is slow for large index counts (unmeasured).
 
 ## Errors (2026-11-24)
 
@@ -519,10 +643,11 @@ Amendments, "Loud failures", is the contract.
   memory on a 256-invocation device that cannot run as virtual
   invocations) or VK_ERROR_FEATURE_NOT_PRESENT
   (adjacency or patch topologies), with the reason. Pipelines that only
-  declare texel buffers or 1D-array storage images are made "unusable" (vkd3d
+  declare 1D-array storage images are made "unusable" (vkd3d
   makes such pipelines at start-up and never runs them): binding one makes
-  vkQueueSubmit lose the device. The ICD refuses buffers over maxBufferSize
-  and images of unlisted formats.
+  vkQueueSubmit lose the device. The ICD refuses buffers over maxBufferSize,
+  images of unlisted formats and buffer views of formats the hello does
+  not list for the buffer's texel usages.
 - Later: a submit the host cannot encode or WebGPU refuses (it drops the
   whole submit), a failed request without a reply, or the use of an object
   whose creation failed loses the device for that connection only
@@ -534,6 +659,10 @@ Amendments, "Loud failures", is the contract.
   readback. The page's resolver gives null (the window keeps its last
   content) for any id no live connection made, a destroyed or never
   presented image, and after a device loss.
+- A storage or uniform binding at an offset that is not a multiple of the
+  device's min{Storage,Uniform}BufferOffsetAlignment is bound as a
+  scratch copy in a dispatch (copied back when writable); in a draw it
+  loses the device, naming the offset.
 - Measured 2026-11-24 natively through the relay (SwiftShader): llama.cpp
   stories260K F32 gives the same text at the same speed (eval 9.7-9.8
   tokens/s, prompt 4.9-5.1 s; 9.4 and 5.0 before).

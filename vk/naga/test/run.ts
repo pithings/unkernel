@@ -76,6 +76,51 @@ check("buffer.comp: runtime array", has(bc, /array<f32>/) && has(bc, /arrayLengt
 	check("buffer.comp, member-only NonWritable: still read-only", kept.length < w.length && mo?.bindings.map((b) => `${b.wgslBinding}:${b.kind}`).join() === "0:read-only-storage,2:storage", `${w.length - kept.length} words dropped; ${JSON.stringify(mo?.bindings)}`);
 }
 
+// Storage buffers without `readonly` that the module never writes are read-only (a vertex stage
+// cannot have read_write storage); stored, atomic, or sharing a binding with a written view: writable.
+for (const f of ["unwritten.vert.spv", "unwritten.vert.opt.spv"]) {
+	const r = run(f, f, { stage: "vertex", entryPoint: "main", flipY: true });
+	check(`${f}: unwritten buffers read-only`, r?.bindings.map((b) => `${b.binding}:${b.kind}`).join() === "0:read-only-storage,1:read-only-storage" && !/read_write/.test(r.wgsl), JSON.stringify(r?.bindings));
+}
+for (const f of ["unwritten.comp.spv", "unwritten.comp.opt.spv"]) {
+	const r = run(f, f, { stage: "compute", entryPoint: "main" });
+	const kinds = Object.fromEntries((r?.bindings ?? []).map((b) => [b.binding, b.kind]));
+	check(`${f}: read-only only where never written`, JSON.stringify(kinds) === JSON.stringify({ 0: "read-only-storage", 1: "storage", 2: "storage", 3: "storage", 4: "read-only-storage" }), JSON.stringify(r?.bindings));
+}
+// Only the resources the entry point reaches: not a never-used texture, a block only an uncalled
+// function reads, or a texture behind a false specialization constant (until it is true).
+for (const f of ["unused.frag.spv", "unused.frag.opt.spv"]) {
+	const r = run(f, f, { stage: "fragment", entryPoint: "main" });
+	check(`${f}: unused resources not reflected nor declared`, r?.bindings.map((b) => `${b.set}.${b.binding}:${b.kind}`).join() === "0.0:texture,0.0:sampler" && !/texture12|Unused|detail/.test(r.wgsl), JSON.stringify(r?.bindings));
+	const d = run(`${f}.detail`, f, { stage: "fragment", entryPoint: "main", spec: { 0: true } });
+	check(`${f}: the specialized branch's texture reflected`, d?.bindings.map((b) => `${b.set}.${b.binding}:${b.kind}`).join() === "0.0:texture,0.0:sampler,0.1:texture,0.1:sampler", JSON.stringify(d?.bindings));
+}
+// glslang -g: OpLine among the globals (Taisei), dropped.
+for (const f of ["debuglines.g.frag.spv", "debuglines.g.frag.opt.spv"]) {
+	const r = run(f, f, { stage: "fragment", entryPoint: "main" });
+	check(`${f}: translates with OpLine among the globals`, r?.bindings.length === 3, JSON.stringify(r?.bindings));
+}
+// OpSpecConstantOp: Select of floats and halves (vkQuake), vector ops on the workgroup size, signed arithmetic.
+const consts = (r: VkShaderResult | undefined) => [...(r?.wgsl ?? "").matchAll(/^const (\w+): [^=]+ = ([^;]+);/gm)].map((m) => `${m[1]}=${m[2]}`).join(" ");
+for (const f of ["specops.comp.spv", "specops.comp.opt.spv"]) {
+	const d = run(f, f, { stage: "compute", entryPoint: "main" });
+	const want = "quality=1u N=5u scale=2f hscale=2f scaled=false lm=2f steps=2u wg2_=vec2<u32>(3u, 4u) sq=-4i";
+	check(`${f}: defaults folded`, consts(d) === want && has(d, /@workgroup_size\(1, 2, 1\)/) && has(d, /array<f32, 5>/), consts(d));
+	const r = run(`${f}.spec`, f, { stage: "compute", entryPoint: "main", spec: { 0: 3, 1: true, 2: 8 } });
+	const want2 = "quality=3u N=13u scale=1f hscale=1f scaled=true lm=8f steps=3u wg2_=vec2<u32>(17u, 4u) sq=-2i";
+	check(`${f}: specialized values folded`, consts(r) === want2 && has(r, /@workgroup_size\(8, 2, 1\)/) && has(r, /array<f32, 13>/), consts(r));
+}
+
+// isinf / isnan (WGSL has neither) as tests on the bits; gl_SampleMask (int[1]) as WGSL's u32 sample_mask.
+for (const f of ["isinf.frag.spv", "isinf.frag.opt.spv"]) {
+	const r = run(f, f, { stage: "fragment", entryPoint: "main" });
+	check(`${f}: isinf/isnan on the bits`, has(r, /2139095040u/) && has(r, /2147483647u/) && !!r && !/\b(isinf|isnan)\(/.test(r.wgsl), r?.wgsl.slice(0, 400));
+}
+for (const f of ["samplemask.frag.spv", "samplemask.frag.opt.spv"]) {
+	const r = run(f, f, { stage: "fragment", entryPoint: "main", pushGroup: 0 });
+	check(`${f}: gl_SampleMask as a u32 sample_mask output`, has(r, /@builtin\(sample_mask\) \w+: u32/), r?.wgsl.slice(0, 400));
+}
+
 const ic = run("image.comp", "image.comp.spv", { stage: "compute", entryPoint: "main" });
 const ib = ic?.bindings[0];
 check("image.comp: storage texture", ib?.kind === "storage-texture" && ib.format === "rgba8unorm" && ib.access === "write-only" && ib.wgslBinding === 6 && ib.viewDimension === "2d", JSON.stringify(ic?.bindings));
@@ -105,8 +150,9 @@ check("offset.frag: pushConstantSize covers offset 96", of?.pushConstantSize ===
 const sw = run("specwg.comp", "specwg.comp.spv", { stage: "compute", entryPoint: "main", spec: { 0: 64, 1: 8 } });
 check("specwg.comp: workgroup size from a spec constant", has(sw, /@workgroup_size\(64, 1, 1\)/));
 check("specwg.comp: shared array sized by a spec constant expression", has(sw, /var<workgroup> tmp: array<f32, 17>;/));
+// Only what the entry point uses is reflected: the integer textures are read with texelFetch, so their sampler halves are not.
 const tx = run("textures.frag", "textures.frag.spv", { stage: "fragment", entryPoint: "main" });
-check("textures.frag: kinds", tx?.bindings.map((b) => `${b.wgslBinding}:${b.kind}:${b.viewDimension ?? ""}:${b.sampleType ?? ""}`).join() === "0:texture:2d:float,2:sampler::,4:texture:cube:float,5:sampler::,6:texture:3d:float,7:sampler::,8:texture:2d-array:float,9:sampler::,10:texture:2d:uint,11:sampler::,12:texture:2d:sint,13:sampler::,0:storage::", JSON.stringify(tx?.bindings));
+check("textures.frag: kinds", tx?.bindings.map((b) => `${b.wgslBinding}:${b.kind}:${b.viewDimension ?? ""}:${b.sampleType ?? ""}`).join() === "0:texture:2d:float,2:sampler::,4:texture:cube:float,5:sampler::,6:texture:3d:float,7:sampler::,8:texture:2d-array:float,9:sampler::,10:texture:2d:uint,12:texture:2d:sint,0:storage::", JSON.stringify(tx?.bindings));
 const cl = run("clip.vert", "clip.vert.spv", { stage: "vertex", entryPoint: "main", flipY: true });
 check("clip.vert: clip_distances enabled", has(cl, /^enable clip_distances;/));
 const ly = run("layout.frag", "layout.frag.spv", { stage: "fragment", entryPoint: "main" });
@@ -114,8 +160,9 @@ check("layout.frag: std140 struct array padded to stride 16", has(ly, /struct (\
 check("layout.frag: row-major matrix transposed on load", has(ly, /transpose\(/));
 
 const arraysAll = { "0.0": { base: 0, count: 3 }, "0.1": { base: 6, count: 2 }, "0.2": { base: 10, count: 2 }, "1.0": { base: 0, count: 2 } };
+// samplers[0] only pairs with a texelFetch: unused, not reflected.
 const ar = run("arrays.frag", "arrays.frag.spv", { stage: "fragment", entryPoint: "main", arrays: arraysAll });
-check("arrays.frag: reflection with arrayIndex", ar?.bindings.map((b) => `${b.set}.${b.binding}[${b.arrayIndex}]@${b.wgslBinding}:${b.kind}`).join() === "0.0[0]@0:texture,0.0[0]@1:sampler,0.0[1]@2:texture,0.0[1]@3:sampler,0.0[2]@4:texture,0.0[2]@5:sampler,0.1[0]@6:texture,0.1[1]@8:texture,0.2[0]@10:sampler,0.2[1]@12:sampler,1.0[0]@0:uniform,1.0[1]@2:uniform", JSON.stringify(ar?.bindings));
+check("arrays.frag: reflection with arrayIndex", ar?.bindings.map((b) => `${b.set}.${b.binding}[${b.arrayIndex}]@${b.wgslBinding}:${b.kind}`).join() === "0.0[0]@0:texture,0.0[0]@1:sampler,0.0[1]@2:texture,0.0[1]@3:sampler,0.0[2]@4:texture,0.0[2]@5:sampler,0.1[0]@6:texture,0.1[1]@8:texture,0.2[1]@12:sampler,1.0[0]@0:uniform,1.0[1]@2:uniform", JSON.stringify(ar?.bindings));
 check("arrays.frag: constant index resolved", has(ar, /textureSample\(tex_1_, tex_1_sampler, _e\d+\)/) && has(ar, /textureSample\(images_0_, samplers_1_,/));
 check("arrays.frag: dynamic index switches", has(ar, /case 2: \{\s*let _e\d+ = textureSample\(tex_2_, tex_2_sampler/) && has(ar, /default: \{\s*let _e\d+ = ubos_0_\.color;/) && !!ar && !/enable wgpu_binding_array/.test(ar.wgsl));
 try {
@@ -368,8 +415,122 @@ if (smf) delete out["small.comp.f16"]; // SwiftShader has no shader-f16
 	}
 }
 
+// Texel buffers (texel.rs): a storage buffer of words and a uniform of
+// parameters per binding, reflected with `texel`; run below for many view
+// formats at a nonzero first byte, past the element count included.
+for (const f of ["texel.comp.spv", "texel.comp.opt.spv"]) {
+	const r = run(f, f, { stage: "compute", entryPoint: "main", pushGroup: 1 });
+	const tb = r?.bindings.filter((b) => (b as any).texel).map((b) => `${b.binding}:${b.wgslBinding}:${(b as any).texel}:${b.kind}`).join();
+	check(`${f}: texel buffers as words + parameters, read-only`, tb === "0:0:data:read-only-storage,0:1:params:uniform,1:2:data:read-only-storage,1:3:params:uniform,2:4:data:read-only-storage,2:5:params:uniform", tb);
+	check(`${f}: decoders for the three sampled types, no stub left`, has(r, /fn kw_texel_decode_f\(/) && has(r, /fn kw_texel_decode_i\(/) && has(r, /fn kw_texel_decode_u\(/) && !!r && !/bitcast<vec4<f32>>\(vec4<u32>\(_e/.test(r.wgsl));
+}
+for (const f of ["texelimg.comp.spv", "texelimg.comp.opt.spv"]) {
+	const r = run(f, f, { stage: "compute", entryPoint: "main", pushGroup: 1 });
+	const kinds = r?.bindings.filter((b) => (b as any).texel === "data").map((b) => `${b.binding}:${b.kind}`).sort().join();
+	check(`${f}: written texel buffers writable, readonly one read-only, atomics on words`, kinds === "0:storage,1:storage,2:storage,3:storage,4:read-only-storage" && has(r, /atomicAdd\(\(?&kw_tb_0_2_w\.w\[/) && has(r, /array<atomic<i32>>/), kinds);
+}
+for (const f of ["texel.vert.spv", "texel.vert.opt.spv", "texel.frag.spv", "texel.frag.opt.spv"]) {
+	const stage = f.includes(".vert") ? "vertex" : "fragment";
+	const r = run(f, f, { stage, entryPoint: "main", flipY: true, pushGroup: 1 });
+	if (stage === "fragment") check(`${f}: textureBuffer + sampler fetched, the sampler left out`, !!r && !r.bindings.some((b) => b.kind === "sampler") && r.bindings.filter((b) => (b as any).texel === "data").map((b) => b.kind).join() === "read-only-storage,read-only-storage,storage", JSON.stringify(r?.bindings));
+	else check(`${f}: read-only texel buffer in a vertex stage`, r?.bindings.map((b) => b.kind).join() === "read-only-storage,uniform", JSON.stringify(r?.bindings));
+}
+for (const f of ["texelrt.comp.spv", "texelrt.comp.opt.spv"]) {
+	const r = run(f, f, { stage: "compute", entryPoint: "main", pushGroup: 1 });
+	check(`${f}: written texel buffers without a format: atomic words, narrow stores by atomicAnd + atomicOr`, (r?.wgsl.match(/array<atomic<u32>>/g)?.length ?? 0) >= 1 && has(r, /atomicAnd\(&kw_tb_0_3_w\.w\[k\], ~m\); atomicOr\(/) && !has(r, /kw_tb_0_[345]_w\.w\[k\] = /), "");
+}
+for (const f of ["texelw.vert.spv", "texelw.vert.opt.spv"]) {
+	try {
+		t.translate(readFileSync(new URL(f, here)), { stage: "vertex", entryPoint: "main", flipY: true });
+		check(`${f}: a written texel buffer in a vertex stage refused`, false);
+	} catch (e) {
+		check(`${f}: a written texel buffer in a vertex stage refused`, /vertex stage writes cannot work on WebGPU/.test((e as Error).message), (e as Error).message);
+	}
+}
+// The cases run in WebGPU: bytes of 16 elements after `base` bytes, `count`
+// of them in the view, and what Vulkan's conversion gives for each.
+const texelRun = (() => {
+	let seed = 12345;
+	const rnd = () => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) >>> 8) & 0xffff;
+	const fmts: Record<number, [string, number]> = {
+		9: ["f", 1], 10: ["f", 1], 13: ["u", 1], 14: ["i", 1], 16: ["f", 2], 17: ["f", 2], 20: ["u", 2], 21: ["i", 2],
+		37: ["f", 4], 38: ["f", 4], 41: ["u", 4], 42: ["i", 4], 44: ["f", 4], 51: ["f", 4], 56: ["i", 4], 64: ["f", 4], 68: ["u", 4],
+		70: ["f", 2], 71: ["f", 2], 74: ["u", 2], 75: ["i", 2], 76: ["f", 2], 77: ["f", 4], 78: ["f", 4], 81: ["u", 4], 82: ["i", 4], 83: ["f", 4],
+		91: ["f", 8], 92: ["f", 8], 95: ["u", 8], 96: ["i", 8], 97: ["f", 8], 98: ["u", 4], 99: ["i", 4], 100: ["f", 4],
+		101: ["u", 8], 102: ["i", 8], 103: ["f", 8], 104: ["u", 12], 105: ["i", 12], 106: ["f", 12], 107: ["u", 16], 108: ["i", 16], 109: ["f", 16], 122: ["f", 4],
+	};
+	const half = (h: number) => {
+		const e = (h >> 10) & 31, m = h & 1023;
+		const v = e === 0 ? m * 2 ** -24 : (1 + m / 1024) * 2 ** (e - 15);
+		return h & 0x8000 ? -v : v;
+	};
+	const finiteHalf = () => {
+		let h = rnd();
+		const e = (h >> 10) & 31;
+		if (e === 0 || e === 31) h = (h & ~(31 << 10)) | (15 << 10);
+		return h;
+	};
+	const cases: any[] = [];
+	for (const [k, [kind, size]] of Object.entries(fmts)) {
+		const fmt = Number(k);
+		const base = size === 12 ? 16 : 48, count = 13;
+		const bytes = new Uint8Array(base + 16 * size + 16);
+		for (let j = 0; j < bytes.length; j++) bytes[j] = rnd() & 255;
+		const dv = new DataView(bytes.buffer);
+		// float data without NaN, infinity or subnormals
+		for (let n = 0; n < 16; n++) {
+			const at = base + n * size;
+			if ([76, 83, 97].includes(fmt)) for (let c = 0; c < size / 2; c++) dv.setUint16(at + 2 * c, finiteHalf(), true);
+			if ([100, 103, 106, 109].includes(fmt)) for (let c = 0; c < size / 4; c++) dv.setFloat32(at + 4 * c, (rnd() - 32768) / 256, true);
+			if (fmt === 122) {
+				let w = dv.getUint32(at, true);
+				for (const [sh, mb] of [[0, 6], [11, 6], [22, 5]]) {
+					const ex = (w >>> (sh + mb)) & 31;
+					if (ex === 0 || ex === 31) w = (w & ~(31 << (sh + mb))) | (14 << (sh + mb));
+				}
+				dv.setUint32(at, w >>> 0, true);
+			}
+		}
+		const want: number[][] = [];
+		for (let n = 0; n < 16; n++) {
+			if (n >= count) {
+				want.push([0, 0, 0, 0]);
+				continue;
+			}
+			const at = base + n * size;
+			const u8 = (c: number) => dv.getUint8(at + c), s8 = (c: number) => dv.getInt8(at + c);
+			const u16 = (c: number) => dv.getUint16(at + 2 * c, true), s16 = (c: number) => dv.getInt16(at + 2 * c, true);
+			const u32 = (c: number) => dv.getUint32(at + 4 * c, true), s32 = (c: number) => dv.getInt32(at + 4 * c, true), f32 = (c: number) => dv.getFloat32(at + 4 * c, true);
+			const un8 = (c: number) => u8(c) / 255, sn8 = (c: number) => Math.max(s8(c) / 127, -1);
+			const un16 = (c: number) => u16(c) / 65535, sn16 = (c: number) => Math.max(s16(c) / 32767, -1);
+			const pad = (v: number[]) => [...v, ...[0, 0, 1].slice(v.length - 1)].slice(0, 4);
+			const ufl = (x: number, mb: number) => half(x << (10 - mb));
+			const w = size >= 4 ? u32(0) : 0;
+			const v: Record<number, () => number[]> = {
+				9: () => pad([un8(0)]), 10: () => pad([sn8(0)]), 13: () => pad([u8(0)]), 14: () => pad([s8(0)]),
+				16: () => pad([un8(0), un8(1)]), 17: () => pad([sn8(0), sn8(1)]), 20: () => pad([u8(0), u8(1)]), 21: () => pad([s8(0), s8(1)]),
+				37: () => [0, 1, 2, 3].map(un8), 51: () => [0, 1, 2, 3].map(un8), 38: () => [0, 1, 2, 3].map(sn8), 41: () => [0, 1, 2, 3].map(u8),
+				42: () => [0, 1, 2, 3].map(s8), 56: () => [0, 1, 2, 3].map(s8), 44: () => [2, 1, 0, 3].map(un8),
+				64: () => [(w & 1023) / 1023, ((w >>> 10) & 1023) / 1023, ((w >>> 20) & 1023) / 1023, (w >>> 30) / 3],
+				68: () => [w & 1023, (w >>> 10) & 1023, (w >>> 20) & 1023, w >>> 30],
+				70: () => pad([un16(0)]), 71: () => pad([sn16(0)]), 74: () => pad([u16(0)]), 75: () => pad([s16(0)]), 76: () => pad([half(u16(0))]),
+				77: () => pad([un16(0), un16(1)]), 78: () => pad([sn16(0), sn16(1)]), 81: () => pad([u16(0), u16(1)]), 82: () => pad([s16(0), s16(1)]), 83: () => pad([half(u16(0)), half(u16(1))]),
+				91: () => [0, 1, 2, 3].map(un16), 92: () => [0, 1, 2, 3].map(sn16), 95: () => [0, 1, 2, 3].map(u16), 96: () => [0, 1, 2, 3].map(s16), 97: () => [0, 1, 2, 3].map((c) => half(u16(c))),
+				98: () => pad([u32(0)]), 99: () => pad([s32(0)]), 100: () => pad([f32(0)]),
+				101: () => pad([u32(0), u32(1)]), 102: () => pad([s32(0), s32(1)]), 103: () => pad([f32(0), f32(1)]),
+				104: () => pad([0, 1, 2].map(u32)), 105: () => pad([0, 1, 2].map(s32)), 106: () => pad([0, 1, 2].map(f32)),
+				107: () => [0, 1, 2, 3].map(u32), 108: () => [0, 1, 2, 3].map(s32), 109: () => [0, 1, 2, 3].map(f32),
+				122: () => [ufl(w & 0x7ff, 6), ufl((w >>> 11) & 0x7ff, 6), ufl((w >>> 22) & 0x3ff, 5), 1],
+			};
+			want.push(v[fmt]!());
+		}
+		cases.push({ fmt, kind, size, base, count, bytes: [...bytes], want });
+	}
+	return cases;
+})();
+
 // Every shader again as spirv-opt -O output: translates and (below) compiles.
-for (const f of readdirSync(here).filter((f) => f.endsWith(".opt.spv") && !f.startsWith("barrierneg") && !f.startsWith("builtinneg") && !f.startsWith("subgroup"))) {
+for (const f of readdirSync(here).filter((f) => f.endsWith(".opt.spv") && !f.startsWith("barrierneg") && !f.startsWith("builtinneg") && !f.startsWith("subgroup") && !f.startsWith("texelw"))) {
 	const stage = f.includes(".vert.") ? "vertex" : f.includes(".frag.") ? "fragment" : "compute";
 	const spec: Record<number, number> = f.startsWith("specwg") ? { 0: 64, 1: 8 } : f.startsWith("fastdiv") ? { 0: 128 } : {};
 	const arrays = f.startsWith("gtkish") ? { "0.0": { base: 0, count: 3 } } : arraysAll;
@@ -429,6 +590,9 @@ const pipelines: [string, string, string | undefined][] = [
 	["small", "small.comp", undefined],
 	["zerodiv", "zerodiv.comp", undefined],
 	["barriercont", "barriercont.comp", undefined],
+	["texel", "texel.vert.spv", "texel.frag.spv"],
+	["texel.comp", "texel.comp.spv", undefined],
+	["texelimg.comp", "texelimg.comp.opt.spv", undefined],
 ];
 const page = `<!doctype html><meta charset="utf-8"><title>vk-shader</title><script type="module">
 const out = ${JSON.stringify(out)};
@@ -439,6 +603,7 @@ const virtRun = ${JSON.stringify(virtRun)};
 const builtinRun = ${JSON.stringify(builtinRun)};
 const subgroupRun = ${JSON.stringify(subgroupRun)};
 const neg = ${JSON.stringify(neg)};
+const texelRun = ${JSON.stringify(texelRun)};
 const res = [];
 function layout(device, results, pushGroup) {
 	const groups = [];
@@ -689,6 +854,165 @@ try {
 				for (let i = 0; i < want.length && bad.length < 6; i++) if (g[i] !== want[i]) bad.push(k + "[" + i + "] " + g[i] + " != " + want[i]);
 			res.push({ name: "WebGPU run " + name + ": every output of the lowered subgroup builtins", ok: !err && !bad.length, detail: (err ? err.message + " " : "") + bad.join(", ") });
 		}
+	}
+	// Texel buffers: every element of every case's view format decoded, at
+	// its first byte, zeros past the count, and the sizes.
+	for (const name of ["texel.comp.spv", "texel.comp.opt.spv"]) {
+		const r = out[name];
+		if (!r) continue;
+		const U = GPUBufferUsage;
+		const l = device.createBindGroupLayout({ entries: r.bindings.map((b) => ({ binding: b.wgslBinding, visibility: GPUShaderStage.COMPUTE, buffer: { type: b.kind } })) });
+		const pl = await device.createComputePipelineAsync({ layout: device.createPipelineLayout({ bindGroupLayouts: [l] }), compute: { module: mods[name], entryPoint: r.entryPoint } });
+		const slot = { f: 0, i: 1, u: 2 };
+		const bad = [];
+		for (const c of texelRun) {
+			const data = device.createBuffer({ size: (c.bytes.length + 3) & ~3, usage: U.STORAGE | U.COPY_DST });
+			device.queue.writeBuffer(data, 0, new Uint8Array(c.bytes));
+			const mk = (p) => { const b = device.createBuffer({ size: 16, usage: U.UNIFORM | U.COPY_DST }); device.queue.writeBuffer(b, 0, new Uint32Array(p)); return b; };
+			const params = [0, 1, 2].map((s) => mk(s === slot[c.kind] ? [c.fmt, c.base, c.count, c.size] : [0, 0, 0, 4]));
+			const o = device.createBuffer({ size: 784, usage: U.STORAGE | U.COPY_SRC });
+			const rb = device.createBuffer({ size: 784, usage: U.MAP_READ | U.COPY_DST });
+			const bg = device.createBindGroup({ layout: l, entries: r.bindings.map((b) => ({ binding: b.wgslBinding, resource: { buffer: b.texel === "params" ? params[b.binding] : b.texel ? data : o } })) });
+			device.pushErrorScope("validation");
+			const enc = device.createCommandEncoder();
+			const pass = enc.beginComputePass();
+			pass.setPipeline(pl);
+			pass.setBindGroup(0, bg);
+			pass.dispatchWorkgroups(1);
+			pass.end();
+			enc.copyBufferToBuffer(o, 0, rb, 0, 784);
+			device.queue.submit([enc.finish()]);
+			const err = await device.popErrorScope();
+			await rb.mapAsync(GPUMapMode.READ);
+			const m = rb.getMappedRange();
+			const at = slot[c.kind] * 64;
+			const got = c.kind === "f" ? new Float32Array(m, at * 4, 64) : c.kind === "i" ? new Int32Array(m, at * 4, 64) : new Uint32Array(m, at * 4, 64);
+			const sizes = [...new Int32Array(m, 192 * 4, 3)];
+			if (err) bad.push(c.fmt + ": " + err.message);
+			for (let n = 0; n < 16; n++)
+				for (let k = 0; k < 4; k++) {
+					const w = c.want[n][k], g = got[n * 4 + k];
+					const ok = c.kind === "f" ? Math.abs(g - w) <= 1e-6 * Math.max(1, Math.abs(w)) : g === w;
+					if (!ok && bad.length < 8) bad.push("format " + c.fmt + " element " + n + "." + k + ": " + g + " != " + w);
+				}
+			if (sizes[slot[c.kind]] !== c.count && bad.length < 8) bad.push("format " + c.fmt + ": size " + sizes[slot[c.kind]] + " != " + c.count);
+			rb.unmap();
+		}
+		res.push({ name: "WebGPU run " + name + ": " + texelRun.length + " view formats decoded at a nonzero first byte, zeros past the count, sizes", ok: !bad.length, detail: bad.join(", ") });
+	}
+	// Every storage format: the elements of a case's view stored through a
+	// view of the same format (base 32, 16 elements): the bytes come back
+	// (snorm's -128 and -32768 as -127 and -32767), zeros past the count.
+	for (const name of ["texelrt.comp.spv", "texelrt.comp.opt.spv"]) {
+		const r = out[name];
+		if (!r) continue;
+		const U = GPUBufferUsage;
+		const l = device.createBindGroupLayout({ entries: r.bindings.map((b) => ({ binding: b.wgslBinding, visibility: GPUShaderStage.COMPUTE, buffer: { type: b.kind } })) });
+		const pl = await device.createComputePipelineAsync({ layout: device.createPipelineLayout({ bindGroupLayouts: [l] }), compute: { module: mods[name], entryPoint: r.entryPoint } });
+		const slot = { f: 0, i: 1, u: 2 };
+		const bad = [];
+		let n = 0;
+		for (const c of texelRun) {
+			if (c.fmt === 122) continue; // not a storage format
+			n++;
+			const mk = (bytes, usage) => { const b = device.createBuffer({ size: (bytes.length + 3) & ~3, usage }); device.queue.writeBuffer(b, 0, bytes); return b; };
+			const prm = (p) => mk(new Uint8Array(new Uint32Array(p).buffer), U.UNIFORM | U.COPY_DST);
+			const src = mk(new Uint8Array(c.bytes), U.STORAGE | U.COPY_DST);
+			const dstLen = 32 + 16 * c.size + 32;
+			const dst = mk(new Uint8Array(dstLen).fill(0xee), U.STORAGE | U.COPY_DST | U.COPY_SRC);
+			const none = () => mk(new Uint8Array(64), U.STORAGE | U.COPY_DST); // one per binding: writable ones must not alias
+			const s = slot[c.kind];
+			const resOf = (b) => (b.binding < 3 ? (b.texel === "params" ? prm(b.binding === s ? [c.fmt, c.base, c.count, c.size] : [0, 0, 0, 4]) : b.binding === s ? src : none()) : b.texel === "params" ? prm(b.binding - 3 === s ? [c.fmt, 32, 16, c.size] : [0, 0, 0, 4]) : b.binding - 3 === s ? dst : none());
+			const bg = device.createBindGroup({ layout: l, entries: r.bindings.map((b) => ({ binding: b.wgslBinding, resource: { buffer: resOf(b) } })) });
+			device.pushErrorScope("validation");
+			const enc = device.createCommandEncoder();
+			const pass = enc.beginComputePass();
+			pass.setPipeline(pl);
+			pass.setBindGroup(0, bg);
+			pass.dispatchWorkgroups(1);
+			pass.end();
+			const rb = device.createBuffer({ size: dst.size, usage: U.MAP_READ | U.COPY_DST });
+			enc.copyBufferToBuffer(dst, 0, rb, 0, dst.size);
+			device.queue.submit([enc.finish()]);
+			const err = await device.popErrorScope();
+			if (err) bad.push(c.fmt + ": " + err.message);
+			await rb.mapAsync(GPUMapMode.READ);
+			const got = new Uint8Array(rb.getMappedRange().slice(0, dstLen));
+			const want = new Uint8Array(dstLen).fill(0xee);
+			want.fill(0, 32, 32 + 16 * c.size);
+			want.set(c.bytes.slice(c.base, c.base + c.count * c.size), 32);
+			const sn8 = [10, 17, 38, 52].includes(c.fmt), sn16 = [71, 78, 92].includes(c.fmt);
+			for (let j = 32; j < 32 + c.count * c.size; j++) {
+				if (sn8 && want[j] === 0x80) want[j] = 0x81;
+				if (sn16 && (j - 32) % 2 === 1 && want[j] === 0x80 && want[j - 1] === 0) want[j - 1] = 1;
+			}
+			for (let j = 0; j < dstLen && bad.length < 8; j++) if (got[j] !== want[j]) bad.push("format " + c.fmt + " byte " + (j - 32) + ": " + got[j] + " != " + want[j]);
+			rb.unmap();
+		}
+		res.push({ name: "WebGPU run " + name + ": " + n + " storage formats encoded back to their bytes, zeros past the count, nothing outside the view", ok: !bad.length, detail: bad.join(", ") });
+	}
+	// Storage texel buffers: read, converted and written back in three
+	// formats; written without a format; atomics; a store past the end dropped.
+	for (const name of ["texelimg.comp.spv", "texelimg.comp.opt.spv"]) {
+		const r = out[name];
+		if (!r) continue;
+		const U = GPUBufferUsage;
+		const l = device.createBindGroupLayout({ entries: r.bindings.map((b) => ({ binding: b.wgslBinding, visibility: GPUShaderStage.COMPUTE, buffer: { type: b.kind } })) });
+		const pl = await device.createComputePipelineAsync({ layout: device.createPipelineLayout({ bindGroupLayouts: [l] }), compute: { module: mods[name], entryPoint: r.entryPoint } });
+		const bad = [];
+		// img in three formats; wo, no format in the SPIR-V, in RGBA8_UINT and narrow R8_UINT, R16_UINT (atomicAnd + atomicOr)
+		for (const [fmt, size, woFmt, woSize] of [[109, 16, 41, 4], [97, 8, 13, 1], [37, 4, 74, 2]]) {
+			const base = 32;
+			const src = new Float32Array(64).map((_, j) => (j % 7) / 8 - 0.25);
+			const imgBytes = new Uint8Array(base + 16 * size);
+			const dv = new DataView(imgBytes.buffer);
+			const f2h = (v) => { const f = new Float32Array([v]); const u = new Uint32Array(f.buffer)[0]; const s = (u >>> 16) & 0x8000, e = ((u >>> 23) & 255) - 127 + 15, m = (u >>> 13) & 1023; return v === 0 ? 0 : s | (e << 10) | m; };
+			for (let j = 0; j < 64; j++) {
+				if (fmt === 109) dv.setFloat32(base + j * 4, src[j], true);
+				else if (fmt === 97) dv.setUint16(base + j * 2, f2h(src[j]), true);
+				else dv.setUint8(base + j, Math.round(Math.min(1, Math.max(0, src[j])) * 255));
+			}
+			const mk = (bytes) => { const b = device.createBuffer({ size: (bytes.byteLength + 3) & ~3, usage: U.STORAGE | U.COPY_DST | U.COPY_SRC }); device.queue.writeBuffer(b, 0, bytes); return b; };
+			const prm = (p) => { const b = device.createBuffer({ size: 16, usage: U.UNIFORM | U.COPY_DST }); device.queue.writeBuffer(b, 0, new Uint32Array(p)); return b; };
+			const img = mk(imgBytes);
+			const wo = mk(new Uint8Array(16 + 128).fill(0xee));
+			const counter = mk(new Uint32Array(8));
+			const imax = mk(new Int32Array([-100, 0, 0, 0]));
+			const ro = mk(new Int8Array(64).map((_, j) => (j % 5) - 2));
+			const bufs = [[img, prm([fmt, base, 16, size])], [wo, prm([woFmt, 16, 16, woSize])], [counter, prm([98, 16, 4, 4])], [imax, prm([99, 0, 1, 4])], [ro, prm([42, 0, 16, 4])]];
+			const bg = device.createBindGroup({ layout: l, entries: r.bindings.map((b) => ({ binding: b.wgslBinding, resource: { buffer: bufs[b.binding][b.texel === "params" ? 1 : 0] } })) });
+			device.pushErrorScope("validation");
+			const enc = device.createCommandEncoder();
+			const pass = enc.beginComputePass();
+			pass.setPipeline(pl);
+			pass.setBindGroup(0, bg);
+			pass.dispatchWorkgroups(1);
+			pass.end();
+			const rbs = [img, wo, counter, imax].map((b) => { const rb = device.createBuffer({ size: b.size, usage: U.MAP_READ | U.COPY_DST }); enc.copyBufferToBuffer(b, 0, rb, 0, b.size); return rb; });
+			device.queue.submit([enc.finish()]);
+			const err = await device.popErrorScope();
+			if (err) bad.push(fmt + ": " + err.message);
+			for (const rb of rbs) await rb.mapAsync(GPUMapMode.READ);
+			const gi = new DataView(rbs[0].getMappedRange()), gw = new Uint8Array(rbs[1].getMappedRange()), gc = new Uint32Array(rbs[2].getMappedRange()), gm = new Int32Array(rbs[3].getMappedRange());
+			const h2f = (h) => { const e = (h >> 10) & 31, m = h & 1023; const v = e === 0 ? m * 2 ** -24 : (1 + m / 1024) * 2 ** (e - 15); return h & 0x8000 ? -v : v; };
+			for (let j = 0; j < 64 && bad.length < 8; j++) {
+				const inv = fmt === 109 ? src[j] : fmt === 97 ? h2f(f2h(src[j])) : Math.round(Math.min(1, Math.max(0, src[j])) * 255) / 255;
+				const want = fmt === 37 ? Math.round(Math.min(1, Math.max(0, inv * 2 + 1)) * 255) : inv * 2 + 1;
+				const g = fmt === 109 ? gi.getFloat32(base + j * 4, true) : fmt === 97 ? h2f(gi.getUint16(base + j * 2, true)) : gi.getUint8(base + j);
+				if (Math.abs(g - want) > (fmt === 97 ? 2e-3 : 1e-6)) bad.push("format " + fmt + " component " + j + ": " + g + " != " + want);
+			}
+			for (let n = 0; n < 16 && bad.length < 8; n++) {
+				const rov = [0, 1, 2, 3].map((c) => ((n * 4 + c) % 5) - 2);
+				const v = [n, 2 * n, 3 * n, 255 - n].map((x, c) => x + rov[c]);
+				// RGBA8_UINT: 4 bytes; R8_UINT: x's low byte; R16_UINT: x's low 16 bits
+				const want = woSize === 4 ? v.map((x) => x & 255) : woSize === 1 ? [v[0] & 255] : [v[0] & 255, (v[0] >> 8) & 255];
+				for (let c = 0; c < want.length; c++) if (gw[16 + n * woSize + c] !== want[c]) bad.push("wo " + woFmt + " " + n + "." + c + ": " + gw[16 + n * woSize + c] + " != " + want[c]);
+			}
+			if (!gw.slice(0, 16).every((x) => x === 0xee) || !gw.slice(16 + 16 * woSize).every((x) => x === 0xee)) bad.push("wo " + woFmt + ": bytes outside the view written");
+			if ([...gc].join() !== "0,0,0,0,4,4,4,4") bad.push("counter " + [...gc].join());
+			if (gm[0] !== 7) bad.push("imax " + gm[0]);
+		}
+		res.push({ name: "WebGPU run " + name + ": storage texel buffers in three formats, without a format (4-, 1- and 2-byte texels), atomics, a store past the end dropped", ok: !bad.length, detail: bad.join(", ") });
 	}
 	// Shapes flow.rs and virt.rs leave alone: WebGPU refuses them for uniformity.
 	for (const [name, r] of Object.entries(neg)) {

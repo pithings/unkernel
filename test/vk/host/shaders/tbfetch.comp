@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+#version 450
+// Uniform texel buffers of the three sampled types, fetched into a buffer
+// with their sizes (test/vk/host/client.js, texel buffers).
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) uniform samplerBuffer f;
+layout(set = 0, binding = 1) uniform isamplerBuffer i;
+layout(set = 0, binding = 2) uniform usamplerBuffer u;
+layout(set = 0, binding = 3) buffer O {
+	vec4 f[8];
+	ivec4 i[8];
+	uvec4 u[8];
+	ivec4 n;
+} o;
+void main() {
+	int k = int(gl_LocalInvocationIndex);
+	o.f[k] = texelFetch(f, k);
+	o.i[k] = texelFetch(i, k);
+	o.u[k] = texelFetch(u, k);
+	if (k == 0)
+		o.n = ivec4(textureSize(f), textureSize(i), textureSize(u), 0);
+}

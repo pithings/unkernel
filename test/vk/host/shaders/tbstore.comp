@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+#version 450
+// A storage texel buffer written from a uniform one (test/vk/host/client.js,
+// texel buffers).
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) uniform samplerBuffer src;
+layout(set = 0, binding = 1, rgba32f) uniform writeonly imageBuffer dst;
+void main() {
+	int k = int(gl_LocalInvocationIndex);
+	imageStore(dst, k, texelFetch(src, k) * 2.0 + 1.0);
+}

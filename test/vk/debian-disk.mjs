@@ -11,12 +11,16 @@
 // again, e.g. after a new Debian image: the upper layer belongs to the
 // image it was made on).
 //
-//   node test/vk/debian-disk.mjs [--apps] [--out FILE] [--kernel unkernel.wasm] [--distro debian.erofs]
+//   node test/vk/debian-disk.mjs [--apps | --games] [--out FILE] [--kernel unkernel.wasm] [--distro debian.erofs]
 //
 // --apps: a second stage on top of the first image (made first when it is
 // missing; copied, so it stays as it is): the real Vulkan programs of
 // unkernel-check.mjs --apps (APP_PACKAGES), in
-// $KW_BUILD/vk/debian-vk-apps.img.
+// $KW_BUILD/vk/debian-vk-apps.img. --games: a third on top of a copy of
+// that one: mpv (libplacebo's gpu-next on Vulkan), Mesa's GL tools and the
+// Vulkan games of GAME_PACKAGES that the archive has for the guest's
+// architecture (the others are named and skipped), in
+// $KW_BUILD/vk/debian-vk-games.img.
 //
 // Default out: $KW_BUILD/vk/debian-vk.img (vendor/build). The packages: the
 // loader (libvulkan1, without its recommended mesa-vulkan-drivers: our ICD
@@ -34,6 +38,11 @@ export const VK_PACKAGES = ["libvulkan1", "vulkan-tools", "libwayland-client0", 
 // programs (testvulkan), vkd3d's Direct3D 12 demos (on Vulkan, X11 only),
 // Xvfb for the X11 (xcb, xlib) surfaces.
 export const APP_PACKAGES = ["vkmark", "gtk-4-examples", "libsdl2-tests", "libsdl3-tests", "vkd3d-demos", "fonts-dejavu-core", "xvfb", "xauth", "x11-utils", "x11-apps"];
+// mpv (vo=gpu-next: libplacebo, which wants timelineSemaphore), glxinfo and
+// eglinfo (which driver Mesa picks with kwvk there), and games with Vulkan
+// renderers (issue #32: Taisei on SDL3's GPU API, the DDNet client;
+// vkQuake, from contrib, needs game data it does not carry).
+export const GAME_PACKAGES = ["mpv", "mesa-utils", "taisei", "ddnet", "vkquake"];
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "../..");
@@ -43,9 +52,11 @@ const opt = (name, dflt) => {
 	const i = args.indexOf(name);
 	return i >= 0 ? args[i + 1] : dflt;
 };
-const apps = args.includes("--apps");
+const games = args.includes("--games");
+const apps = args.includes("--apps") || games;
 const first = join(build, "vk/debian-vk.img");
-const out = resolve(opt("--out", apps ? join(build, "vk/debian-vk-apps.img") : first));
+const second = join(build, "vk/debian-vk-apps.img");
+const out = resolve(opt("--out", games ? join(build, "vk/debian-vk-games.img") : apps ? second : first));
 const kernel = opt("--kernel");
 const distro = resolve(opt("--distro", join(build, "distro/debian.erofs")));
 
@@ -63,9 +74,10 @@ rmSync(tmp, { force: true });
 const t0 = performance.now();
 const secs = () => ((performance.now() - t0) / 1000).toFixed(0);
 if (apps) {
-	if (!existsSync(first) && spawnSync(process.execPath, [fileURLToPath(import.meta.url), ...(kernel ? ["--kernel", kernel] : []), "--distro", distro], { stdio: "inherit" }).status !== 0) process.exit(1);
+	const base = games ? second : first;
+	if (!existsSync(base) && spawnSync(process.execPath, [fileURLToPath(import.meta.url), ...(games ? ["--apps"] : []), ...(kernel ? ["--kernel", kernel] : []), "--distro", distro], { stdio: "inherit" }).status !== 0) process.exit(1);
 	// sparse copy: the 4 GiB image has about 600 MiB in it
-	if (spawnSync("cp", ["--sparse=always", first, tmp]).status !== 0) copyFileSync(first, tmp, constants.COPYFILE_FICLONE);
+	if (spawnSync("cp", ["--sparse=always", base, tmp]).status !== 0) copyFileSync(base, tmp, constants.COPYFILE_FICLONE);
 } else await createImageFromKwsparse(tmp, readFileSync(join(build, "disk/kwdata.kwsparse.gz")));
 
 const vm = await createKernel({
@@ -76,7 +88,20 @@ const vm = await createKernel({
 	memoryMiB: 1024,
 });
 vm.onOutput((b) => process.stderr.write(b));
-const script = `set -e
+const script = games
+	? `set -e
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -q
+# the games the archive has (vkQuake is in contrib)
+pk=
+for p in ${GAME_PACKAGES.join(" ")}; do
+	if [ -n "$(apt-cache policy "$p" 2>/dev/null | sed -n 's/^ *Candidate: //p' | grep -v '(none)')" ]; then pk="$pk $p"; else echo "[vk-disk] not in the archive for $(dpkg --print-architecture): $p"; fi
+done
+echo "[vk-disk] installing:$pk"
+apt-get install -y -q --no-install-recommends $pk </dev/null
+apt-get clean
+for c in mpv glxinfo; do command -v $c >/dev/null || { echo "missing: $c"; exit 1; }; done`
+	: `set -e
 export DEBIAN_FRONTEND=noninteractive
 inst() { apt-get install -y -q --no-install-recommends ${(apps ? APP_PACKAGES : VK_PACKAGES).join(" ")} </dev/null; }
 inst || { apt-get update -q && inst; }

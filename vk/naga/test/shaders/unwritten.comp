@@ -1,0 +1,20 @@
+#version 450
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+// Storage buffers without `readonly`: read only (0: read-only), stored to
+// (1), an atomic (2), one binding through two views of which only the
+// vec4 one is written (3: both stay writable), declared readonly (4).
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer In { float v[]; } src;
+layout(std430, binding = 1) buffer Out { float v[]; } dst;
+layout(std430, binding = 2) buffer Count { uint n; } count;
+layout(std430, binding = 3) buffer AS { float s[]; } as;
+layout(std430, binding = 3) buffer AV { vec4 s[]; } av;
+layout(std430, binding = 4) readonly buffer RO { float v[]; } ro;
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= src.v.length()) return;
+	dst.v[i] = src.v[i] * ro.v[i] + as.s[i];
+	av.s[i / 4u] = vec4(1.0);
+	atomicAdd(count.n, 1u);
+}

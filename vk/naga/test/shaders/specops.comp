@@ -1,0 +1,26 @@
+#version 450
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+// OpSpecConstantOp beyond 32-bit integer arithmetic: a Select of floats
+// and of halves (vkQuake's world.frag and ssao_evaluate), a vector
+// operation on the workgroup size, signed arithmetic, and an array sized
+// by the result.
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x_id = 2, local_size_y = 2) in;
+layout(constant_id = 0) const uint quality = 1;
+layout(constant_id = 1) const bool scaled = false;
+const float scale = quality == 1u ? 2.0 : 1.0;
+const float16_t hscale = quality == 1u ? float16_t(2.0) : float16_t(1.0);
+const float lm = scaled ? 8.0 : 2.0;
+const uint steps = quality < 3u ? 2u : 3u;
+const uvec2 wg2 = gl_WorkGroupSize.xy * 2u + uvec2(1u, 0u);
+const int sq = int(quality) - 5;
+const uint N = quality * 4u + 1u;
+shared float tmp[N];
+layout(std430, binding = 0) buffer Out { float v[]; } dst;
+void main() {
+	uint i = gl_LocalInvocationIndex;
+	tmp[i % N] = float(i);
+	barrier();
+	dst.v[i] = tmp[(i + 1u) % N] * scale * float(hscale) * lm + float(steps) + float(wg2.x) + float(wg2.y) * 100.0 + float(sq) * 1000.0;
+}

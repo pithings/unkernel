@@ -66,6 +66,7 @@ processes requests strictly in order.
  "features":[ GPUFeatureName of the device ],
  "formats":{ "<VkFormat number>": caps, ... },
  "subgroupSize":S,
+ "texelBuffers":{"formats":{ "<VkFormat number>": bits, ... },"maxElements":N},   (Amendments, "Texel buffers")
  "external":{"token":T}}   (only where the host offers external present: Amendments, "External present")
 ```
 `subgroupSize`: the subgroup size the ICD reports, which the host
@@ -88,7 +89,9 @@ HOST_COHERENT (a malloc'd shadow); no DEVICE_LOCAL | HOST_VISIBLE type
 (linear-tiling images are unsupported); only buffers carry data.
 
 - `vkCreateBuffer {id,size,usage}`: the host makes a GPUBuffer (size
-  rounded up to 4, COPY_SRC | COPY_DST always added).
+  rounded up to 4, to 16 with UNIFORM_BUFFER usage; COPY_SRC | COPY_DST |
+  STORAGE always added); writes, reads and copies stay within the Vulkan
+  size.
 - `{"op":"writeBuffer","buffer":id,"offset":o}` + binary: guest to host.
   The ICD sends the bytes of host-visible memory that changed since it last
   sent them (it keeps a last-sent copy and diffs; unmapped and never-written
@@ -112,7 +115,7 @@ HOST_COHERENT (a malloc'd shadow); no DEVICE_LOCAL | HOST_VISIBLE type
 `vkCreateGraphicsPipelines` and `vkCreateComputePipelines` (one message
 per pipeline, `id` each; `stages[].specializationInfo` as
 `{"mapEntries":[{constantID,offset,size}],"data":[bytes]}`),
-`vkCreateBufferView` (unsupported: host logs).
+`vkCreateBufferView` (Amendments, "Texel buffers").
 
 Guest-only (no message): instance, physical device, device, queue,
 memory, fences, semaphores, events, command pools, descriptor pools,
@@ -189,7 +192,7 @@ export interface VkShaderResult {
   bindings: { set: number; binding: number; group: number; wgslBinding: number;
               kind: "uniform" | "storage" | "read-only-storage" | "sampler" | "comparison-sampler" | "texture" | "storage-texture";
               viewDimension?: string; sampleType?: string; multisampled?: boolean; format?: string; access?: string;
-              arrayIndex?: number }[];
+              arrayIndex?: number; texel?: "data" | "params" }[];  // texel: Amendments, "Texel buffers"
   pushConstantSize?: number;
   varyings?: { location: number; interpolation: string; sampling: string }[];  // vertex: outputs
   requires?: string[];  // WebGPU features the WGSL needs (Amendments)
@@ -265,8 +268,10 @@ sides can (Amendments, "External present").
   reflection (union over the pipeline's stages), not from the set layout
   alone; bindings a pipeline's shaders do not use need not be written.
   Push constants are at most 256 bytes.
-- Translator (2026-11-24): `bindings` lists only descriptor-set resources,
-  unused ones included; the push constant block is NOT in it: when
+- Translator (2026-11-24): `bindings` lists only the descriptor-set
+  resources the entry point reaches (through the functions it calls,
+  after branches on baked constants are dropped), in every stage, and the
+  WGSL declares only those; the push constant block is NOT in it: when
   `pushConstantSize` is set, the stage reads a uniform buffer at
   `@group(pushGroup) @binding(0)` of at least that many bytes (the block's
   WGSL size, which covers a later stage's `layout(offset = N)` range: such
@@ -303,7 +308,8 @@ sides can (Amendments, "External present").
   `rasterizerDiscardEnable` the viewport, multisample, depth/stencil and
   colour blend states are omitted. Layout bindings carry
   `immutableSamplers` (ids) only for sampler types; texel buffer
-  descriptors (unsupported) are written as `texelBufferView:[ids]`.
+  descriptors are written as `texelBufferView:[ids]` (Amendments, "Texel
+  buffers").
 - ICD: the physical device reports VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU
   and apiVersion 1.1 (round 2); maxBoundDescriptorSets is the host's maxBindGroups
   (a layout with that many sets and push constants fails in
@@ -389,7 +395,8 @@ sides can (Amendments, "External present").
   `vkCmdBindVertexBuffers2` with `sizes` (-1 = VK_WHOLE_SIZE) and `strides`
   only when given. Debugging: `KWVK_TRACE=FILE` writes every message's
   JSON, one per line.
-- ICD: two memory types, DEVICE_LOCAL and HOST_VISIBLE | HOST_COHERENT;
+- ICD: two memory types, DEVICE_LOCAL and HOST_VISIBLE | HOST_COHERENT |
+  HOST_CACHED;
   no DEVICE_LOCAL | HOST_VISIBLE ("BAR") type ("Device memory tracking"
   below).
 - Host (2026-11-24, round 3):
@@ -436,7 +443,7 @@ sides can (Amendments, "External present").
   - Input attachments (descriptor type 10) are bound as sampled textures
     (the translator's `textureLoad` at the fragment position): reading an
     attachment written in an earlier subpass works; one also written in the
-    same subpass is not (logged). Texel buffers stay unsupported.
+    same subpass is not (logged).
   - Untrusted input: frames over 256 MiB (`VK_MAX_FRAME`) or with jsonLen >
     total end the stream (the host calls the `close` callback of
     `connect(send, close)`); bad JSON, unknown ops/ids, out-of-range sizes
@@ -464,8 +471,8 @@ sides can (Amendments, "External present").
   `opts.storageFormats["set.binding"]` (a WebGPU format name) or else
   rgba8unorm (float), rgba32sint, rgba32uint; the reflection's `format`
   says which. The host does not pass storageFormats yet.
-- Translator: rejected with a plain message: texel buffers (Dim Buffer:
-  samplerBuffer/imageBuffer), runtime-sized descriptor arrays. The
+- Translator: rejected with a plain message: runtime-sized descriptor
+  arrays (texel buffers: Amendments, "Texel buffers"). The
   BaseVertex, BaseInstance and DrawIndex builtins (shader draw parameters)
   read as 0 (right for draws with firstVertex/vertexOffset/firstInstance 0
   and for non-indirect single draws; WGSL's vertex_index/instance_index
@@ -509,7 +516,7 @@ sides can (Amendments, "External present").
   read 0 in WGSL: the host logs once when a draw with non-zero
   firstVertex/vertexOffset/firstInstance uses a shader that reads them
   (gl_VertexIndex/gl_InstanceIndex are right: WebGPU's include the
-  bases). Texel buffers remain unsupported (they need translator work).
+  bases).
 - Translator: every result has `requires`, the WebGPU features its WGSL
   enables: "shader-f16" (float16_t, 16-bit float storage), "subgroups",
   "clip-distances", "dual-source-blending", "primitive-index", and
@@ -539,8 +546,7 @@ sides can (Amendments, "External present").
   constant expressions fold the same way.
 - Translator: compute shaders are compacted (naga's wrapper inlined so
   WGSL's uniformity rule accepts barriers after workgroup-uniform early
-  exits): their `bindings` list only the resources the entry point uses.
-  Graphics stages still list unused declared bindings.
+  exits).
 - Translator (2026-11-24): in a loop that may execute a barrier,
   `if (c) { ...; continue; } REST` becomes `if (c) { ...; continue; }
   else { REST }` and continues in tail position of the body (plain
@@ -571,11 +577,16 @@ sides can (Amendments, "External present").
   `shader-f16`; storageBuffer16BitAccess and storageBuffer8BitAccess true
   with VK_KHR_16bit_storage and VK_KHR_8bit_storage, as the translator
   emulates them as u32 words; the uniform/push-constant 8/16-bit variants,
-  shaderInt8/Int16, timeline semaphores, buffer device address and
-  descriptor indexing false; subgroups basic only, no stage, of the hello's
-  size: Amendments, "Subgroup size"); the 1.2 entry
-  points exist (timeline/BDA ones are inert, the draw-indirect-count ones
-  are dropped and logged). Two memory heaps: device-only memory's is
+  shaderInt8/Int16, buffer device address and descriptor indexing false;
+  timeline semaphores: Amendments, "Timeline semaphores"; subgroups basic
+  only, no stage, of the hello's size: Amendments, "Subgroup size"); the
+  1.2 entry points exist (BDA ones are inert, the draw-indirect-count ones
+  are dropped and logged). multiDrawIndirect is true, maxDrawIndirectCount
+  65535 (the host draws each record). maxVertexOutputComponents and
+  maxFragmentInputComponents are the hello's maxInterStageShaderVariables
+  times 4, plus 4 for an app whose VkApplicationInfo engine is `wgpu-hal`
+  (wgpu takes these components / 4 - 1 as its limit and asks for WebGPU's
+  16). Two memory heaps: device-only memory's is
   4 GiB (`KWVK_HEAP_MB` sets it, as `KWVK_DEVICE_NAME` sets the device name, which is "kwvk (WebGPU: ADAPTER)" otherwise, with "apple", "metal", "cuda", "rocm" and "hip" spelled apart ("a.p.p.l.e"), as Ollama takes a device so named for a Metal, CUDA or ROCm one (driverInfo has the adapter as it is); WebGPU tells no size, and that memory has
   no copy in the guest), host-visible memory's half of the guest's RAM
   (sysconf); maxMemoryAllocationSize min(maxBufferSize, maxStorageBufferBindingSize); a host-visible allocation over its heap fails (VK_ERROR_OUT_OF_DEVICE_MEMORY). writeBuffer frames
@@ -597,7 +608,8 @@ sides can (Amendments, "External present").
   (int8/uint8/int16/uint16, and float16 without shader-f16), or bound
   through differently typed views of one binding, become ONE
   `array<u32>` variable per binding (reflection: one entry for the
-  binding, "read-only-storage" when every view is NonWritable), addressed
+  binding, "read-only-storage" when every view is NonWritable or the module writes
+  none of them), addressed
   in bytes from the SPIR-V Offset/ArrayStride decorations: loads shift and
   mask (f16 via unpack2x16float); a writable such buffer is
   `array<atomic<u32>>` and every access atomic, sub-word stores being
@@ -625,11 +637,15 @@ sides can (Amendments, "External present").
 - Host (ICD agent, final round): a buffer binding the app left unwritten
   (Vulkan allows it when the shader does not access it; ggml-vulkan does)
   gets a zeroed 64 KiB placeholder buffer, one per WGSL binding number,
-  instead of failing the dispatch; logged once.
+  instead of failing the dispatch; logged once. Textures, storage
+  textures and samplers get placeholders too (logged once per
+  connection); a sampler binding with immutable samplers takes the
+  layout's sampler.
 - Host (2026-11-24, round 6): bindings a shader declares but never
-  references once its specialization constants are baked (naga leaves
-  `if false { ... }`; the host drops those branches) are left out of the
-  bind group layout and bind group, so a dead binding aliasing a live
+  references once its specialization constants are baked (the
+  translator drops branches on baked constants and leaves such bindings
+  out of `bindings`; the host still drops any `if false { ... }` left)
+  are left out of the bind group layout and bind group, so a dead binding aliasing a live
   writable one (ggml's matmul binds one range to bindings 2 and 3) no
   longer fails WebGPU's aliasing check. vkCmdCopyBuffer at any byte size
   and offset writes exactly [dstOffset, dstOffset+size): the aligned part
@@ -651,7 +667,7 @@ sides can (Amendments, "External present").
     returns VK_ERROR_INVALID_SHADER_NV, or the reply's `result`, and
     VK_NULL_HANDLE for that pipeline, and sends `destroy` for its id), or
     `{"r":N,"unusable":"why"}` (made but cannot run: resource kinds WebGPU
-    lacks, texel buffers and 1D-array storage images, which vkd3d declares
+    lacks, 1D-array storage images, which vkd3d declares
     in pipelines it makes at start-up: the ICD returns VK_SUCCESS and a
     command buffer that binds it makes vkQueueSubmit lose the device). Without
     `r` (older ICDs) the host marks a failed pipeline and binding it fails
@@ -685,14 +701,9 @@ sides can (Amendments, "External present").
     maxArrayLayers and maxMipLevels 1 (WebGPU has neither). A command buffer
     recording vkCmdDispatchBase with a non-zero base or
     vkCmdDraw(Indexed)IndirectCount is marked; vkQueueSubmit of it returns
-    VK_ERROR_DEVICE_LOST and loses the device. Timeline semaphores
-    (timelineSemaphore stays false, ggml-vulkan makes them anyway) keep
-    their values guest-side: a value a submit signals counts once the work
-    submitted so far is done (vkWaitSemaphores and
-    vkGetSemaphoreCounterValue wait for it with `sync`), vkSignalSemaphore
-    sets it. Wrong-result approximations that stay warn once on stderr:
-    linear-tiling images (treated as optimal), buffer views (texel
-    buffers), BaseVertex/BaseInstance read as 0 in a draw with non-zero
+    VK_ERROR_DEVICE_LOST and loses the device. Timeline semaphores:
+    Amendments, "Timeline semaphores". Wrong-result approximations that stay warn once on stderr:
+    linear-tiling images (treated as optimal), BaseVertex/BaseInstance read as 0 in a draw with non-zero
     bases, buffer device addresses (0). Errors and these warnings are
     printed whatever `KWVK_DEBUG` says, each distinct line once.
   - Host: vkCmdDispatchIndirect of a pipeline whose workgroup was split
@@ -782,7 +793,9 @@ sides can (Amendments, "External present").
     and is sent at the next flush; before, a whole-buffer readback
     replaced bytes the CPU wrote while the GPU worked elsewhere in the
     buffer.
-  - Memory types: 0 DEVICE_LOCAL, 1 HOST_VISIBLE | HOST_COHERENT, and no
+  - Memory types: 0 DEVICE_LOCAL, 1 HOST_VISIBLE | HOST_COHERENT |
+    HOST_CACHED (the shadow is the guest's RAM; DDNet maps only
+    HOST_CACHED memory), and no
     DEVICE_LOCAL | HOST_VISIBLE type, so that memory the GPU writes is not
     mapped by apps that prefer that type on an integrated GPU: ggml-vulkan
     (deviceType INTEGRATED_GPU: uma) asks for DEVICE_LOCAL | HOST_VISIBLE |
@@ -916,3 +929,131 @@ sides can (Amendments, "External present").
     connections, an older ICD's included, get the flipped one as before.
     The other orientation is a variant made at the first draw that uses
     it (checked with its submit), so a wrong hint costs only time.
+- Translator (2026-11-28): a storage buffer variable (StorageBuffer, or
+  Uniform with BufferBlock) the module never writes gets NonWritable
+  before naga (a pointer into it reaching anything but OpLoad,
+  OpAtomicLoad, OpArrayLength, an access chain or OpCopyObject counts as
+  a write, as does a write through any other variable at its binding;
+  modules with VariablePointers are left alone), so it is
+  "read-only-storage" in `bindings`. Compute: promoted to read_write by
+  the host with `ro`, as declared read-only buffers are (overlapping
+  another binding of its buffer: read from the scratch copy), and kept
+  read-only by "Read-only buffers kept". OpLine/OpNoLine are dropped;
+  OpSpecConstantOp is folded for every Shader-capability operation on
+  integers and booleans (scalar and vector) and for Select, FConvert,
+  QuantizeToF16 and the composite operations on any type; isinf/isnan on
+  f32 become bit tests; an `int[1]` SampleMask input or output becomes a
+  u32.
+- Host (2026-11-28): a uniform binding is sized in 16-byte steps within
+  its buffer (WebGPU sizes it by the WGSL struct; GZDoom binds 252
+  bytes). Buffer-image copies of block-compressed images are made in
+  whole blocks (Vulkan lets them end mid-block at a level's edge).
+  vkCmdCopyImage between size-compatible formats WebGPU cannot copy
+  directly (BC1 and R32G32_UINT) goes through a scratch buffer, the
+  extent counting the same blocks on both sides. Indirect draws draw the
+  whole records of `drawCount`, `stride` bytes apart. Indexed triangle
+  fans are rewritten as lists before their render pass, primitive
+  restart included. A storage or uniform binding at an offset WebGPU
+  refuses (not a multiple of the device's alignment) is a scratch copy
+  in a dispatch, copied back when writable, and a named device loss in a
+  draw.
+- Timeline semaphores (2026-11-28, ICD): timelineSemaphore is true
+  (VkPhysicalDeviceVulkan12Features, VkPhysicalDeviceTimelineSemaphoreFeatures,
+  VK_KHR_timeline_semaphore 2); maxTimelineSemaphoreValueDifference is
+  UINT64_MAX. Values live in the guest:
+  - A value that a submit writing no host-visible memory signals is
+    reached at the submit (the rule of "Fences at submit"). One that a
+    submit which may write host-visible memory signals is reached at the
+    reply to a `{"op":"sync","r":N}` the ICD sends right after that
+    submit, or earlier at a fence wait or wait-idle covering the submit,
+    or once a later submit's values are reached (queue order).
+  - vkGetSemaphoreCounterValue and vkWaitSemaphores make no request of
+    their own: they take the replies that have come (an `err` loses the
+    device), read back what submitted work wrote to mapped memory as a
+    fence wait does, and return VK_ERROR_DEVICE_LOST after a loss.
+  - Wait before signal: a batch that waits for a value above what sent
+    work, vkSignalSemaphore or an earlier batch of the same vkQueueSubmit
+    gives is held in the ICD, with every batch after it (earlier batches
+    of the call are sent); its fence stays unsignaled. vkSignalSemaphore,
+    or the sending of an earlier held batch whose signal gives the value,
+    releases them in order. vkQueueWaitIdle, vkDeviceWaitIdle and
+    vkQueuePresentKHR wait for the release first. A lost device drops the
+    held batches and signals their fences; destroying a semaphore or
+    fence removes it from them; vkDestroyDevice drops them.
+- Imageless framebuffers (2026-11-28, ICD): an imageless VkFramebuffer
+  (VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT) is not sent at creation. Each set
+  of VkRenderPassAttachmentBeginInfo views it begins with gets a
+  `vkCreateFramebuffer` of its own id, sent when a command buffer first
+  records that set; vkCmdBeginRenderPass names that id, and the ids are
+  destroyed with the VkFramebuffer. imagelessFramebuffer,
+  separateDepthStencilLayouts (the host keeps no image layouts),
+  shaderSubgroupExtendedTypes and subgroupBroadcastDynamicId (no stage
+  has subgroup operations) are true, with their extensions, and
+  VK_KHR_image_format_list and VK_KHR_swapchain_mutable_format (the host
+  gives every single-sampled image, swapchain images included, its sRGB
+  twin as a view format).
+- Texel buffers (2026-11-28, ICD, host, translator; amends "Loud
+  failures", where pipelines declaring them were made unusable, and the
+  ICD's buffer view warning). Uniform and storage texel buffers
+  (samplerBuffer, textureBuffer, imageBuffer: OpTypeImage Dim Buffer)
+  become storage buffers of words that the shader decodes by the view's
+  format, given in a uniform of its own:
+  - Hello: the reply carries `"texelBuffers":{"formats":{"<VkFormat>":bits},
+    "maxElements":N}`, bits 1 uniform texel buffer, 2 storage texel
+    buffer, 4 storage texel buffer atomics. Formats: R8, R8G8, R16, R16G16
+    (UNORM, SNORM, UINT, SINT; R16 and R16G16 also SFLOAT), R8G8B8A8 and
+    A8B8G8R8_PACK32 (UNORM, SNORM, UINT, SINT), B8G8R8A8_UNORM,
+    A2B10G10R10_UNORM/UINT_PACK32, R16G16B16A16 (UNORM, SNORM, UINT, SINT,
+    SFLOAT), R32, R32G32, R32G32B32, R32G32B32A32 (UINT, SINT, SFLOAT), all
+    3; B10G11R11_UFLOAT_PACK32 1 (not stored); R32_UINT and R32_SINT 7.
+    `maxElements`: (maxStorageBufferBindingSize - 256) / 16. The ICD
+    reports bufferFeatures UNIFORM_TEXEL_BUFFER, STORAGE_TEXEL_BUFFER and
+    STORAGE_TEXEL_BUFFER_ATOMIC from the bits, maxTexelBufferElements =
+    N and minTexelBufferOffsetAlignment 16; without the field (an older
+    host) none, 65536 and 256.
+  - `vkCreateBufferView {id, buffer, format, offset, range}` (range -1 =
+    VK_WHOLE_SIZE): the ICD refuses a format whose bits lack a texel usage
+    of the buffer (VK_ERROR_FORMAT_NOT_SUPPORTED, a stderr line). The host
+    binds the view as a storage buffer from `offset` rounded down to
+    minStorageBufferOffsetAlignment to its last element (rounded up to 4
+    bytes), so any 16-byte offset works without a copy, and makes its 16-byte
+    uniform: [VkFormat, offset minus that bound offset, element count
+    (range / texel size, rounded down), texel size]. A format it does not
+    list fails the creation (a tombstone: a later use loses the device).
+  - Descriptors of types 4 and 5: writes carry `texelBufferView:[ids]`
+    (0: as if unwritten), copies and templates as for other descriptors
+    (consecutive binding updates included). A write of a view whose format
+    lacks the type's bit (B10G11R11 as a storage texel buffer) fails:
+    vkUpdateDescriptorSets has no reply, so the device is lost, named.
+  - Translator (vk/naga/src/texel.rs): a texel buffer at set S binding B
+    is `@group(S) @binding(2B)` `{ w: array<u32> }`, "read-only-storage"
+    unless the module writes it (OpImageWrite, an image atomic), and
+    `@binding(2B + 1)` a uniform `{ p: vec4<u32> }` of the parameters;
+    both are reflected with `binding` B and `texel: "data"` or `texel:
+    "params"`, and only when reached (a module that only asks the size
+    has the parameters alone). texelFetch and imageLoad decode the element
+    by the parameters' format (a switch; the format in the SPIR-V is not
+    used), imageStore encodes it, textureSize and imageSize are the count;
+    elements past the count read 0 and are not stored. Image atomics
+    (OpImageTexelPointer, 32-bit integer texels) are atomics on the
+    element's word, and a binding the module writes whose SPIR-V format is
+    8- or 16-bit or Unknown is `array<atomic<u32>>`, its texels under 4
+    bytes stored with atomicAnd + atomicOr on their word. Refused, with
+    the reason: descriptor arrays of texel buffers, texel buffers passed
+    to functions or through OpPhi/OpSelect, operations other than fetch,
+    read, write, size and atomics, sampled types other than 32-bit float
+    and integers, atomics on other than 32-bit integers, and a texel
+    buffer a vertex stage writes (WebGPU has no writable storage there).
+  - Host: the "data" entry binds the view's buffer at the bound offset and
+    size, as a storage buffer (a compute stage's read-only one promoted to
+    read_write and copied aside where it aliases a writable binding, as
+    other storage buffers); the "params" entry binds the view's uniform.
+    Each texel buffer takes one of its stages' maxStorageBuffersPerShaderStage
+    and one of their maxUniformBuffersPerShaderStage: a pipeline past
+    either is refused, naming the counts. Pipelines are made "unusable"
+    only for 1D-array storage images now.
+  - Device memory tracking: a texel buffer descriptor counts as its view's
+    range of its buffer (VK_WHOLE_SIZE: to the buffer's end): read by a
+    draw or dispatch for the submit flush, and, for a storage texel buffer
+    the bound pipeline may write (the ICD's scan: an imageBuffer variable
+    not decorated NonWritable), GPU-written there for readback.
