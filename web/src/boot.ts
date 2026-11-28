@@ -615,12 +615,20 @@ export function start(): void {
 			watchUser(t);
 			if (cfg.verbose) { setLive(null); screenTail.push(t); write(t); return; }
 			// Boot phase: drawn once, below the summary (markRunning). The router marks
-			// user space on a whole line or a prompt; anything else shows after 300 ms.
+			// user space on a whole line or a prompt; anything else shows after a fallback timeout.
 			show(t);
-			if (phase === "boot") replayTimer ??= setTimeout(() => markRunning("first output"), 300);
+			if (phase === "boot") replayTimer ??= setTimeout(() => markRunning("first output timeout"), 2000);
 		},
 		onUserspace(why) {
-			if (why.startsWith("first output: ")) ui.log(why.slice(14));
+			if (why.startsWith("first output: ")) {
+				ui.log(why.slice(14));
+				// First output arrived (e.g. welcome banner). Wait for prompt, with a fallback timeout.
+				replayTimer ??= setTimeout(() => markRunning("first output timeout"), 2000);
+			} else {
+				markRunning(why);
+			}
+		},
+		onPrompt(why) {
 			markRunning(why);
 		},
 	});

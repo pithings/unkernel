@@ -21,6 +21,8 @@ const KMAYBE = /^\[ *(\d+(\.\d*)?)?$/; // could still become a stamp
 export const IMPORTANT: RegExp = /Kernel panic|Oops|BUG:|WARNING:|Out of memory|Killed process|segfault|unhandled signal|soft lockup|blocked for more than/;
 /** ANSI escape sequences (CSI, charset selection, keypad modes, save/restore). */
 export const ANSI: RegExp = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][0-9A-Za-z]|\x1b[=>78]/g;
+/** Common shell prompt endings (POSIX $, root #, zsh %, fish/custom >, unkernel Debian ⇒, starship/pure ❯). */
+export const PROMPT_RE: RegExp = /[#$%>⇒❯] ?$/;
 
 export interface KernelLineInfo {
 	/** The time stamp, seconds since boot. */
@@ -41,6 +43,10 @@ export interface ConsoleRouterOptions {
 	 * `why` is "first output: <line>" or "shell prompt".
 	 */
 	onUserspace?: (why: string) => void;
+	/**
+	 * Once: user space printed an interactive shell prompt.
+	 */
+	onPrompt?: (why: string) => void;
 	/** How long an undecidable line start is held back, default 250 ms. */
 	holdMs?: number;
 }
@@ -48,6 +54,8 @@ export interface ConsoleRouterOptions {
 export class ConsoleRouter {
 	/** Whether user space has started printing (onUserspace fired). */
 	userspace = false;
+	/** Whether an interactive shell prompt was detected (onPrompt fired). */
+	promptSeen = false;
 	#opts: ConsoleRouterOptions;
 	#dec = new TextDecoder();
 	#gate: "start" | "kern" | "user" = "start";
@@ -91,19 +99,29 @@ export class ConsoleRouter {
 		this.#opts.onUserspace?.(why);
 	}
 
+	#markPrompt(why: string): void {
+		if (this.promptSeen) return;
+		this.promptSeen = true;
+		this.#opts.onPrompt?.(why);
+	}
+
 	#userOutput(text: string): void {
 		this.#opts.onUserOutput?.(text);
-		if (this.userspace) return;
 		this.#userTail += text;
-		let i;
-		while (!this.userspace && (i = this.#userTail.indexOf("\n")) >= 0) {
-			const line = this.#userTail.slice(0, i).replace(ANSI, "").replace(/\r/g, "");
-			this.#userTail = this.#userTail.slice(i + 1);
-			if (line.trim()) this.#markUserspace(`first output: ${line.trim().slice(0, 60)}`);
+		if (!this.userspace) {
+			let i;
+			while (!this.userspace && (i = this.#userTail.indexOf("\n")) >= 0) {
+				const line = this.#userTail.slice(0, i).replace(ANSI, "").replace(/\r/g, "");
+				this.#userTail = this.#userTail.slice(i + 1);
+				if (line.trim()) this.#markUserspace(`first output: ${line.trim().slice(0, 60)}`);
+			}
 		}
-		if (this.userspace) { this.#userTail = ""; return; }
 		if (this.#userTail.length > 8192) this.#userTail = this.#userTail.slice(-1024);
-		if (/[#$%>] ?$/.test(this.#userTail.replace(ANSI, ""))) this.#markUserspace("shell prompt");
+		const clean = this.#userTail.replace(ANSI, "");
+		if (PROMPT_RE.test(clean)) {
+			if (!this.userspace) this.#markUserspace("shell prompt");
+			this.#markPrompt("shell prompt");
+		}
 	}
 
 	#kernelLine(raw: string): void {
