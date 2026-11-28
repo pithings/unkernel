@@ -96,8 +96,8 @@ export function AppShell({ app, label, sections, render, footer }: {
 							<button key={s.id} id={`tab-${s.id}`} type="button" role="tab" data-tab={s.id} aria-selected={on} aria-controls={`pane-${s.id}`}
 								tabIndex={on ? 0 : -1} onClick={() => selectSection(s.id)}
 								className={wide
-									? "flex h-8 flex-none items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] text-muted transition-colors hover:bg-hover hover:text-fg aria-selected:bg-white/10 aria-selected:text-fg pointer-coarse:h-11"
-									: "flex h-8 flex-none items-center gap-2 rounded-full border border-line px-3 text-[13px] text-muted transition-colors hover:text-fg aria-selected:border-fg aria-selected:bg-fg aria-selected:text-black pointer-coarse:h-10"}>
+									? "flex h-8 flex-none items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] text-muted transition-colors hover:bg-hover hover:text-fg aria-selected:bg-ink/10 aria-selected:text-fg pointer-coarse:h-11"
+									: "flex h-8 flex-none items-center gap-2 rounded-full border border-line px-3 text-[13px] text-muted transition-colors hover:text-fg aria-selected:border-fg aria-selected:bg-fg aria-selected:text-bg pointer-coarse:h-10"}>
 								<span className="flex flex-none opacity-80">{s.icon}</span>
 								<span className="min-w-0 flex-1 truncate">{s.name}</span>
 								{s.changed && <><span aria-hidden="true" className="size-1.5 flex-none rounded-full bg-warn" /><span className="sr-only">, changed</span></>}

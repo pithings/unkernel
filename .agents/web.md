@@ -8,7 +8,7 @@ terminals ([wterm](https://wterm.dev/); more sessions over vsock) are
 tabs of Terminal windows; the guest's display, the guest preview
 (Browser), Settings and System, an app's installer and the guest's
 Wayland apps are windows too. Built with React and Tailwind (v4, a dark
-theme after Vercel's Geist), Vite (client) and Nitro (server and route
+and a light theme after Vercel's Geist), Vite (client) and Nitro (server and route
 rules), on the SDK from source. The top-level README.md describes it for
 users.
 
@@ -605,7 +605,7 @@ deploying the page needs no kernel toolchain.
   (`winmenu.tsx` `windowItems()`, the same items as the top bar's app
   menu). The tiles scroll sideways when they do not fit.
 - Top bar (`TopBar.tsx`, `#topbar`): no background over the wallpaper,
-  nearly black while a maximized window is shown (`data-dark`) and in
+  nearly opaque while a maximized window is shown (`data-dark`) and in
   compact mode. The current app, one control (its icon, as
   on its Dock tile, the focused window's `meta` title, then its own title
   in a quieter tone; unkernel's mark and "Desktop" with none), a menu of

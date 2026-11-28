@@ -26,16 +26,18 @@ import {
 import { useAppVisible } from "../sysapps.ts";
 import { H3, useSection } from "./AppShell.tsx";
 import { PinIcon, ShuffleIcon } from "./icons.tsx";
+import { Theme } from "./Options.tsx";
 
 /** The default wallpaper in a thumbnail: style.css's #app gradient and #desktop mark. */
 const DEFAULT_THUMB = {
 	background: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' fill='none' stroke='%23fff' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='.5' y='.5' width='31' height='31' rx='7.5' stroke-opacity='.12'/%3E%3Cpath d='M9 11l5.5 5L9 21M16.5 21.5H23' stroke-width='2.4' stroke-opacity='.18'/%3E%3C/svg%3E\") center / 22px no-repeat, radial-gradient(130% 90% at 50% -10%, #171717 0%, #070707 55%, #000 100%)",
 };
-const Spinner = () => <span className="size-4 animate-spin rounded-full border-2 border-white/25 border-t-white" />;
+const Spinner = () => <span className="size-4 animate-spin rounded-full border-2 border-ink/25 border-t-ink" />;
 
 export function DesktopSettings() {
 	return (
 		<>
+			<Theme />
 			<H3>Wallpaper</H3>
 			<Builtins />
 			<H3>Photos</H3>
@@ -55,9 +57,9 @@ function Tile({ label, w, children }: { label: string; w: Wallpaper; children: R
 	const busy = useDesktop((s) => s.pending === key);
 	return (
 		<button type="button" aria-pressed={on} aria-label={label} title={label} onClick={() => void setWallpaper(w)}
-			className="relative aspect-[16/10] overflow-hidden rounded-md border border-line bg-surface transition-[border-color,box-shadow] outline-none hover:border-[#555] focus-visible:ring-2 focus-visible:ring-accent aria-pressed:border-fg aria-pressed:ring-2 aria-pressed:ring-fg/70">
+			className="relative aspect-[16/10] overflow-hidden rounded-md border border-line bg-surface transition-[border-color,box-shadow] outline-none hover:border-(--line-hover) focus-visible:ring-2 focus-visible:ring-accent aria-pressed:border-fg aria-pressed:ring-2 aria-pressed:ring-fg/70">
 			{children}
-			{busy && <span className="absolute inset-0 grid place-items-center bg-black/45"><Spinner /></span>}
+			{busy && <span className="absolute inset-0 grid place-items-center bg-bg/45"><Spinner /></span>}
 		</button>
 	);
 }
@@ -123,7 +125,7 @@ function Photos() {
 				<div className={GRID}>
 					{photos.map((p) => <Tile key={p.id} label={`Photo by ${p.author}`} w={{ kind: "photo", photo: p }}><Thumb photo={p} /></Tile>)}
 					<button type="button" title="More photos" aria-label="More photos" disabled={moreBusy} onClick={() => void morePhotos()}
-						className="grid aspect-[16/10] place-items-center rounded-md border border-dashed border-line-strong text-muted transition-colors outline-none hover:border-[#555] hover:text-fg focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-progress">
+						className="grid aspect-[16/10] place-items-center rounded-md border border-dashed border-line-strong text-muted transition-colors outline-none hover:border-(--line-hover) hover:text-fg focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-progress">
 						{moreBusy ? <Spinner /> : <ShuffleIcon />}
 					</button>
 				</div>

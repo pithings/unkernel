@@ -57,7 +57,7 @@ const press = (e: ReactPointerEvent<HTMLElement>) => ({ pointerId: e.pointerId, 
 function TitleButton({ label, onClick, danger, children }: { label: string; onClick: () => void; danger?: boolean; children: ReactNode }) {
 	return (
 		<button type="button" title={label} aria-label={label} onClick={onClick}
-			className={`wm-btn grid h-full place-items-center rounded-md text-faint transition-colors hover:text-fg ${danger ? "hover:bg-err/20 hover:text-err" : "hover:bg-white/8"}`}
+			className={`wm-btn grid h-full place-items-center rounded-md text-faint transition-colors hover:text-fg ${danger ? "hover:bg-err/20 hover:text-err" : "hover:bg-ink/8"}`}
 		>{children}</button>
 	);
 }

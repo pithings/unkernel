@@ -80,14 +80,14 @@ function StackTile({ app, idx, sel, why, running, onPick, onMenu, onFocus }: {
 			onClick={() => { if (!long.consumed()) onPick(); }} onFocus={onFocus}
 			onContextMenu={(e: MouseEvent<HTMLButtonElement>) => { e.preventDefault(); long.context(); onMenu(new DOMRect(e.clientX, e.clientY, 0, 0), e.currentTarget); }}
 			{...long.handlers}
-			className={`group flex min-w-0 flex-col items-center gap-1 rounded-xl px-1 pt-2 pb-1 outline-none transition-colors hover:bg-white/10 focus-visible:bg-white/12 [-webkit-touch-callout:none] ${why ? "opacity-45" : ""}`}>
+			className={`group flex min-w-0 flex-col items-center gap-1 rounded-xl px-1 pt-2 pb-1 outline-none transition-colors hover:bg-ink/10 focus-visible:bg-ink/12 [-webkit-touch-callout:none] ${why ? "opacity-45" : ""}`}>
 			<span aria-hidden="true" style={face}
 				className={`relative grid size-12 place-items-center rounded-[22%] text-[24px] leading-none text-white shadow-[0_2px_6px_rgba(0,0,0,.45)] transition-transform group-active:scale-95 ${why ? "grayscale" : ""}`}>
 				<AppGlyph icon={app.icon ?? app.title[0]!.toUpperCase()} className="size-[58%]" />
 				<TileProgress inst={inst} className="right-[16%] bottom-[12%] left-[16%]" />
 			</span>
-			<span className="max-w-full truncate font-sans text-[11.5px] leading-tight text-fg/85 [text-shadow:0_1px_2px_rgb(0_0_0/50%)] group-hover:text-fg">{app.title}</span>
-			<span aria-hidden="true" className={`size-1 flex-none rounded-full ${running ? "bg-white/80" : "bg-transparent"}`} />
+			<span className="max-w-full truncate font-sans text-[11.5px] leading-tight text-fg/85 [text-shadow:0_1px_2px_color-mix(in_srgb,var(--color-bg)_50%,transparent)] group-hover:text-fg">{app.title}</span>
+			<span aria-hidden="true" className={`size-1 flex-none rounded-full ${running ? "bg-ink/80" : "bg-transparent"}`} />
 		</button>
 	);
 }
@@ -244,7 +244,7 @@ export function DockStack({ group, tile, top, kb, quick, inside, onClose }: {
 					className="dock-stack fixed z-(--z-menu) flex flex-col select-none"
 					style={{ ...notch, left: pos?.left ?? -9999, width: pos?.width, bottom: innerHeight - top + GAP + NOTCH }}>
 					<div className="dock-stack-panel flex flex-col overflow-y-auto overscroll-contain p-2 pt-1.5" style={{ maxHeight: Math.max(120, top - GAP - NOTCH - EDGE) }}>
-						<div aria-hidden="true" className="truncate px-2 pt-0.5 pb-1 text-center font-sans text-[12.5px] font-semibold text-fg/90 [text-shadow:0_1px_2px_rgb(0_0_0/50%)]">{group.title}</div>
+						<div aria-hidden="true" className="truncate px-2 pt-0.5 pb-1 text-center font-sans text-[12.5px] font-semibold text-fg/90 [text-shadow:0_1px_2px_color-mix(in_srgb,var(--color-bg)_50%,transparent)]">{group.title}</div>
 						<div className="grid gap-0.5" style={grid}>
 							{apps.map((a, i) => (
 								<StackTile key={a.id} app={a} idx={i} sel={i === sel} why={whyOf(a)} running={runningOf(a)}

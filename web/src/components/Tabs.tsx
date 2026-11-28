@@ -70,7 +70,7 @@ export function Tabs<K extends number | string>({ items, active, label, onSelect
 				const on = t.key === active;
 				return (
 					<div key={t.key} data-active={on || undefined} data-state={t.state}
-						className="group flex max-w-44 min-w-0 flex-none items-center rounded-md text-faint transition-colors hover:bg-white/5 hover:text-muted data-active:bg-white/10 data-active:text-fg data-[state=busy]:opacity-60 data-[state=error]:text-err!"
+						className="group flex max-w-44 min-w-0 flex-none items-center rounded-md text-faint transition-colors hover:bg-ink/5 hover:text-muted data-active:bg-ink/10 data-active:text-fg data-[state=busy]:opacity-60 data-[state=error]:text-err!"
 					>
 						<button id={t.id} type="button" role="tab" aria-selected={on} title={t.title ?? t.label} onClick={() => onSelect(t.key)}
 							className={`relative flex h-full min-w-0 items-center gap-1.5 truncate font-mono text-[12px] pointer-coarse:min-w-11 pointer-coarse:text-[13px] ${t.closable ? "pr-0.5 pl-2.5" : "px-2.5"}`}
@@ -80,7 +80,7 @@ export function Tabs<K extends number | string>({ items, active, label, onSelect
 						</button>
 						{t.closable && onClose && (
 							<button type="button" aria-label={`Close ${t.label}`} title={`Close ${t.label}`} onClick={() => onClose(t.key)}
-								className="mr-0.5 grid h-5 w-5 flex-none place-items-center rounded opacity-0 transition-opacity group-hover:opacity-100 group-data-active:opacity-100 hover:bg-white/10 hover:text-fg pointer-coarse:h-8 pointer-coarse:w-8 pointer-coarse:opacity-100"
+								className="mr-0.5 grid h-5 w-5 flex-none place-items-center rounded opacity-0 transition-opacity group-hover:opacity-100 group-data-active:opacity-100 hover:bg-ink/10 hover:text-fg pointer-coarse:h-8 pointer-coarse:w-8 pointer-coarse:opacity-100"
 							><CloseIcon size={11} /></button>
 						)}
 					</div>
@@ -91,7 +91,7 @@ export function Tabs<K extends number | string>({ items, active, label, onSelect
 					{...long.handlers}
 					onContextMenu={(e) => { if (!onNewAlt) return; e.preventDefault(); if (!long.context()) onNewAlt(); }}
 					onClick={(e) => { if (long.consumed()) return; if (e.shiftKey && onNewAlt) onNewAlt(); else onNew(); }}
-					className="grid w-7 flex-none place-items-center rounded-md text-faint transition-colors [-webkit-touch-callout:none] hover:bg-white/8 hover:text-fg pointer-coarse:w-10"
+					className="grid w-7 flex-none place-items-center rounded-md text-faint transition-colors [-webkit-touch-callout:none] hover:bg-ink/8 hover:text-fg pointer-coarse:w-10"
 				><PlusIcon size={14} /></button>
 			)}
 		</div>

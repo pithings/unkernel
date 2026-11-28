@@ -62,6 +62,8 @@ function reloadToResume(auto: boolean): void {
 const SUSPEND_TOAST_MS = 20000;
 
 const padLayout = (v: string | null): PadLayout => (v === "keys" ? v : "gamepad");
+const themePref = (v: string | null): UiState["theme"] => (v === "dark" || v === "light" ? v : "auto");
+const termGlassPref = (v: string | null): UiState["termGlass"] => (v === "off" ? v : "on");
 
 interface BrowserInfo { name: string; v: number; ios?: boolean }
 
@@ -165,7 +167,7 @@ export function createUi(cfg: Config) {
 			: null,
 		distro: cfg.distro ? { name: cfg.distro.name, image: cfg.distro.imageId ?? "", url: cfg.distro.url } : null,
 		ctrl: false, keysOn: false, pasteOpen: false, ask: null, paused: false, prefix: false,
-		fontPref, fontSize: cfg.fontSize, copyText: null,
+		fontPref, fontSize: cfg.fontSize, theme: themePref(store("theme")), shownTheme: "dark", termTheme: themePref(store("termtheme")), termGlass: termGlassPref(store("termglass")), copyText: null,
 		display: { attached: false, width: 0, height: 0, keyboard: false, mouse: false, tablet: false,
 			rotate: store("fbRotate") === "1", layout: padLayout(store("padLayout")),
 			touchMode: store("touchMode") === "trackpad" ? "trackpad" : "mouse",
@@ -174,6 +176,24 @@ export function createUi(cfg: Config) {
 		launcher: false,
 		options,
 	} satisfies UiState);
+
+	const lightScheme = matchMedia("(prefers-color-scheme: light)");
+	const showTermTheme = () => {
+		const pref = $.get().termTheme;
+		document.documentElement.dataset.termTheme = pref === "auto" ? document.documentElement.dataset.theme : pref;
+	};
+	const showTheme = () => {
+		const pref = $.get().theme;
+		const theme = pref === "auto" ? (lightScheme.matches ? "light" : "dark") : pref;
+		document.documentElement.dataset.theme = theme;
+		$.set({ shownTheme: theme });
+		document.querySelector('meta[name="theme-color"]')?.setAttribute("content", theme === "light" ? "#ffffff" : "#000000");
+		document.querySelector('meta[name="color-scheme"]')?.setAttribute("content", theme);
+		showTermTheme();
+	};
+	lightScheme.addEventListener("change", showTheme);
+	showTheme();
+	document.documentElement.dataset.termGlass = $.get().termGlass;
 
 	// ---- the tab's title ---------------------------------------------------
 	// One character before the title says how the machine is (titleMark()),
@@ -518,6 +538,24 @@ export function createUi(cfg: Config) {
 			cfg.fontSize = size;
 			$.set({ fontPref: pref, fontSize: size });
 			KW.term?.setFontSize(size);
+		},
+		setTheme(pref: string) {
+			const theme = themePref(pref);
+			store("theme", theme);
+			$.set({ theme });
+			showTheme();
+		},
+		setTermTheme(pref: string) {
+			const termTheme = themePref(pref);
+			store("termtheme", termTheme);
+			$.set({ termTheme });
+			showTermTheme();
+		},
+		setTermGlass(pref: string) {
+			const termGlass = termGlassPref(pref);
+			store("termglass", termGlass);
+			$.set({ termGlass });
+			document.documentElement.dataset.termGlass = termGlass;
 		},
 
 		copyDiagnostics,

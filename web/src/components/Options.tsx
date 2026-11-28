@@ -55,7 +55,12 @@ function openStop(t: HTMLInputElement, i: number): number {
 	return i;
 }
 
-const pick = (name: string, v: string) => (name === "font" ? KW.ui!.setFont(v) : KW.ui!.setOption(name as keyof Opts, v as never));
+const pick = (name: string, v: string) => (name === "font" ? KW.ui!.setFont(v)
+	: name === "theme" ? KW.ui!.setTheme(v)
+	: name === "termtheme" ? KW.ui!.setTermTheme(v)
+	: name === "termglass" ? KW.ui!.setTermGlass(v)
+	: KW.ui!.setOption(name as keyof Opts, v as never));
+type FieldName = keyof Opts | "theme" | "termtheme" | "termglass";
 
 function Field({ label, wide, hidden, id, children }: { label: string; wide?: boolean; hidden?: boolean; id?: string; children: ReactNode }) {
 	return (
@@ -71,7 +76,7 @@ function Field({ label, wide, hidden, id, children }: { label: string; wide?: bo
  * A forced box is shown ticked and disabled, its stored value kept (Worker thread with several CPUs);
  * a blocked one unticked and disabled, its stored value kept (Guest GL with another distro).
  */
-function Check({ id, name, on, off, value, label, note, forced, blocked }: { id: string; name: keyof Opts; on: string; off: string; value: string; label: string; note?: string; forced?: boolean; blocked?: boolean }) {
+function Check({ id, name, on, off, value, label, note, forced, blocked }: { id: string; name: FieldName; on: string; off: string; value: string; label: string; note?: string; forced?: boolean; blocked?: boolean }) {
 	const checked = !blocked && (forced || value === on);
 	const locked = forced || blocked;
 	return (
@@ -89,7 +94,7 @@ function Check({ id, name, on, off, value, label, note, forced, blocked }: { id:
 }
 
 /** (•) one of several. */
-function Radio({ id, name, value, current, label }: { id: string; name: keyof Opts; value: string; current: string; label: string }) {
+function Radio({ id, name, value, current, label }: { id: string; name: FieldName; value: string; current: string; label: string }) {
 	const checked = value === current;
 	return (
 		<label className="flex cursor-pointer items-center gap-1.5 text-muted select-none hover:text-fg">
@@ -379,6 +384,43 @@ export function FontSize() {
 	return (
 		<div className="max-w-sm">
 			<Slider id="opt-font" name="font" label="Font size" value={fontValue} stops={fonts} />
+		</div>
+	);
+}
+
+export function Theme() {
+	const theme = useStore((s) => s.theme);
+	return (
+		<fieldset className="flex max-w-sm flex-col gap-1.5">
+			<legend className="mb-1.5 text-[11.5px] text-faint">Theme</legend>
+			<div className="flex flex-wrap gap-x-5 gap-y-1" role="radiogroup" id="opt-theme">
+				<Radio id="opt-theme-auto" name="theme" value="auto" current={theme} label="Auto" />
+				<Radio id="opt-theme-dark" name="theme" value="dark" current={theme} label="Dark" />
+				<Radio id="opt-theme-light" name="theme" value="light" current={theme} label="Light" />
+			</div>
+		</fieldset>
+	);
+}
+
+export function TermTheme() {
+	const termTheme = useStore((s) => s.termTheme);
+	return (
+		<fieldset className="mt-5 flex max-w-sm flex-col gap-1.5">
+			<legend className="mb-1.5 text-[11.5px] text-faint">Colours</legend>
+			<div className="flex flex-wrap gap-x-5 gap-y-1" role="radiogroup" id="opt-termtheme">
+				<Radio id="opt-termtheme-auto" name="termtheme" value="auto" current={termTheme} label="Auto" />
+				<Radio id="opt-termtheme-dark" name="termtheme" value="dark" current={termTheme} label="Dark" />
+				<Radio id="opt-termtheme-light" name="termtheme" value="light" current={termTheme} label="Light" />
+			</div>
+		</fieldset>
+	);
+}
+
+export function TermGlass() {
+	const termGlass = useStore((s) => s.termGlass);
+	return (
+		<div className="mt-5 max-w-sm">
+			<Check id="opt-termglass" name="termglass" on="on" off="off" value={termGlass} label="See-through window" note="the desktop shows through, blurred" />
 		</div>
 	);
 }

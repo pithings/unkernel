@@ -182,8 +182,8 @@ function StateLine({ st }: { st: StatsState }) {
 // ---- boot ------------------------------------------------------------------------------------
 /** A stage's tone on the timeline: steps of the foreground, adjacent ones apart. */
 const STAGE_TONE: Record<string, string> = {
-	preflight: "rgb(237 237 237 / 30%)", kernel: "rgb(237 237 237 / 90%)", compile: "rgb(237 237 237 / 55%)",
-	memory: "rgb(237 237 237 / 35%)", boot: "rgb(237 237 237 / 75%)", userspace: "rgb(237 237 237 / 48%)",
+	preflight: faded("var(--color-fg)", 30), kernel: faded("var(--color-fg)", 90), compile: faded("var(--color-fg)", 55),
+	memory: faded("var(--color-fg)", 35), boot: faded("var(--color-fg)", 75), userspace: faded("var(--color-fg)", 48),
 };
 const STATE_WORD: Record<string, string> = { done: "", fail: "failed", active: "running", pending: "pending", skip: "skipped" };
 
@@ -252,7 +252,7 @@ function BootTimeline() {
 					);
 				})}
 				{tip && (
-					<div aria-hidden="true" className="pointer-events-none absolute top-[calc(100%+6px)] z-10 w-max max-w-full rounded-md bg-black/90 px-2 py-1 text-[11px] leading-snug text-fg shadow-lg ring-1 ring-line-strong"
+					<div aria-hidden="true" className="pointer-events-none absolute top-[calc(100%+6px)] z-10 w-max max-w-full rounded-md bg-bg/90 px-2 py-1 text-[11px] leading-snug text-fg shadow-lg ring-1 ring-line-strong"
 						style={{ left: `${center}%`, transform: `translateX(-${center}%)` }}>
 						<div className="tabular-nums">{describe(tip)}</div>
 						{tip.detail && <div className="break-words text-faint">{tip.detail}</div>}

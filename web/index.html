@@ -9,7 +9,7 @@
 <!-- Added to the home screen, iOS opens the page without Safari's bars (it has no element full screen on iPhone). -->
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<!-- Not black-translucent: iOS 26+ then gives the page a viewport short of the screen by the status bar and leaves a black band at the bottom (WebKit bug 301108). The page is black, so the status bar matches. -->
+<!-- Not black-translucent: iOS 26+ then gives the page a viewport short of the screen by the status bar and leaves a black band at the bottom (WebKit bug 301108). The page is black in the dark theme, so the status bar matches. -->
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
 <meta name="apple-mobile-web-app-title" content="unkernel">
 <meta name="color-scheme" content="dark">
@@ -53,12 +53,12 @@
 .sk-win { position: relative; width: min(clamp(720px, 74vw, 1180px), 100%); height: min(max(420px, calc((100dvh - 64px) * .84)), 100%); }
 @media (max-width: 639.98px), (pointer: coarse) {
 	.sk-win { width: 100%; height: 100%; border-width: 0 !important; border-radius: 0 !important; box-shadow: none !important; }
-	.sk-win > .wm-title { height: var(--wm-strip, 30px); border-radius: 0; border-bottom-color: var(--color-line, #242424); background: #0a0a0a !important; }
+	.sk-win > .wm-title { height: var(--wm-strip, 30px); border-radius: 0; border-bottom-color: var(--color-line, #242424); background: var(--color-surface, #0a0a0a) !important; }
 	.sk-win > .wm-body { border-radius: 0; }
 }
 @media (pointer: coarse) { .sk-win > .wm-title { height: 40px; } }
 :root.kw-mobile .sk-win { width: 100%; height: 100%; border-width: 0 !important; border-radius: 0 !important; box-shadow: none !important; }
-:root.kw-mobile .sk-win > .wm-title { height: 40px; border-radius: 0; border-bottom-color: var(--color-line, #242424); background: #0a0a0a !important; }
+:root.kw-mobile .sk-win > .wm-title { height: 40px; border-radius: 0; border-bottom-color: var(--color-line, #242424); background: var(--color-surface, #0a0a0a) !important; }
 :root.kw-mobile .sk-win > .wm-body { border-radius: 0; }
 
 #app[data-blank] #win-terminal-1 > .wm-body::after {
@@ -73,7 +73,7 @@
 .tb-boot[data-hide] { opacity: 0; pointer-events: none; }
 .tb-boot-btn { flex: 0 1 auto; min-width: 0; justify-content: flex-start; gap: 7px; padding: 0 8px; }
 .tb-boot-ring { flex: none; }
-.tb-boot-track { stroke: rgb(255 255 255 / 26%); }
+.tb-boot-track { stroke: color-mix(in srgb, var(--color-ink, #fff) 26%, transparent); }
 .tb-boot-arc {
 	stroke: currentColor; stroke-dasharray: 100px; stroke-dashoffset: calc((1 - var(--p, 0)) * 100px);
 	transition: stroke-dashoffset .25s ease-out;
@@ -82,8 +82,8 @@
 }
 @keyframes tb-boot-breathe { to { opacity: .45; } }
 .tb-boot-msg, .tb-boot-title { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.tb-boot-msg { color: rgb(237 237 237 / 72%); }
-.tb-boot-detail { color: rgb(237 237 237 / 45%); font-variant-numeric: tabular-nums; }
+.tb-boot-msg { color: color-mix(in srgb, var(--color-fg, #ededed) 72%, transparent); }
+.tb-boot-detail { color: color-mix(in srgb, var(--color-fg, #ededed) 45%, transparent); font-variant-numeric: tabular-nums; }
 .tb-boot-title { font-weight: 600; }
 #tb-boot[data-error] { color: var(--color-err, #ff6166); }
 #tb-boot[data-error] .tb-boot-arc { stroke-dashoffset: 0; animation: none; }
@@ -105,13 +105,21 @@
 // still ends up on screen: on the static desktop below (the markup React
 // replaces once src/main.tsx runs) the boot indicator turns red and the
 // failure card shows the message; src/ui.ts shows everything recorded here
-// once it runs. Also what the first paint needs from storage: the saved
-// wallpaper's hint (desktop.ts HINT_KEY) and compact mode for a mobile
+// once it runs. Also what the first paint needs from storage: the colour
+// themes, the saved wallpaper's hint (desktop.ts HINT_KEY) and compact mode for a mobile
 // user agent without a touch screen (config.ts mobile).
 (() => {
 	const KW = window.KW = { t0: Date.now(), errors: [], ui: null, started: false };
 	const root = document.documentElement;
 	try {
+		const p = localStorage.getItem("kw.theme");
+		const theme = p === "light" || (p !== "dark" && matchMedia("(prefers-color-scheme: light)").matches) ? "light" : "dark";
+		root.setAttribute("data-theme", theme);
+		document.querySelector('meta[name="theme-color"]').setAttribute("content", theme === "light" ? "#ffffff" : "#000000");
+		document.querySelector('meta[name="color-scheme"]').setAttribute("content", theme);
+		const t = localStorage.getItem("kw.termtheme");
+		root.setAttribute("data-term-theme", t === "light" || t === "dark" ? t : theme);
+		root.setAttribute("data-term-glass", localStorage.getItem("kw.termglass") === "off" ? "off" : "on");
 		const h = JSON.parse(localStorage.getItem("kw.wallpaper-hint") || "null");
 		if (h && typeof h.css === "string") {
 			root.style.setProperty("--wp-hint", h.css);

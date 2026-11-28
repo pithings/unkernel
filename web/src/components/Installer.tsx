@@ -77,11 +77,11 @@ function Log({ inst }: { inst: Install }) {
 		<div className="relative mt-3 min-h-0 flex-1">
 			<pre ref={ref} id={`installer-${inst.id}-log`} tabIndex={0} aria-label="Log"
 				onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 12; }}
-				className="h-full overflow-auto rounded-lg border border-white/8 bg-black py-2 pr-9 pl-2.5 font-mono text-[11px] leading-[1.5] break-all whitespace-pre-wrap text-muted outline-none select-text focus-visible:border-accent/60">
+				className="h-full overflow-auto rounded-lg border border-ink/8 bg-bg py-2 pr-9 pl-2.5 font-mono text-[11px] leading-[1.5] break-all whitespace-pre-wrap text-muted outline-none select-text focus-visible:border-accent/60">
 				{lines.join("\n")}
 			</pre>
 			<button type="button" title="Copy" aria-label="Copy the log" onClick={copy}
-				className="absolute top-1.5 right-2.5 grid size-6 place-items-center rounded-md bg-black text-faint transition-colors hover:bg-white/10 hover:text-fg">
+				className="absolute top-1.5 right-2.5 grid size-6 place-items-center rounded-md bg-bg text-faint transition-colors hover:bg-ink/10 hover:text-fg">
 				{copied ? <CheckIcon size={13} /> : <CopyIcon size={13} />}
 			</button>
 		</div>

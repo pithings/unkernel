@@ -34,7 +34,7 @@ import { ExternalIcon, PreviewIcon, RebootIcon } from "./icons.tsx";
 /** A press in the page this recently (ms) gave the window the focus: the page keeps the DOM focus. */
 const PRESS_MS = 1000;
 const address = (port: number, path: string) => `localhost:${port}${path === "/" ? "" : path}`;
-const tool = "grid h-7 w-7 flex-none place-items-center rounded-md text-muted transition-colors hover:bg-white/8 hover:text-fg disabled:pointer-events-none disabled:opacity-40 pointer-coarse:h-10 pointer-coarse:w-10";
+const tool = "grid h-7 w-7 flex-none place-items-center rounded-md text-muted transition-colors hover:bg-ink/8 hover:text-fg disabled:pointer-events-none disabled:opacity-40 pointer-coarse:h-10 pointer-coarse:w-10";
 
 export function Browser({ id }: { id: string }) {
 	const b = useBrowser(id);

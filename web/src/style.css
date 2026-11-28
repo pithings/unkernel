@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: MIT */
 /* Copyright (C) 2026 Pooya Parsa <pooya@pi0.io> */
-/* The page's styles: Tailwind, with a black, minimal theme in the manner of
-   Vercel's Geist (Geist Sans and Geist Mono, a gray scale on black, one
+/* The page's styles: Tailwind, with a minimal theme, dark or light, in the manner of
+   Vercel's Geist (Geist Sans and Geist Mono, a gray scale on black or white, one
    accent per state): a desktop of slightly rounded windows on a dark
-   wallpaper with a translucent Dock, plain black menus and popovers
-   (.popover), macOS-like alerts, cards and toast on a flat near-black
+   wallpaper with a translucent Dock, plain menus and popovers
+   (.popover), macOS-like alerts, cards and toast on a flat
    surface (.alert, components/Dialog.tsx), and rounded buttons and fields
    (.btn, .field). wterm brings its own stylesheet (src/boot.ts); its
    colours and font are set on the terminals (#workspace .wterm) below.
@@ -34,6 +34,7 @@
 	--color-err: #ff6166;
 	--color-off: #8f8f8f;
 	--color-accent: #52a8ff;
+	--color-ink: #fff;
 }
 
 :root {
@@ -59,6 +60,7 @@
 	--tb-shadow: 0 1px 2px rgb(0 0 0 / 55%);
 	--tb-pad: 3px;
 	--tb-gap: 1px;
+	--tb-solid: rgb(8 8 8 / 92%);
 	/* Stacking, bottom to top. In #app (fixed, so a stacking context of its
 	   own; components/App.tsx): the wallpaper; the desktop (#desktop, its workspace #workspace) and the
 	   Dock (#dock), no z-index; the
@@ -91,7 +93,7 @@
 	--z-win-edge: 2;
 	--z-win-wland: 3;
 	/* Glass, the material of the Dock's pill (.dock-pill::before) and the snap
-	   preview (.wm-snap): a dark tint (--glass-bg), the blur of what is
+	   preview (.wm-snap): a tint (--glass-bg), the blur of what is
 	   behind (--glass-blur), an edge brighter at the top than at the bottom
 	   (--glass-border), a sheen down from the top (--glass-sheen), and the
 	   shadows, the inset ones a light top edge and a dark bottom one
@@ -102,17 +104,90 @@
 	--glass-sheen: linear-gradient(rgb(255 255 255 / 9%), rgb(255 255 255 / 2%) 50%, rgb(255 255 255 / 0%));
 	--glass-shadow: inset 0 1px 0 rgb(255 255 255 / 18%), inset 0 -1px 0 rgb(0 0 0 / 28%), 0 12px 36px rgb(0 0 0 / 45%), 0 2px 6px rgb(0 0 0 / 30%);
 	/* The shortcuts HUD's panel (.hud-panel below): the glass's blur under a
-	   darker flat tint, so the keys read over a busy terminal. */
+	   denser flat tint, so the keys read over a busy terminal. */
 	--hud-bg: rgb(14 14 14 / 62%);
+	--hud-shadow: 0 16px 48px rgb(0 0 0 / 45%), 0 2px 8px rgb(0 0 0 / 30%);
 	/* Alerts, cards and the toast (.alert, .toast below): flat, no sheen and no blur. */
 	--alert-bg: #121212;
 	--alert-border: rgb(255 255 255 / 11%);
 	--alert-shadow: 0 24px 64px rgb(0 0 0 / 60%), 0 4px 14px rgb(0 0 0 / 40%);
 	--alert-dim: rgb(0 0 0 / 32%);
+	--popover-shadow: 0 12px 36px rgb(0 0 0 / 55%), 0 2px 6px rgb(0 0 0 / 35%);
+	--wm-border: #262626;
+	--wm-border-focus: #363636;
+	--wm-shadow: 0 14px 40px rgb(0 0 0 / 50%), 0 2px 6px rgb(0 0 0 / 35%);
+	--wm-shadow-focus: 0 22px 64px rgb(0 0 0 / 70%), 0 2px 8px rgb(0 0 0 / 40%);
+	--wm-title-bg: #111;
+	--wm-title-bg-focus: #161616;
+	--wm-title-line: #1d1d1d;
+	--wm-snap-bg: rgb(255 255 255 / 7%);
+	--wm-snap-shadow: inset 0 1px 0 rgb(255 255 255 / 14%), 0 0 0 1px rgb(0 0 0 / 25%), 0 16px 48px rgb(0 0 0 / 35%);
+	--dock-face-bg: rgb(0 0 0 / 24%);
+	--dock-label-shadow: 0 4px 14px rgb(0 0 0 / 40%);
+	--line-hover: #555;
+	--launcher-dim: rgb(0 0 0 / 55%);
+	--launcher-panel: --alpha(var(--color-neutral-900) / 60%);
+	--launcher-panel-shadow: 0 24px 80px rgb(0 0 0 / 60%), inset 0 1px 0 rgb(255 255 255 / 6%);
+	--tone-mem: #b28cff;
+	--tone-disk: #3fcfb4;
+	--tone-net: #ff8ac6;
+	--tone-gpu: #e6c84f;
+	--tone-vk: #f0905a;
+}
+:root[data-theme="light"] {
+	color-scheme: light;
+	--color-bg: #fff;
+	--color-surface: #fafafa;
+	--color-hover: #f2f2f2;
+	--color-line: #ebebeb;
+	--color-line-strong: #d4d4d4;
+	--color-fg: #171717;
+	--color-muted: #525252;
+	--color-faint: #616161;
+	--color-ok: #107d32;
+	--color-warn: #a35200;
+	--color-err: #c4161c;
+	--color-off: #737373;
+	--color-accent: #0068d6;
+	--color-ink: #000;
+	--tb-shadow: 0 1px 1px rgb(255 255 255 / 40%);
+	--tb-solid: rgb(250 250 250 / 92%);
+	--glass-bg: rgb(250 250 250 / 80%);
+	--glass-border: rgb(0 0 0 / 6%) rgb(0 0 0 / 11%) rgb(0 0 0 / 16%);
+	--glass-sheen: linear-gradient(rgb(255 255 255 / 40%), rgb(255 255 255 / 10%) 50%, rgb(255 255 255 / 0%));
+	--glass-shadow: inset 0 1px 0 rgb(255 255 255 / 80%), inset 0 -1px 0 rgb(0 0 0 / 6%), 0 12px 36px rgb(0 0 0 / 16%), 0 2px 6px rgb(0 0 0 / 10%);
+	--hud-bg: rgb(250 250 250 / 86%);
+	--hud-shadow: 0 16px 48px rgb(0 0 0 / 16%), 0 2px 8px rgb(0 0 0 / 10%);
+	--alert-bg: #fff;
+	--alert-border: rgb(0 0 0 / 10%);
+	--alert-shadow: 0 24px 64px rgb(0 0 0 / 18%), 0 4px 14px rgb(0 0 0 / 10%);
+	--alert-dim: rgb(0 0 0 / 18%);
+	--popover-shadow: 0 12px 36px rgb(0 0 0 / 14%), 0 2px 6px rgb(0 0 0 / 8%);
+	--wm-border: #e3e3e3;
+	--wm-border-focus: #d1d1d1;
+	--wm-shadow: 0 14px 40px rgb(0 0 0 / 14%), 0 2px 6px rgb(0 0 0 / 8%);
+	--wm-shadow-focus: 0 22px 64px rgb(0 0 0 / 22%), 0 2px 8px rgb(0 0 0 / 12%);
+	--wm-title-bg: #f0f0f0;
+	--wm-title-bg-focus: #f7f7f7;
+	--wm-title-line: #e5e5e5;
+	--wm-snap-bg: rgb(255 255 255 / 30%);
+	--wm-snap-shadow: inset 0 1px 0 rgb(255 255 255 / 70%), 0 0 0 1px rgb(0 0 0 / 10%), 0 16px 48px rgb(0 0 0 / 14%);
+	--dock-face-bg: rgb(255 255 255 / 40%);
+	--dock-label-shadow: 0 4px 14px rgb(0 0 0 / 12%);
+	--line-hover: #a3a3a3;
+	--launcher-dim: rgb(255 255 255 / 78%);
+	--launcher-panel: rgb(255 255 255 / 60%);
+	--launcher-panel-shadow: 0 24px 80px rgb(0 0 0 / 16%), inset 0 1px 0 rgb(255 255 255 / 70%);
+	--tone-mem: #7c3aed;
+	--tone-disk: #0f766e;
+	--tone-net: #db2777;
+	--tone-gpu: #a16207;
+	--tone-vk: #c2410c;
 }
 /* No backdrop blur: the tints alone, nearly opaque. */
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
 	:root { --glass-bg: rgb(18 18 18 / 94%); --hud-bg: rgb(18 18 18 / 95%); }
+	:root[data-theme="light"] { --glass-bg: rgb(250 250 250 / 94%); --hud-bg: rgb(250 250 250 / 95%); }
 }
 /* A macOS window outside fullscreen (main.tsx): its bottom corners are round. */
 :root.mac-window { --sc: 8px; }
@@ -162,19 +237,19 @@
 
 /* ---- components: controls, popovers, alerts and the toast ----------------- */
 @layer components {
-	/* Buttons, rounded as on macOS: secondary (a quiet light tint), primary
-	   (white, black text) and danger (red, white text). .btn-alert: an
+	/* Buttons, rounded as on macOS: secondary (a quiet tint), primary
+	   (white with black text, or black with white) and danger (red, white text). .btn-alert: an
 	   alert's or card's (Dialog.tsx), 44 px tall on coarse pointers.
 	   aria-disabled dims one that keeps its focus (an untrusted OK). */
 	.btn {
-		@apply inline-flex h-8 items-center justify-center gap-2 rounded-lg border border-white/8 bg-white/9 px-3.5 font-sans text-[13px] font-medium whitespace-nowrap text-fg transition-colors select-none;
-		&:hover { @apply bg-white/14; }
-		&:active { @apply bg-white/18; }
+		@apply inline-flex h-8 items-center justify-center gap-2 rounded-lg border border-ink/8 bg-ink/9 px-3.5 font-sans text-[13px] font-medium whitespace-nowrap text-fg transition-colors select-none;
+		&:hover { @apply bg-ink/14; }
+		&:active { @apply bg-ink/18; }
 		&[aria-disabled="true"], &:disabled { @apply cursor-default opacity-50; }
 	}
 	.btn-primary {
-		@apply border-transparent bg-fg text-black;
-		&:hover, &:active { @apply bg-white; }
+		@apply border-transparent bg-fg text-bg;
+		&:hover, &:active { @apply bg-ink; }
 	}
 	.btn-danger {
 		@apply border-transparent bg-[#d93036] text-white;
@@ -185,17 +260,17 @@
 		@apply h-8 rounded-[9px] px-3.5;
 		@media (pointer: coarse) { height: 44px; border-radius: 12px; font-size: 14px; }
 	}
-	/* Menus and popovers (Menu.tsx): plain black, no
+	/* Menus and popovers (Menu.tsx): plain, no
 	   sheen and no blur, with a thin even edge. The corner radius is the
 	   element's own (rounded-*). */
 	.popover {
-		border: 1px solid var(--color-line-strong); background: #000;
-		box-shadow: 0 12px 36px rgb(0 0 0 / 55%), 0 2px 6px rgb(0 0 0 / 35%);
+		border: 1px solid var(--color-line-strong); background: var(--color-bg);
+		box-shadow: var(--popover-shadow);
 	}
 	/* Inputs, selects and text areas: rounded, a faint tint, the accent's ring when focused; their text in mono. */
 	.field {
-		@apply rounded-lg border border-white/12 bg-white/4 font-mono text-fg transition-[border-color,box-shadow] outline-none placeholder:text-faint;
-		&:hover { @apply border-white/20; }
+		@apply rounded-lg border border-ink/12 bg-ink/4 font-mono text-fg transition-[border-color,box-shadow] outline-none placeholder:text-faint;
+		&:hover { @apply border-ink/20; }
 		&:focus-visible { @apply border-accent/70 outline-none ring-3 ring-accent/25; }
 	}
 	/* Range: a thin track, filled up to the thumb (--fill, set inline), and a
@@ -208,15 +283,15 @@
 		&::-moz-range-track { height: 2px; background: linear-gradient(to right, var(--tone, var(--color-fg)) var(--fill), var(--color-line-strong) var(--fill)); }
 		&::-webkit-slider-thumb { appearance: none; width: var(--thumb, 12px); height: 14px; margin-top: -6px; background: var(--tone, var(--color-fg)); border: 2px solid var(--color-surface); box-sizing: content-box; }
 		&::-moz-range-thumb { width: var(--thumb, 12px); height: 14px; background: var(--tone, var(--color-fg)); border: 2px solid var(--color-surface); border-radius: 0; box-sizing: content-box; }
-		&:hover::-webkit-slider-thumb { background: var(--tone, #fff); }
-		&:hover::-moz-range-thumb { background: var(--tone, #fff); }
+		&:hover::-webkit-slider-thumb { background: var(--tone, var(--color-ink)); }
+		&:hover::-moz-range-thumb { background: var(--tone, var(--color-ink)); }
 		&:focus-visible { outline: none; }
 		&:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 2px var(--color-accent); }
 		&:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 2px var(--color-accent); }
 	}
 	/* Alerts, sheets and cards (components/Dialog.tsx: the confirm and paste
 	   dialogs, the Resume card, the failure card) and the toast: a flat
-	   near-black surface (--alert-bg) with a thin even edge and a soft shadow,
+	   surface (--alert-bg) with a thin even edge and a soft shadow,
 	   16 px corners, the text centred in Geist Sans. A modal one is a native
 	   <dialog> (centred in the top layer, margin auto) over a light dim
 	   (--alert-dim) with the page faintly blurred; .alert-top puts it near the
@@ -242,7 +317,7 @@
 	.alert-msg { margin-top: 6px; font-size: 12px; line-height: 1.45; color: var(--color-muted); overflow-wrap: anywhere; }
 	.alert-detail {
 		max-height: 10rem; margin-top: 10px; padding: 6px 10px; overflow-y: auto;
-		border: 1px solid rgb(255 255 255 / 8%); border-radius: 8px; background: rgb(255 255 255 / 5%);
+		border: 1px solid --alpha(var(--color-ink) / 8%); border-radius: 8px; background: --alpha(var(--color-ink) / 5%);
 		font: 11.5px/1.45 var(--font-mono); text-align: left; word-break: break-all; user-select: text; -webkit-user-select: text;
 	}
 	.alert-hint { margin-top: 8px; font-size: 11.5px; line-height: 1.45; color: var(--color-faint); }
@@ -313,7 +388,7 @@
 	position: absolute; top: 4px; right: 0; z-index: var(--z-credit);
 	max-height: calc(100% - 12px); overflow: hidden;
 	--color-fg: rgb(255 255 255 / 95%); --color-muted: rgb(255 255 255 / 80%); --color-faint: rgb(255 255 255 / 62%);
-	--color-line-strong: transparent;
+	--color-line-strong: transparent; --color-warn: #f5a524; --color-err: #ff6166;
 	text-shadow: 0 1px 3px rgb(0 0 0 / 55%);
 }
 .desk-widget svg { filter: drop-shadow(0 1px 2px rgb(0 0 0 / 45%)); }
@@ -329,28 +404,28 @@
    A window: slightly rounded, a subtle border and shadow; the focused one a
    little brighter. Maximized (and every window in compact mode) it is flat. */
 .wm-win {
-	border: 1px solid #262626; border-radius: 10px; background: #0a0a0a;
-	box-shadow: 0 14px 40px rgb(0 0 0 / 50%), 0 2px 6px rgb(0 0 0 / 35%);
+	border: 1px solid var(--wm-border); border-radius: 10px; background: var(--color-surface);
+	box-shadow: var(--wm-shadow);
 }
-.wm-win[data-focused] { border-color: #363636; box-shadow: 0 22px 64px rgb(0 0 0 / 70%), 0 2px 8px rgb(0 0 0 / 40%); }
+.wm-win[data-focused] { border-color: var(--wm-border-focus); box-shadow: var(--wm-shadow-focus); }
 .wm-win[data-max] { border-width: 0; border-radius: 0; box-shadow: none; }
 /* Hidden (Window.tsx data-hidden: minimized; in compact mode, not the top
    one), except while it flies into the Dock (wmfx.ts data-fx "out"). */
 .wm-win[data-hidden]:not([data-fx="out"]) { visibility: hidden; }
 .wm-title {
-	height: var(--wm-title); border-radius: 9px 9px 0 0; border-bottom: 1px solid #1d1d1d;
-	background: #111; color: var(--color-muted); cursor: default;
+	height: var(--wm-title); border-radius: 9px 9px 0 0; border-bottom: 1px solid var(--wm-title-line);
+	background: var(--wm-title-bg); color: var(--color-muted); cursor: default;
 }
-.wm-win[data-focused] .wm-title { background: #161616; color: var(--color-fg); }
+.wm-win[data-focused] .wm-title { background: var(--wm-title-bg-focus); color: var(--color-fg); }
 .wm-win[data-max] .wm-title { border-radius: 0; }
 .wm-btn { width: var(--wm-btn); }
-.wm-strip { height: var(--wm-strip); border-bottom: 1px solid var(--color-line); background: #0a0a0a; }
+.wm-strip { height: var(--wm-strip); border-bottom: 1px solid var(--color-line); background: var(--color-surface); }
 .wm-strip .wm-btn { width: 44px; }
 /* A tab strip in it (wm.ts titleContent: the Terminal windows'): touch-sized tabs. */
 @media (pointer: coarse) { .wm-strip:has(.tabs) { height: var(--hit); } }
 /* The on-screen keyboard is up: every row counts. */
 :root.kb .wm-strip { display: none; }
-.wm-body { overflow: hidden; border-radius: 0 0 9px 9px; background: #000; }
+.wm-body { overflow: hidden; border-radius: 0 0 9px 9px; background: var(--color-bg); }
 .wm-win[data-frame="none"] .wm-body { border-radius: 9px; }
 .wm-win[data-max] .wm-body { border-radius: 0; }
 /* A Wayland app's window (wayland/host.ts): its popups (menus) reach past
@@ -388,9 +463,9 @@
 .wm-snap {
 	position: absolute; pointer-events: none; border-radius: 12px;
 	border: 1px solid; border-color: var(--glass-border);
-	background: var(--glass-sheen), rgb(255 255 255 / 7%);
+	background: var(--glass-sheen), var(--wm-snap-bg);
 	-webkit-backdrop-filter: blur(10px) saturate(1.4); backdrop-filter: blur(10px) saturate(1.4);
-	box-shadow: inset 0 1px 0 rgb(255 255 255 / 14%), 0 0 0 1px rgb(0 0 0 / 25%), 0 16px 48px rgb(0 0 0 / 35%);
+	box-shadow: var(--wm-snap-shadow);
 	opacity: 0; transform: scale(.97);
 	transition: opacity .12s ease-out, transform .16s cubic-bezier(.2, .8, .2, 1);
 }
@@ -421,10 +496,22 @@
 	--term-color-8: #737373; --term-color-9: #ff8589; --term-color-10: #7ee2a8; --term-color-11: #ffc96b;
 	--term-color-12: #8ec5ff; --term-color-13: #d9a6fd; --term-color-14: #5fe0d0; --term-color-15: #ffffff;
 }
+:root[data-term-theme="light"] #workspace .wterm {
+	color-scheme: light; scrollbar-color: #afb8c1 transparent;
+	--term-fg: #24292f; --term-bg: #ffffff; --term-cursor: #24292f;
+	--term-selection-bg: rgb(9 105 218 / 20%);
+	--term-color-0: #000000; --term-color-1: #de333f; --term-color-2: #45d483; --term-color-3: #be8700;
+	--term-color-4: #0a72ec; --term-color-5: #8a5be1; --term-color-6: #239fa9; --term-color-7: #6e7781;
+	--term-color-8: #57606a; --term-color-9: #a40e26; --term-color-10: #1a7f37; --term-color-11: #633c01;
+	--term-color-12: #218bff; --term-color-13: #a475f9; --term-color-14: #3192aa; --term-color-15: #8c959f;
+}
+:root[data-term-theme="dark"] .wm-body[data-app="terminal"] { background: #000; }
+:root[data-term-theme="light"] .wm-body[data-app="terminal"] { background: #fff; }
 /* A Terminal window's content is glass, focused or not: the desktop and the
    windows behind show through the terminal, blurred. Only the content: the
    border, the title bar and the tab strip stay solid. Not maximized ones
-   (nothing is behind them worth showing) and not in compact mode. Cells
+   (nothing is behind them worth showing), not in compact mode and not with
+   See-through window off (Settings, data-term-glass). Cells
    with a colour of their own keep it. The Docs window's too, under its
    toolbar: the docs site paints no background of its own there (docs.ts
    THEME). */
@@ -434,8 +521,14 @@
 	-webkit-backdrop-filter: blur(20px) saturate(1.5); backdrop-filter: blur(20px) saturate(1.5);
 }
 #app:not(.compact) .wm-win:not([data-max]) > .wm-body[data-app="terminal"] .wterm { background: transparent; }
+:root[data-term-theme="light"] #app:not(.compact) .wm-win:not([data-max]) > .wm-body[data-app="terminal"] { background: rgb(255 255 255 / 72%); }
+:root[data-term-glass="off"] #app:not(.compact) .wm-win:not([data-max]):has(> .wm-body[data-app="terminal"]) { background: var(--color-surface); }
+:root[data-term-glass="off"] #app:not(.compact) .wm-win:not([data-max]) > .wm-body[data-app="terminal"] { background: #000; -webkit-backdrop-filter: none; backdrop-filter: none; }
+:root[data-term-glass="off"][data-term-theme="light"] #app:not(.compact) .wm-win:not([data-max]) > .wm-body[data-app="terminal"] { background: #fff; }
+:root[data-term-glass="off"] #app:not(.compact) .wm-win:not([data-max]) > .wm-body[data-app="terminal"] .wterm { background: var(--term-app-bg, var(--term-bg)); }
 /* Docs: less see-through than a terminal, for its prose. */
 #app:not(.compact) .wm-win:not([data-max]) > .wm-body[data-app="docs"] { background: rgb(8 8 8 / 84%); }
+:root[data-theme="light"] #app:not(.compact) .wm-win:not([data-max]) > .wm-body[data-app="docs"] { background: rgb(255 255 255 / 88%); }
 .wm-win, .wm-title, .wm-strip, .wm-body { transition: background-color 0.18s; }
 @media (prefers-reduced-motion: reduce) { .wm-win, .wm-title, .wm-strip, .wm-body { transition: none; } }
 /* iOS zooms the page when a field under 16 px takes focus: wterm's hidden input inherits the terminal font. */
@@ -456,7 +549,7 @@
    while the on-screen keyboard is up (kb, where the bar is hidden). Like
    macOS's menu bar it has no background (nothing else is ever under it):
    its text and icons read by their own soft shadow. While a maximized window
-   is shown (data-dark, TopBar.tsx) and in compact mode it is nearly black. Its tokens (--tb-*) are
+   is shown (data-dark, TopBar.tsx) and in compact mode it is nearly opaque. Its tokens (--tb-*) are
    on :root above. */
 :root.kb { --tb-space: 0px; }
 :root.kb #topbar { display: none; }
@@ -469,7 +562,7 @@
 	user-select: none; -webkit-user-select: none;
 }
 #topbar { transition: background-color .2s ease-out; }
-#topbar[data-dark], #app.compact #topbar { background: rgb(8 8 8 / 92%); }
+#topbar[data-dark], #app.compact #topbar { background: var(--tb-solid); }
 #topbar :focus-visible { outline-offset: -2px; }
 .tb-left, .tb-right { display: flex; align-items: center; gap: 1px; height: 100%; min-width: 0; }
 .tb-left { flex: 0 1 auto; }
@@ -483,14 +576,14 @@
 	.tb-btn {
 		position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 6px; flex: none;
 		height: calc(var(--tb-h) - 6px); min-width: 26px; padding: 0 6px; border-radius: 6px;
-		color: rgb(237 237 237 / 86%); transition: background-color .12s, color .12s;
-		&:hover, &[aria-expanded="true"], &[aria-pressed="true"] { background: rgb(255 255 255 / 13%); color: var(--color-fg); }
-		&:active { background: rgb(255 255 255 / 18%); }
+		color: --alpha(var(--color-fg) / 86%); transition: background-color .12s, color .12s;
+		&:hover, &[aria-expanded="true"], &[aria-pressed="true"] { background: --alpha(var(--color-ink) / 13%); color: var(--color-fg); }
+		&:active { background: --alpha(var(--color-ink) / 18%); }
 		& > svg { flex: none; filter: drop-shadow(var(--tb-shadow)); }
 		@media (pointer: coarse) { min-width: 34px; height: calc(var(--tb-h) - 4px); }
 	}
 	.tb-app { flex: 0 1 auto; min-width: 0; justify-content: flex-start; gap: 7px; padding: 0 8px; }
-	.tb-detail { color: rgb(237 237 237 / 55%); }
+	.tb-detail { color: --alpha(var(--color-fg) / 55%); }
 	.tb-off { color: var(--color-faint); }
 	@media (max-width: 639.98px) { .tb-wide { display: none; } }
 	.tb-right .tb-btn {
@@ -511,12 +604,18 @@
 /* The resources (TopBar.tsx Bars: #tb-cpu, #tb-mem, #tb-disk, #tb-net, #tb-gpu):
    slim bars (TopBar.tsx BAR_W x BAR_H) on faint tracks, filled in the
    button's colour, amber or red when high (data-tone), dim once halted. */
-.tb-track { fill: rgb(255 255 255 / 22%); }
+.tb-track { fill: --alpha(var(--color-ink) / 22%); }
 .tb-btn[data-tone="warn"] { color: var(--color-warn); }
 .tb-btn[data-tone="err"] { color: var(--color-err); }
 #app[data-state="halted"] :is(#tb-cpu, #tb-mem, #tb-disk, #tb-net, #tb-gpu) { color: var(--color-off); }
+:root[data-theme="light"] :where(#app:not(.compact)) #topbar:where(:not([data-dark])) {
+	--color-bg: #000; --color-surface: #0a0a0a; --color-hover: #1a1a1a; --color-line: #242424; --color-line-strong: #333;
+	--color-fg: #ededed; --color-muted: #a1a1a1; --color-faint: #7d7d7d; --color-ok: #45d483; --color-warn: #f5a524;
+	--color-err: #ff6166; --color-off: #8f8f8f; --color-accent: #52a8ff; --color-ink: #fff;
+	--tb-shadow: 0 1px 2px rgb(0 0 0 / 55%);
+}
 /* Over a light wallpaper (desktop.ts: data-wallpaper on the root), unless the
-   bar is nearly black (:where(): no added specificity), the bar's
+   bar is nearly opaque (:where(): no added specificity), the bar's
    text and icons are dark with a light shadow, as on macOS. The amber and
    red tones and the error state keep their colours. */
 :root[data-wallpaper="light"] :where(#app:not(.compact)) #topbar:where(:not([data-dark])) {
@@ -578,7 +677,7 @@
 .dock-apps::-webkit-scrollbar { display: none; }
 .dock-sep {
 	flex: none; align-self: flex-start; width: 1px; height: calc(var(--dock-tile) - 12px); margin: 6px 3px 0;
-	background: rgb(255 255 255 / 16%); box-shadow: 1px 0 0 rgb(0 0 0 / 22%);
+	background: --alpha(var(--color-ink) / 16%); box-shadow: 1px 0 0 --alpha(var(--color-bg) / 22%);
 }
 /* Magnification (Dock.tsx useMagnify): every item moves aside by --mx, a tile
    grows by --m from its bottom edge (its dot, badge, hint and ring with it).
@@ -586,30 +685,31 @@
    clip it, so the other states stay within the face. */
 .dock-pill > :not(.dock-apps), .dock-apps > * { transform: translateX(var(--mx, 0px)); transition: transform .14s ease-out, opacity .3s ease-out; }
 .dock-pill .dock-tile { transform: translateX(var(--mx, 0px)) scale(var(--m, 1)); transform-origin: 50% 100%; }
-/* A tile: the face, then a row for the running dot. The face is a faint dark
+/* A tile: the face, then a row for the running dot. The face is a faint
    glass, so its icon (with a soft shadow) reads over a bright page as well
    as over the wallpaper; hovered or pressed (its window has the focus), a
    flat grey tint (lighter than the wallpaper, darker than a bright page)
-   and a brighter edge, the face's own size. */
+   and a stronger edge, the face's own size. */
 /* A long press opens the tile's menu (Dock.tsx useTileMenu), not iOS's callout. */
 .dock-tile { width: var(--dock-tile); height: calc(var(--dock-tile) + 7px); color: var(--color-fg); -webkit-touch-callout: none; }
 .dock-face {
 	display: grid; place-items: center; width: var(--dock-tile); height: var(--dock-tile); border-radius: 11px;
-	border: 1px solid rgb(255 255 255 / 7%); background: rgb(0 0 0 / 24%);
+	border: 1px solid --alpha(var(--color-ink) / 7%); background: var(--dock-face-bg);
 	box-shadow: inset 0 1px 0 rgb(255 255 255 / 6%);
 	transition: background-color .15s, border-color .15s, box-shadow .15s, transform .15s;
 }
-.dock-face > svg { filter: drop-shadow(0 1px 1px rgb(0 0 0 / 45%)); }
+.dock-face > svg { filter: drop-shadow(0 1px 1px --alpha(var(--color-bg) / 45%)); }
 /* An app's own colours (Dock.tsx Tile colors, as its launcher tile's): a round disc under its icon; the face stays the Dock's glass. */
 .dock-disc { display: grid; place-items: center; width: 76%; height: 76%; border-radius: 50%; }
 .dock-disc > svg { filter: drop-shadow(0 1px 1px rgb(0 0 0 / 45%)); }
+:root[data-theme="light"] .dock-disc { color: #ededed; }
 .dock-tile:hover .dock-face {
-	border-color: rgb(255 255 255 / 16%); background: rgb(128 128 128 / 26%);
+	border-color: --alpha(var(--color-ink) / 16%); background: rgb(128 128 128 / 26%);
 	box-shadow: inset 0 1px 0 rgb(255 255 255 / 10%);
 }
 .dock-tile:active .dock-face { transform: scale(.94); }
 .dock-tile[aria-pressed="true"] .dock-face, .dock-tile[aria-expanded="true"] .dock-face {
-	border-color: rgb(255 255 255 / 26%); background: rgb(150 150 150 / 34%);
+	border-color: --alpha(var(--color-ink) / 26%); background: rgb(150 150 150 / 34%);
 	box-shadow: inset 0 1px 0 rgb(255 255 255 / 12%);
 }
 /* The focus ring follows the face, inside it over its edge (a scrolling tile
@@ -649,14 +749,14 @@
 #app.compact .dock-tile { width: 40px; }
 #app.compact .dock-face { margin-inline: auto; border-radius: 10px; }
 #app.compact .dock-disc { width: 84%; height: 84%; }
-/* The running dot, with a faint dark rim so it shows over a bright page too. */
-.dock-dot { position: absolute; bottom: 1px; left: 50%; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: rgb(255 255 255 / 80%); box-shadow: 0 0 0 1px rgb(0 0 0 / 30%); }
-.dock-dot[data-dot="dim"] { background: rgb(255 255 255 / 38%); }
+/* The running dot, with a faint rim of the other tone so it shows over any page. */
+.dock-dot { position: absolute; bottom: 1px; left: 50%; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: --alpha(var(--color-ink) / 80%); box-shadow: 0 0 0 1px --alpha(var(--color-bg) / 30%); }
+.dock-dot[data-dot="dim"] { background: --alpha(var(--color-ink) / 38%); }
 .dock-dot[data-dot="busy"] { background: var(--color-faint); animation: dock-busy 1s ease-in-out infinite alternate; }
 .dock-dot[data-dot="error"] { background: var(--color-err); }
 @keyframes dock-busy { to { opacity: .3; } }
 /* A tile's label (Dock.tsx useDockLabel), as macOS names a Dock icon: one
-   line over the tile, flat black as the menus (.popover), its name, then
+   line over the tile, flat as the menus (.popover), its name, then
    its state and key in a quieter tone (that part gives way first, then the
    name ellipsises). In the Dock's root, outside the strip that clips while
    it scrolls; z-index 1 in #app is over the windows (the workspace is
@@ -667,7 +767,7 @@
 	position: absolute; top: 0; left: 0; z-index: 1;
 	display: flex; gap: 6px; max-width: min(280px, calc(100vw - 16px));
 	padding: 3px 8px; border: 1px solid var(--color-line-strong); border-radius: 7px;
-	background: #000; box-shadow: 0 4px 14px rgb(0 0 0 / 40%);
+	background: var(--color-bg); box-shadow: var(--dock-label-shadow);
 	color: var(--color-fg); font: 500 12px/16px var(--font-sans); white-space: nowrap;
 	pointer-events: none; visibility: hidden; opacity: 0;
 }
@@ -679,7 +779,7 @@
 @media (prefers-reduced-motion: reduce) { #dock-label[data-show] { transition: none; } }
 /* A group's stack (DockStack.tsx #dock-stack, in <body>), as a macOS Dock
    stack: a rounded panel of the Dock's glass (its edge, sheen, blur and
-   shadows) under the HUD's darker tint, so the names read over a busy
+   shadows) under the HUD's denser tint, so the names read over a busy
    terminal, and a notch under it pointing at the tile (--notch: its middle
    from the panel's left), the same tint and blur of its own, its slanted
    edges drawn by its svg. Both grow out of the notch's tip with a short
@@ -698,17 +798,17 @@
 	background: var(--hud-bg); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
 	transform-origin: 50% 100%;
 }
-.dock-stack-notch > svg { display: block; width: 100%; height: 100%; fill: none; stroke: rgb(255 255 255 / 11%); stroke-width: 2; }
+.dock-stack-notch > svg { display: block; width: 100%; height: 100%; fill: none; stroke: --alpha(var(--color-ink) / 11%); stroke-width: 2; }
 .dock-stack-panel, .dock-stack-notch { animation: dock-stack-in .26s cubic-bezier(.3, 1.3, .55, 1) both; }
 .dock-stack[data-quick] > * { animation: none; }
 @keyframes dock-stack-in { from { opacity: 0; transform: scale(.35); } 45% { opacity: 1; } }
 /* An app being installed (installer.ts): a thin bar over the bottom of its
    tile's face, the Dock's (Dock.tsx) and the launcher's (Launcher.tsx), as
-   macOS draws a download on its Dock icon; white, red once failed, a
+   macOS draws a download on its Dock icon; in the text's colour, red once failed, a
    sliding piece while nothing is known yet. Placed by its tile. */
 .tile-progress {
 	position: absolute; height: 3px; overflow: hidden; border-radius: 2px; pointer-events: none;
-	background: rgb(0 0 0 / 60%); box-shadow: 0 0 0 1px rgb(255 255 255 / 14%);
+	background: --alpha(var(--color-bg) / 60%); box-shadow: 0 0 0 1px --alpha(var(--color-ink) / 14%);
 }
 .tile-progress > span { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: var(--color-fg); transition: width .3s ease-out; }
 .tile-progress[data-failed] > span { background: var(--color-err); }
@@ -718,7 +818,7 @@
 /* The installer's progress bar (components/Installer.tsx): a flat track and
    its fill in the accent (red once failed); indeterminate, a short piece
    sliding across. */
-.inst-bar { position: relative; height: 6px; overflow: hidden; border-radius: 3px; background: rgb(255 255 255 / 10%); }
+.inst-bar { position: relative; height: 6px; overflow: hidden; border-radius: 3px; background: --alpha(var(--color-ink) / 10%); }
 .inst-bar > span { position: absolute; inset: 0 auto 0 0; border-radius: 3px; background: var(--color-accent); transition: width .3s ease-out; }
 .inst-bar[data-failed] > span { background: var(--color-err); }
 .inst-bar[data-indeterminate] > span { width: 30% !important; animation: inst-slide 1.3s ease-in-out infinite; }
@@ -730,7 +830,7 @@
    toast. It fades in when the system runs, in place. */
 .dock-tile[data-off] { opacity: .38; cursor: default; }
 .dock-tile[data-off]:hover .dock-face {
-	border-color: rgb(255 255 255 / 7%); background: rgb(0 0 0 / 24%);
+	border-color: --alpha(var(--color-ink) / 7%); background: var(--dock-face-bg);
 	box-shadow: inset 0 1px 0 rgb(255 255 255 / 6%);
 }
 .dock-tile[data-off]:active .dock-face { transform: none; }
@@ -743,10 +843,10 @@
    drawn keyboard (.kbd), or on compact screens a sheet with a list of the
    bound keys (.hud-list). Only the bound keys take the pointer. */
 .hud-panel {
-	border: 1px solid rgb(255 255 255 / 12%); border-radius: 18px;
+	border: 1px solid --alpha(var(--color-ink) / 12%); border-radius: 18px;
 	background: var(--hud-bg);
 	-webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
-	box-shadow: 0 16px 48px rgb(0 0 0 / 45%), 0 2px 8px rgb(0 0 0 / 30%);
+	box-shadow: var(--hud-shadow);
 }
 /* Its width is set (the keyboard inside is sized by it, so it cannot size it):
    the screen's less the gutters, at most the keyboard at its largest keys, and
@@ -756,13 +856,13 @@
 /* A key cap in a line of text (the header, the launcher's hint). */
 .hud-k {
 	display: inline-grid; place-items: center; min-width: 1.6em; height: 1.6em; padding: 0 .4em; border-radius: 5px;
-	border: 1px solid rgb(255 255 255 / 16%); background: rgb(255 255 255 / 8%);
+	border: 1px solid --alpha(var(--color-ink) / 16%); background: --alpha(var(--color-ink) / 8%);
 	font: 500 11px/1 var(--font-mono); color: var(--color-fg);
 }
 /* The groups' colours (keys.ts CommandGroup): a thin bar under a key's word. */
 :is(.kbd, .hud-list) [data-group="term"] { --g: var(--color-ok); }
 :is(.kbd, .hud-list) [data-group="window"] { --g: var(--color-accent); }
-:is(.kbd, .hud-list) [data-group="app"] { --g: rgb(255 255 255 / 50%); }
+:is(.kbd, .hud-list) [data-group="app"] { --g: --alpha(var(--color-ink) / 50%); }
 :is(.kbd, .hud-list) [data-group="machine"] { --g: var(--color-warn); }
 
 /* The drawn keyboard: a container, so its keys are sized by its width (cqi)
@@ -790,12 +890,12 @@
 .kc {
 	position: relative; flex: none;
 	width: calc(var(--w, 1) * var(--kp) - var(--kg)); height: calc(var(--kp) - var(--kg));
-	border-radius: calc(var(--kp) * .16); border: 1px solid rgb(255 255 255 / 6%);
-	background: rgb(255 255 255 / 3.5%); color: rgb(255 255 255 / 30%);
+	border-radius: calc(var(--kp) * .16); border: 1px solid --alpha(var(--color-ink) / 6%);
+	background: --alpha(var(--color-ink) / 3.5%); color: --alpha(var(--color-ink) / 30%);
 }
-.kc[data-held] { border-color: rgb(245 165 36 / 45%); color: var(--color-warn); }
-.kc[data-lit] { border-color: rgb(255 255 255 / 15%); background: rgb(255 255 255 / 11%); color: var(--color-fg); }
-.kc[data-lit="faint"] { border-color: rgb(255 255 255 / 9%); background: rgb(255 255 255 / 6%); color: var(--color-muted); }
+.kc[data-held] { border-color: --alpha(var(--color-warn) / 45%); color: var(--color-warn); }
+.kc[data-lit] { border-color: --alpha(var(--color-ink) / 15%); background: --alpha(var(--color-ink) / 11%); color: var(--color-fg); }
+.kc[data-lit="faint"] { border-color: --alpha(var(--color-ink) / 9%); background: --alpha(var(--color-ink) / 6%); color: var(--color-muted); }
 .kc[data-group]::after {
 	content: ""; position: absolute; left: 30%; right: 30%; bottom: calc(var(--kp) * .07); height: 2px; border-radius: 1px;
 	background: var(--g); opacity: .8; pointer-events: none;
@@ -806,19 +906,19 @@
 	padding: calc(var(--kp) * .14) 3px calc(var(--kp) * .1); border-radius: inherit; color: inherit;
 }
 button.kc-hit { pointer-events: auto; }
-button.kc-hit:hover { background: rgb(255 255 255 / 8%); }
-button.kc-hit:active { background: rgb(255 255 255 / 15%); }
+button.kc-hit:hover { background: --alpha(var(--color-ink) / 8%); }
+button.kc-hit:active { background: --alpha(var(--color-ink) / 15%); }
 .kc-hit > svg { flex: none; width: var(--ki); height: var(--ki); }
 .kc-leg { position: absolute; top: calc(var(--kp) * .07); left: calc(var(--kp) * .11); font: 500 var(--kl)/1 var(--font-mono); white-space: nowrap; opacity: .75; }
 .kc-word { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--kw); line-height: 1.15; }
 /* A shifted key's own command on a cap that has one too (n, and N): a chip in the top right corner. */
 .kc-shift {
 	position: absolute; top: 2px; right: 2px; min-width: calc(var(--kl) + 6px); padding: 1px 3px 2px; border-radius: 4px;
-	background: rgb(255 255 255 / 10%); box-shadow: inset 0 -2px 0 var(--g);
+	background: --alpha(var(--color-ink) / 10%); box-shadow: inset 0 -2px 0 var(--g);
 	font: 500 var(--kl)/1 var(--font-mono); color: var(--color-fg);
 }
 button.kc-shift { pointer-events: auto; }
-button.kc-shift:hover { background: rgb(255 255 255 / 20%); }
+button.kc-shift:hover { background: --alpha(var(--color-ink) / 20%); }
 /* Small keys: the icon alone (a key without an icon keeps its word). */
 @container kbd (max-width: 820px) { .kc[data-icon] .kc-word { display: none; } }
 
@@ -826,10 +926,10 @@ button.kc-shift:hover { background: rgb(255 255 255 / 20%); }
 .hud-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr)); gap: 4px; }
 .hud-item {
 	display: flex; align-items: center; gap: 8px; min-width: 0; height: 40px; padding: 0 8px; border-radius: 10px;
-	background: rgb(255 255 255 / 6%); color: var(--color-fg); font-size: 13px; text-align: left; touch-action: manipulation;
+	background: --alpha(var(--color-ink) / 6%); color: var(--color-fg); font-size: 13px; text-align: left; touch-action: manipulation;
 }
-.hud-item:active { background: rgb(255 255 255 / 14%); }
-.hud-item > kbd { flex: none; min-width: 24px; height: 24px; display: grid; place-items: center; padding: 0 4px; border-radius: 6px; background: rgb(255 255 255 / 12%); box-shadow: inset 0 -2px 0 var(--g); font: 500 12px/1 var(--font-mono); }
+.hud-item:active { background: --alpha(var(--color-ink) / 14%); }
+.hud-item > kbd { flex: none; min-width: 24px; height: 24px; display: grid; place-items: center; padding: 0 4px; border-radius: 6px; background: --alpha(var(--color-ink) / 12%); box-shadow: inset 0 -2px 0 var(--g); font: 500 12px/1 var(--font-mono); }
 .hud-item > svg { flex: none; color: var(--color-muted); }
 
 /* ---- reduced motion ------------------------------------------------------ */
