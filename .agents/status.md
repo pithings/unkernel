@@ -348,13 +348,11 @@ Open:
     Suspend and resume (web.md). A snapshot stays restorable only
     while its disks are unchanged; vsock sessions and guest TCP
     connections do not survive a restore (the guest's ends are reset), but
-    host file systems do, with their open files (inline only; worker-mode
-    snapshots refuse while anything is mounted). Next, roughly in order:
+    host file systems do, with their open files (in worker mode only with
+    `commit`: other worker-mode snapshots refuse while anything is mounted). Next, roughly in order:
     - **Rewind and fork**: restore one snapshot again after the disk moved
       on, or several times. Needs the disk state frozen at the seal, e.g.
       the CowDisk overlay frozen as a read-only layer under a new one.
-    - **Mounts in worker-mode snapshots**: the owner's 9p state would have
-      to be saved at the worker's snapshot point.
     - **Fewer EBUSY refusals**: a job-control-stopped task (^Z) never
       parks, because `arch_do_signal_or_restart` keeps the restart state
       in locals (moving `retval`, `restart_addr` and `continue_addr` into

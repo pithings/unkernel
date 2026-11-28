@@ -216,6 +216,10 @@ export class WorkerKernel implements KernelHandle {
 	#encoder: TextEncoder | undefined;
 	#vsock: VsockHost | undefined;
 	#vsockOut: Uint8Array[] = [];
+	/** Packets sent to the guest (vsockIn of "snapshot-held" counts those the worker had delivered). */
+	#vsockSent = 0;
+	/** createKernel's mounts that a restore did not serve again (restoreMounts()). */
+	#mountsLeft: ReturnType<typeof parseMounts> | undefined;
 	#mounts: MountTable;
 	#commands: CommandTable;
 	#gl: GlHost | undefined;
@@ -287,6 +291,7 @@ export class WorkerKernel implements KernelHandle {
 			};
 			this.#vsock = new VsockHost({
 				send: (pkt) => {
+					this.#vsockSent++;
 					if (this.#vsockOut.push(pkt) === 1) queueMicrotask(flush);
 				},
 				bufferSize: typeof opts.vsock === "object" ? opts.vsock.bufferSize : undefined,
@@ -483,7 +488,7 @@ export class WorkerKernel implements KernelHandle {
 			this.#shm?.detached(m.id);
 			break;
 		case "snapshot-held":
-			this.#commitHeld(m.id, this.#withTtys(m.snapshot));
+			this.#commitHeld(m.id, this.#withTtys(m.snapshot), m.vsockIn);
 			break;
 		case "snapshot-result": {
 			const w = this.#snapshots.get(m.id);
@@ -766,7 +771,18 @@ export class WorkerKernel implements KernelHandle {
 
 	/** @internal createKernel's `mounts`, once the kernel runs. */
 	startMounts(list: ReturnType<typeof parseMounts>): void {
-		this.#mounts.mountAll(list);
+		this.#mounts.mountAll(this.#mountsLeft ?? list);
+	}
+
+	/**
+	 * @internal createKernel({ worker, restore, mounts }), before the worker
+	 * boots: serve the snapshot's mounts again here (their 9p servers run on
+	 * this thread). Returns the connections the restored kernel keeps.
+	 */
+	async restoreMounts(snap: KernelSnapshot, list: ReturnType<typeof parseMounts>): Promise<string[]> {
+		const { keep, rest } = await this.#mounts.restore(snap.devices?.vsock?.mounts, list);
+		this.#mountsLeft = rest;
+		return [...keep];
 	}
 
 	/** Host commands, as inline (commands.ts): the handlers run on this thread. */
@@ -862,13 +878,15 @@ export class WorkerKernel implements KernelHandle {
 	 * Save the machine, as KernelInstance.snapshot(): the worker takes the
 	 * snapshot and transfers it here (its memory is not copied again).
 	 * Resume it with createKernel({ restore }), in worker mode or inline.
-	 * Rejects while host file systems are mounted, as inline.
+	 * Host file systems are kept only with `commit`, while the kernel waits
+	 * at its consistent point (#commitHeld()); otherwise it rejects while
+	 * they are mounted.
 	 */
 	snapshot(opts: SnapshotOptions = {}): Promise<KernelSnapshot> {
 		if (this.#result) return Promise.reject(new Error(`snapshot: the kernel has exited (${this.#result.reason})`));
-		const why = this.#mounts.snapshotBlocker();
-		if (why) return Promise.reject(new Error(`snapshot: ${why}`));
 		const { commit, hold } = opts;
+		const why = this.#mounts.snapshotBlocker(!!commit);
+		if (why) return Promise.reject(new Error(`snapshot: ${why}`));
 		if (commit !== undefined && typeof commit !== "function") return Promise.reject(new TypeError("snapshot: commit must be a function"));
 		if (hold !== undefined && (typeof hold !== "function" || !commit)) return Promise.reject(new TypeError("snapshot: hold must be a function, and needs commit"));
 		const id = this.#nextSync++;
@@ -884,10 +902,26 @@ export class WorkerKernel implements KernelHandle {
 	 * point with `snap`; run the commit here and tell the worker how it went.
 	 * The worker's timeout (commitTimeoutMs) may give the snapshot up first:
 	 * its "snapshot-result" then aborts the signal.
+	 *
+	 * Host file systems are saved here, as VsockDevice.saveState() does inline:
+	 * their 9p servers run on this thread. The guest's side is at the
+	 * consistent point; this side is too unless a request is unanswered
+	 * (snapshotBusy()) or packets for the guest are still on the way to the
+	 * worker (vsockIn: those it had delivered). Then the commit fails and the
+	 * kernel goes on, as with a busy snapshot point inline.
 	 */
-	#commitHeld(id: number, snap: KernelSnapshot): void {
+	#commitHeld(id: number, snap: KernelSnapshot, vsockIn: number): void {
 		const w = this.#snapshots.get(id);
 		if (!w?.commit) return;
+		if (this.#mounts.mounts.size) {
+			const busy = vsockIn !== this.#vsockSent ? `${this.#vsockSent - vsockIn} vsock packets are on the way to the guest` : this.#mounts.snapshotBusy();
+			if (busy) {
+				if (!this.#result) this.#endpoint.post({ t: "snapshot-commit", id, ok: false, error: `host file systems: ${busy}` });
+				return;
+			}
+			const mounts = this.#mounts.save();
+			if (mounts && snap.devices.vsock) snap.devices.vsock = { ...snap.devices.vsock, mounts };
+		}
 		w.held = snap;
 		const abort = (w.abort = new AbortController());
 		void Promise.resolve().then(() => w.commit!(snap, abort.signal)).then(() => {
@@ -987,7 +1021,7 @@ export class WorkerKernel implements KernelHandle {
  * on 2026-11-14 (.agents/js.md, Worker mode), compiling here started the
  * kernel about 20 ms sooner on Node.
  */
-export async function createKernelInWorker(platform: Platform, opts: CreateKernelOptions & { compileInWorker?: boolean; shared?: boolean; transferRestore?: boolean }, progress: (p: BootProgress) => void, gpu?: GpuRenderer): Promise<WorkerKernel> {
+export async function createKernelInWorker(platform: Platform, opts: CreateKernelOptions & { compileInWorker?: boolean; shared?: boolean; transferRestore?: boolean }, progress: (p: BootProgress) => void, gpu?: GpuRenderer, mounts: ReturnType<typeof parseMounts> = []): Promise<WorkerKernel> {
 	const { signal } = opts;
 	const src = opts.kernel ?? platform.defaultKernel();
 	const compileHere = !opts.compileInWorker && !(src instanceof WebAssembly.Module);
@@ -1007,6 +1041,16 @@ export async function createKernelInWorker(platform: Platform, opts: CreateKerne
 		display: opts.display ?? (opts.gpu ? true : undefined), onDisplay: opts.onDisplay, onInput: opts.onInput, sound: opts.sound, soundRing, vsock: opts.vsock ?? true, shm: opts.shm, shared,
 		console: consoleRing, gpu,
 	});
+	// A snapshot's host file systems are served here again before the worker resumes the kernel.
+	let vsockKeep: string[] | undefined;
+	if (opts.restore?.devices?.vsock?.mounts?.mounts.length) {
+		try {
+			vsockKeep = await vm.restoreMounts(opts.restore, mounts);
+		} catch (e) {
+			vm.abandon((e as Error)?.message ?? String(e));
+			throw new BootError("boot", `snapshot: host file systems: ${(e as Error)?.message ?? e}`, { cause: e });
+		}
+	}
 	let spec: WorkerBootSpec, transfer: ArrayBuffer[];
 	try {
 		let kernel: WorkerSource | WebAssembly.Module, kernelTransfer: ArrayBuffer[] = [], compileMs: number | undefined;
@@ -1046,6 +1090,7 @@ export async function createKernelInWorker(platform: Platform, opts: CreateKerne
 			shared,
 			console: consoleRing,
 			restore,
+			vsockKeep,
 			profile: opts.profile === true ? {} : opts.profile || undefined,
 		};
 		transfer = [...kernelTransfer, ...initrdTransfer, ...diskTransfer, ...restoreTransfer];

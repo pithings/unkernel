@@ -2112,7 +2112,7 @@ describe("api", { concurrency: CONCURRENCY }, () => {
 		await until("a closed attached session's shell exits", async () => !(await alive(vm3, d.pid)));
 	});
 
-	test("snapshot() with host file systems: the mounts and a process's open files on them survive; a file deleted on the host meanwhile answers ESTALE; refused without the mounts and in worker mode",
+	test("snapshot() with host file systems: the mounts and a process's open files on them survive; a file deleted on the host meanwhile answers ESTALE; refused without the mounts",
 		{ skip: !kernelHasVsock && "the kernel under test has no kwvsock" }, async (t) => {
 		const dir = mkdtempSync(path.join(tmpdir(), "unkernel-api-"));
 		t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -2141,7 +2141,6 @@ describe("api", { concurrency: CONCURRENCY }, () => {
 
 		await assert.rejects(boot(t, { log: () => {}, restore: snap }), /snapshot: the snapshot has a host file system at \/mnt\/[hm], which this machine is not given/);
 		await assert.rejects(boot(t, { log: () => {}, restore: snap, mounts: { ...mounts(), "/mnt/m": { fs: mem, readOnly: true } } }), /\/mnt\/m is not read-only in the snapshot/);
-		await assert.rejects(boot(t, { log: () => {}, restore: snap, mounts: mounts(), worker: true }), /resume inline only/);
 		const vm2 = await boot(t, { log: () => {}, restore: snap, mounts: mounts() });
 		assert.ok(vm2 instanceof sdk.KernelInstance);
 		assert.deepEqual([...vm2.mounts.keys()].sort(), ["/mnt/h", "/mnt/m"]);
@@ -2162,6 +2161,54 @@ describe("api", { concurrency: CONCURRENCY }, () => {
 		assert.equal(mem.readText("/g.txt"), "guest\n", "the MemoryFs passed again has the guest's write from before the snapshot");
 		await vm2.mounts.get("/mnt/m")!.unmount();
 		assert.equal(existsSync(path.join(dir, "new.txt")), true);
+		vm2.write("poweroff\n");
+		assert.equal((await vm2.exited).code, 0);
+	});
+
+	test("worker mode: snapshot({ commit }) keeps host file systems, and a process's open file on them, resumed in a worker; refused without commit",
+		{ skip: !kernelHasVsock && "the kernel under test has no kwvsock" }, async (t) => {
+		const dir = mkdtempSync(path.join(tmpdir(), "unkernel-api-"));
+		t.after(() => rmSync(dir, { recursive: true, force: true }));
+		writeFileSync(path.join(dir, "held.txt"), "");
+		const mem = new MemoryFs({ "m.txt": "memory\n" });
+		const mounts = () => ({ "/mnt/h": nodeFs(dir), "/mnt/m": mem });
+		const vm = await boot(t, { worker: true, log: () => {}, mounts: mounts() });
+		assert.ok(vm instanceof sdk.WorkerKernel);
+		const a = screen(vm);
+		await a.waitFor(PROMPT);
+		await vm.exec("true"); // createKernel's mounts are done
+		await assert.rejects(vm.snapshot({ stop: true }), /host file systems are mounted \(\/mnt\/h, \/mnt\/m\); unmount them first, or take it with commit/);
+		vm.write("echo guest > /mnt/m/g.txt; (exec 3<>/mnt/h/held.txt; echo before >&3; " +
+			"while [ ! -e /tmp/go ]; do usleep 20000; done; echo after >&3; echo done > /tmp/done) & echo held-ready\n");
+		await a.waitFor(/held-ready/);
+		for (let i = 0; readFileSync(path.join(dir, "held.txt"), "utf8") !== "before\n"; i++) {
+			if (i > 200) assert.fail("the guest's first write did not arrive");
+			await new Promise((r) => setTimeout(r, 25));
+		}
+		// A commit fails while a 9p request or a packet for the guest is on the way (the kernel goes on): try again.
+		let snap: Awaited<ReturnType<typeof vm.snapshot>> | undefined;
+		for (let i = 0; !snap; i++) {
+			try {
+				await vm.snapshot({ commit: (s) => { snap = sdk.decodeSnapshot(sdk.encodeSnapshot(s)); } });
+			} catch (e) {
+				if (!(e instanceof sdk.SnapshotCommitError) || i >= 20) throw e;
+			}
+		}
+		assert.equal((await vm.exited).kind, "stopped");
+		assert.deepEqual(snap.devices.vsock?.mounts?.mounts.map((m) => m.path).sort(), ["/mnt/h", "/mnt/m"]);
+
+		const vm2 = await boot(t, { worker: true, log: () => {}, restore: snap, mounts: mounts() });
+		assert.ok(vm2 instanceof sdk.WorkerKernel);
+		assert.deepEqual([...vm2.mounts.keys()].sort(), ["/mnt/h", "/mnt/m"]);
+		await vm2.exec("touch", ["/tmp/go"]);
+		let out = "";
+		for (let i = 0; !/done/.test(out); i++) {
+			if (i > 100) assert.fail(`the process did not finish: ${out}`);
+			await new Promise((r) => setTimeout(r, 50));
+			out = (await vm2.exec("sh", ["-c", "cat /tmp/done 2>/dev/null; true"])).stdout;
+		}
+		assert.equal(readFileSync(path.join(dir, "held.txt"), "utf8"), "before\nafter\n", "a write through a file open across the restore, at its offset");
+		assert.equal((await vm2.exec("cat", ["/mnt/m/g.txt", "/mnt/m/m.txt"])).stdout, "guest\nmemory\n");
 		vm2.write("poweroff\n");
 		assert.equal((await vm2.exited).code, 0);
 	});

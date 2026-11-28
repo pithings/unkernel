@@ -66,7 +66,7 @@ export interface CreateKernelOptions {
 	 * TCP connections do not survive: the guest's ends are reset, except
 	 * detachable terminal sessions (spawn() with `detachable`), which the
 	 * guest keeps detached for attach() (the snapshot's `ttys`). Host file
-	 * systems do (inline only): `mounts` must give one for each mount path
+	 * systems do (in worker mode from a snapshot({ commit })): `mounts` must give one for each mount path
 	 * in the snapshot, read-only as it was, and the guest's open files on
 	 * it are opened again by path (a file gone meanwhile answers ESTALE);
 	 * nothing of their files is in the snapshot. Other `mounts` are
@@ -303,7 +303,12 @@ export interface VsockOption {
 	 * payload) go to `onPacket` instead of the SDK's protocol, and `vsock`
 	 * on the instance is undefined; send with kernel.vsock.deliver().
 	 */
-	raw?: { onPacket: (pkt: Uint8Array) => void; onInit?: (guestCid: number, rxMax: number) => void };
+	raw?: {
+		onPacket: (pkt: Uint8Array) => void;
+		onInit?: (guestCid: number, rxMax: number) => void;
+		/** @internal Worker mode: the connections (`guestPort:hostPort`) a restored kernel keeps, its owner's host file systems'. */
+		keep?: readonly string[];
+	};
 }
 
 /**
@@ -987,9 +992,10 @@ export async function createKernelOn(platform: Platform, opts: CreateKernelOptio
 	const mounts = parseMounts(opts.mounts, !!vopt && !raw);
 	const commands = parseCommands(opts.commands, !!vopt && !raw);
 	const savedMounts = opts.restore?.devices?.vsock?.mounts;
-	if (savedMounts?.mounts.length && (opts.worker || raw))
-		throw new BootError("boot", `snapshot: it has host file systems (${savedMounts.mounts.map((m) => m.path).join(", ")}), which resume inline only (not in worker mode or with vsock.raw)`);
-	const mountsWhy = opts.restore && snapshotMountMismatch(savedMounts, mounts);
+	// The worker's kernel (raw) resumes them with the connections its owner serves them on (keep).
+	if (savedMounts?.mounts.length && raw && !raw.keep)
+		throw new BootError("boot", `snapshot: it has host file systems (${savedMounts.mounts.map((m) => m.path).join(", ")}), which do not resume with vsock.raw`);
+	const mountsWhy = opts.restore && !raw && snapshotMountMismatch(savedMounts, mounts);
 	if (mountsWhy) throw new BootError("boot", `snapshot: ${mountsWhy}`);
 	// gl (and gpu): before the boot, as the device offers virgl when the driver probes; the renderer
 	// itself loads on the guest's first GL use unless gl.eager (gl.ts).
@@ -1000,7 +1006,7 @@ export async function createKernelOn(platform: Platform, opts: CreateKernelOptio
 	const vaPrep = prepareVa(opts.va, !!vopt && !raw, opts.log ?? ((m: string) => console.error(m)));
 	if (opts.worker) {
 		checkWorkerOptions(platform, opts);
-		const vm = await createKernelInWorker(platform, opts, progress, glPrep?.gpu);
+		const vm = await createKernelInWorker(platform, opts, progress, glPrep?.gpu, mounts);
 		vm.startMounts(mounts);
 		vm.startCommands(commands);
 		vm.attachGl(startGl(glPrep, vm.vsock, opts.log ?? ((m: string) => console.error(m))));
@@ -1101,6 +1107,7 @@ export async function createKernelOn(platform: Platform, opts: CreateKernelOptio
 	instance.distro = distro?.disk.info;
 	instance.own(owned);
 	if (opts.consoleSize) kernel.setConsoleSize(opts.consoleSize.cols, opts.consoleSize.rows);
+	if (raw?.keep) kernel.vsock.keep = new Set(raw.keep);
 	let rest = mounts;
 	if (opts.restore && vsock) {
 		try {

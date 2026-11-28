@@ -90,6 +90,11 @@ export interface WorkerBootSpec {
 	 * the spec and checks them against it, as inline.
 	 */
 	restore?: KernelSnapshot;
+	/**
+	 * The vsock connections (`guestPort:hostPort`) the restored kernel keeps:
+	 * those of the host file systems the owner serves again (MountTable.restore()).
+	 */
+	vsockKeep?: string[];
 	/** Sample guest pcs (CreateKernelOptions.profile); the worker starts the sampler thread itself. */
 	profile?: ProfileOptions;
 }
@@ -234,9 +239,10 @@ export type FromWorker =
 	/**
 	 * A "snapshot" with `commit` at the kernel's consistent point, its disks
 	 * durable: the snapshot (memory transferred) for the owner to commit; the
-	 * kernel waits for "snapshot-commit".
+	 * kernel waits for "snapshot-commit". `vsockIn`: the vsock packets the
+	 * worker had delivered to the kernel by then, of those the owner sent.
 	 */
-	| { t: "snapshot-held"; id: number; snapshot: KernelSnapshot }
+	| { t: "snapshot-held"; id: number; snapshot: KernelSnapshot; vsockIn: number }
 	/**
 	 * The answer to "snapshot": the snapshot (its memory transferred; none
 	 * after "snapshot-held", whose snapshot it confirms), or why it failed

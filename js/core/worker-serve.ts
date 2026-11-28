@@ -29,7 +29,7 @@
 
 import { diskState, type DeviceRegistry, type DiskState } from "./devices.ts";
 import { createKernelOn, type InstanceStats, type KernelInstance, type Platform } from "./instance.ts";
-import type { ExitResult } from "./kernel.ts";
+import type { ExitResult, Kernel } from "./kernel.ts";
 import { CowDisk, type BlockDevice } from "./block.ts";
 import { BootError } from "./load.ts";
 import type { DisplayMode, DisplaySize } from "./display.ts";
@@ -186,6 +186,13 @@ export function serveKernel(port: WorkerPort, options: ServeKernelOptions = {}):
 		vsockBytes = 0;
 		if (packets.length) post({ t: "vsock", packets }, packets.map((p) => p.buffer as ArrayBuffer));
 	};
+	// The owner's packets delivered to the kernel, for a commit to check that none is on the way
+	// (a snapshot with host file systems, whose 9p servers run on the owner).
+	let vsockIn = 0;
+	const deliverVsock = (kernel: Kernel, pkt: Uint8Array) => {
+		vsockIn++;
+		kernel.vsock.deliver(pkt);
+	};
 	const onVsockPacket = (pkt: Uint8Array) => {
 		vsockBytes += pkt.length;
 		if (vsockOut.push(pkt) === 1) queueMicrotask(flushVsock);
@@ -320,7 +327,7 @@ export function serveKernel(port: WorkerPort, options: ServeKernelOptions = {}):
 				onInput: spec.display ? (s) => post({ t: "input-state", mask: (s.keyboard ? 1 : 0) | (s.mouse ? 2 : 0) | (s.tablet ? 4 : 0) }) : undefined,
 				sound: sound ?? false,
 				// The protocol (VsockHost) runs on the owner; this side passes the packets.
-				vsock: spec.vsock ? { raw: { onPacket: onVsockPacket, onInit: (guestCid, rxMax) => post({ t: "vsock-ready", guestCid, rxMax }) } } : false,
+				vsock: spec.vsock ? { raw: { onPacket: onVsockPacket, onInit: (guestCid, rxMax) => post({ t: "vsock-ready", guestCid, rxMax }), keep: spec.vsockKeep } } : false,
 				shm: !!spec.shm,
 				gpu: !!spec.gpu,
 				gpuBackend: spec.gpu === "virgl" ? new VirglGpuBackend(gpuLink, (msg) => post({ t: "log", msg })) : undefined,
@@ -351,7 +358,7 @@ export function serveKernel(port: WorkerPort, options: ServeKernelOptions = {}):
 		}
 		shared?.attach({
 			kernel: vm.kernel, write: (bytes) => vm.write(bytes), resize: (cols, rows) => vm.resize(cols, rows), evdev: vm.evdev,
-			vsock: spec.vsock ? (pkt) => vm.kernel.vsock.deliver(pkt) : undefined,
+			vsock: spec.vsock ? (pkt) => deliverVsock(vm.kernel, pkt) : undefined,
 			shmRead: spec.shm ? (seq, id, offset, length) => {
 				// Inside the clock import (or a kick): a copy now, the bytes transferred.
 				let data: Uint8Array;
@@ -464,7 +471,7 @@ export function serveKernel(port: WorkerPort, options: ServeKernelOptions = {}):
 					reject(signal.reason as Error);
 				}, { once: true });
 				try {
-					post({ t: "snapshot-held", id, snapshot: sentSnapshot(snap) }, snapshotTransfer(snap.memory));
+					post({ t: "snapshot-held", id, snapshot: sentSnapshot(snap), vsockIn }, snapshotTransfer(snap.memory));
 				} catch (e) {
 					commits.delete(id);
 					reject(new Error(`the snapshot could not be posted: ${(e as Error)?.message ?? e}`));
@@ -550,7 +557,7 @@ export function serveKernel(port: WorkerPort, options: ServeKernelOptions = {}):
 			sound?.report(msg.seq, msg.frames, msg.at);
 			break;
 		case "vsock":
-			if (instance) for (const p of msg.packets) instance.kernel.vsock.deliver(p);
+			if (instance) for (const p of msg.packets) deliverVsock(instance.kernel, p);
 			shared?.vsockAck();
 			break;
 		case "shm": {

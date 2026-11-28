@@ -256,7 +256,7 @@ export class MountTable {
 	 */
 	snapshotBlocker(keep = false): string | undefined {
 		if (this.#boot) return "createKernel's mounts are still being mounted";
-		if (!keep && this.#mounts.size) return `host file systems are mounted (${[...this.#mounts.keys()].join(", ")}); unmount them first (only an inline instance's snapshot keeps them)`;
+		if (!keep && this.#mounts.size) return `host file systems are mounted (${[...this.#mounts.keys()].join(", ")}); unmount them first, or take it with commit (a worker's snapshot keeps them only then)`;
 		for (const h of this.#mounts.values()) if (h.state !== "mounted") return `${h.path} is being ${h.state === "mounting" ? "mounted" : "unmounted"}`;
 		return undefined;
 	}

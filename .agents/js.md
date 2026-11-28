@@ -177,8 +177,8 @@ parts that are easy to get wrong.
   snapshot, when a task does not park (the error names it), when block,
   net, vsock or shm queues are not empty at that point, or a 9p request
   is in flight (`VsockDevice.blocker()`), and while a mount or unmount
-  runs (`MountTable.snapshotBlocker()`; in worker mode while anything is
-  mounted, Host file systems below).
+  runs (`MountTable.snapshotBlocker()`; in worker mode also while anything
+  is mounted, unless the snapshot has `commit`: Host file systems below).
   `createKernel({ restore })` checks the CPU count
   (`snapshotCpuMismatch()`: every task resumes on the CPU it ran on, so a
   snapshot needs exactly its own count; `cpus` defaults to the
@@ -273,10 +273,10 @@ parts that are easy to get wrong.
   `test/api.test.ts` restores glimmer mid-test (picture, open devices,
   stream, a key) and a machine with network and vsock (old sessions end;
   wget, exec() and fetch() work after).
-- Host file systems in snapshots (inline only; mounts.ts, 9p.ts): the 9p
-  server runs on the kernel's thread, so `VsockDevice.saveState()` saves
-  the mounts at the snapshot point (`VsockSnapshot.mounts`:
-  `MountTable.save()`). Every guest task is parked and a 9p request holds
+- Host file systems in snapshots (mounts.ts, 9p.ts; in worker mode with
+  `commit`, below): inline the 9p server runs on the kernel's thread, so
+  `VsockDevice.saveState()` saves the mounts at the snapshot point
+  (`VsockSnapshot.mounts`: `MountTable.save()`). Every guest task is parked and a 9p request holds
   its task (killable wait) until answered, so the sessions are quiet
   there; one that is not (`MountTable.snapshotBusy()`, through
   `VsockDevice.hostBusy`) makes the snapshot point busy. Per mount: its
@@ -286,10 +286,12 @@ parts that are easy to get wrong.
   listing being read). The files are not copied: `createKernel({
   restore, mounts })` must give a file system for each saved path,
   read-only as saved (`snapshotMountMismatch()`, checked before boot;
-  worker mode and `vsock.raw` refuse such a snapshot). Before the kernel
+  `vsock.raw` refuses such a snapshot). Before the kernel
   runs, `MountTable.restore()` serves each under the saved name on the
   connection `VsockHost.adopt()` takes over, opens the open files again
-  by path (`Session.restore()`) and sets `VsockDevice.keep`; other given
+  by path (`Session.restore()`) and sets `VsockDevice.keep` (in worker
+  mode on the owner, before it posts "boot": `WorkerBootSpec.vsockKeep`
+  reaches the worker's device through its `vsock.raw.keep`); other given
   mounts are mounted once the kernel runs. A file gone, another file now
   (another qid.path), unlinked or replaced by the guest while open
   (`Fid.orphan`; also when a hard link still names it, since the restore
@@ -407,8 +409,16 @@ parts that are easy to get wrong.
   write the store; `exportDisk(i)` returns `CowDisk.exportParts()`.
 - Snapshots in worker mode: `WorkerKernel.snapshot()` checks the mounts
   here (the 9p servers run on the owner, which the worker's snapshot
-  point cannot save, so it refuses while anything is mounted) and posts
-  `snapshot`; the worker
+  point cannot save, so it refuses while anything is mounted unless the
+  snapshot has `commit`) and posts `snapshot`. With `commit` the owner
+  saves the mounts in `#commitHeld()`, while the kernel waits at its
+  consistent point: the guest's side is quiet there, and the owner's is
+  unless a request is unanswered (`MountTable.snapshotBusy()`) or packets
+  it sent have not reached the kernel yet (the worker counts those it
+  delivered, `snapshot-held`'s `vsockIn`, against the owner's count);
+  either fails the commit, and the kernel goes on (a SnapshotCommitError,
+  as a busy snapshot point inline). `test/api.test.ts` saves a held open
+  file and resumes it in a worker. The worker
   runs `KernelInstance.snapshot()` and answers `snapshot-result` with the
   memory transferred (no second copy; shared from 2 GiB). Every `snapshot` is answered before
   `exit`: the exit waits for the snapshots in progress (at most 60 s of
