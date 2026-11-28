@@ -60,6 +60,7 @@ const pick = (name: string, v: string) => (name === "font" ? KW.ui!.setFont(v)
 	: name === "termtheme" ? KW.ui!.setTermTheme(v)
 	: name === "termglass" ? KW.ui!.setTermGlass(v)
 	: KW.ui!.setOption(name as keyof Opts, v as never));
+type FieldName = keyof Opts | "theme" | "termtheme" | "termglass";
 
 function Field({ label, wide, hidden, id, children }: { label: string; wide?: boolean; hidden?: boolean; id?: string; children: ReactNode }) {
 	return (
@@ -75,7 +76,7 @@ function Field({ label, wide, hidden, id, children }: { label: string; wide?: bo
  * A forced box is shown ticked and disabled, its stored value kept (Worker thread with several CPUs);
  * a blocked one unticked and disabled, its stored value kept (Guest GL with another distro).
  */
-function Check({ id, name, on, off, value, label, note, forced, blocked }: { id: string; name: string; on: string; off: string; value: string; label: string; note?: string; forced?: boolean; blocked?: boolean }) {
+function Check({ id, name, on, off, value, label, note, forced, blocked }: { id: string; name: FieldName; on: string; off: string; value: string; label: string; note?: string; forced?: boolean; blocked?: boolean }) {
 	const checked = !blocked && (forced || value === on);
 	const locked = forced || blocked;
 	return (
@@ -93,7 +94,7 @@ function Check({ id, name, on, off, value, label, note, forced, blocked }: { id:
 }
 
 /** (•) one of several. */
-function Radio({ id, name, value, current, label }: { id: string; name: string; value: string; current: string; label: string }) {
+function Radio({ id, name, value, current, label }: { id: string; name: FieldName; value: string; current: string; label: string }) {
 	const checked = value === current;
 	return (
 		<label className="flex cursor-pointer items-center gap-1.5 text-muted select-none hover:text-fg">

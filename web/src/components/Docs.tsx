@@ -11,7 +11,8 @@
 //   raises and focuses the window; the WM's focus moves the DOM focus to the
 //   root, and losing it gives it up, so keys reach no terminal under it.
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { DOCS_EMBED_URL, DOCS_URL, docsHome, docsNav$, onPageTheme, pageTheme } from "../docs.ts";
+import { DOCS_EMBED_URL, DOCS_URL, docsHome, docsNav$ } from "../docs.ts";
+import { useStore } from "../store.ts";
 import { useWm, wm } from "../wm.ts";
 import { DocsIcon, ExternalIcon } from "./icons.tsx";
 
@@ -24,7 +25,7 @@ const CREDENTIALLESS = { credentialless: "" } as Record<string, string>;
 
 export function Docs({ id }: { id: string }) {
 	const { nav } = useSyncExternalStore(docsNav$.subscribe, docsNav$.get);
-	const theme = useSyncExternalStore(onPageTheme, pageTheme);
+	const theme = useStore((s) => s.shownTheme);
 	const focused = useWm((s) => s.focused === id);
 	const [loading, setLoading] = useState(true);
 	const root = useRef<HTMLDivElement>(null);

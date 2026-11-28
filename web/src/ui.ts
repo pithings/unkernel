@@ -63,7 +63,6 @@ const SUSPEND_TOAST_MS = 20000;
 
 const padLayout = (v: string | null): PadLayout => (v === "keys" ? v : "gamepad");
 const themePref = (v: string | null): UiState["theme"] => (v === "dark" || v === "light" ? v : "auto");
-const termThemePref = (v: string | null): UiState["termTheme"] => (v === "dark" || v === "light" ? v : "auto");
 const termGlassPref = (v: string | null): UiState["termGlass"] => (v === "off" ? v : "on");
 
 interface BrowserInfo { name: string; v: number; ios?: boolean }
@@ -168,7 +167,7 @@ export function createUi(cfg: Config) {
 			: null,
 		distro: cfg.distro ? { name: cfg.distro.name, image: cfg.distro.imageId ?? "", url: cfg.distro.url } : null,
 		ctrl: false, keysOn: false, pasteOpen: false, ask: null, paused: false, prefix: false,
-		fontPref, fontSize: cfg.fontSize, theme: themePref(store("theme")), termTheme: termThemePref(store("termtheme")), termGlass: termGlassPref(store("termglass")), copyText: null,
+		fontPref, fontSize: cfg.fontSize, theme: themePref(store("theme")), shownTheme: "dark", termTheme: themePref(store("termtheme")), termGlass: termGlassPref(store("termglass")), copyText: null,
 		display: { attached: false, width: 0, height: 0, keyboard: false, mouse: false, tablet: false,
 			rotate: store("fbRotate") === "1", layout: padLayout(store("padLayout")),
 			touchMode: store("touchMode") === "trackpad" ? "trackpad" : "mouse",
@@ -187,6 +186,7 @@ export function createUi(cfg: Config) {
 		const pref = $.get().theme;
 		const theme = pref === "auto" ? (lightScheme.matches ? "light" : "dark") : pref;
 		document.documentElement.dataset.theme = theme;
+		$.set({ shownTheme: theme });
 		document.querySelector('meta[name="theme-color"]')?.setAttribute("content", theme === "light" ? "#ffffff" : "#000000");
 		document.querySelector('meta[name="color-scheme"]')?.setAttribute("content", theme);
 		showTermTheme();
@@ -546,7 +546,7 @@ export function createUi(cfg: Config) {
 			showTheme();
 		},
 		setTermTheme(pref: string) {
-			const termTheme = termThemePref(pref);
+			const termTheme = themePref(pref);
 			store("termtheme", termTheme);
 			$.set({ termTheme });
 			showTermTheme();

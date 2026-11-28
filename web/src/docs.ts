@@ -40,14 +40,8 @@ const THEME = {
 	light: { m: "l", bg: "transparent", fg: "#171717", c: "rgb(0 0 0 / 4%)", mu: "#f2f2f2", muf: "#525252", bd: "#ebebeb", p: "#0068d6", pf: "#ffffff", br: "#0068d6", r: "0.5rem" },
 };
 const embedUrl = (theme: object) => `${DOCS_URL}#~${btoa(JSON.stringify(theme)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")}`;
-/** DOCS_URL with THEME as its fragment: what the iframe loads. */
+/** DOCS_URL with a THEME as its fragment, one per page theme: what the iframe loads. */
 export const DOCS_EMBED_URL = { dark: embedUrl(THEME.dark), light: embedUrl(THEME.light) };
-export const pageTheme = (): "dark" | "light" => (document.documentElement.dataset.theme === "light" ? "light" : "dark");
-export function onPageTheme(cb: () => void): () => void {
-	const o = new MutationObserver(cb);
-	o.observe(document.documentElement, { attributeFilter: ["data-theme"] });
-	return () => o.disconnect();
-}
 /** The window's WM id (its body's root is #docs). */
 export const DOCS_WIN = "docs";
 /** Its Dock tile's element id while it is open. */

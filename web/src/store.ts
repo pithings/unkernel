@@ -171,6 +171,7 @@ export interface UiState {
 	fontPref: string;
 	fontSize: number;
 	theme: "auto" | "dark" | "light";
+	shownTheme: "dark" | "light";
 	termTheme: "auto" | "dark" | "light";
 	termGlass: "on" | "off";
 	/** The Copy diagnostics fallback text, shown when the clipboard is unavailable. */
