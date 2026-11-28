@@ -115,7 +115,7 @@ export default {
 		"samples/unkernel.txt": UNKERNEL,
 		"samples/planets.csv": PLANETS,
 	},
-	packages: { alpine: ["mc"], debian: ["mc"] },
+	packages: { alpine: ["mc"], arch: ["mc"], debian: ["mc"] },
 	terminal: "window",
 	commands: [
 		"tar czf samples.tar.gz samples",

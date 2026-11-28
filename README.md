@@ -685,7 +685,7 @@ zig build test          # emulator tests
 ```
 
 The build makes the kernel bundle `vendor/build/bundle/unkernel.wasm` and
-the distro images `vendor/build/distro/{alpine,debian}.erofs` with their
+the distro images `vendor/build/distro/{alpine,arch,debian}.erofs` with their
 index `distros.json`; a source checkout uses those and never downloads
 them. [guest/README.md](guest/README.md) describes the base system and how
 to add a distro.

@@ -77,7 +77,7 @@ export default {
 		"stats.sh": { content: STATS, mode: 0o755 },
 		"README": README,
 	},
-	packages: { alpine: ["tmux", "htop"], debian: ["tmux", "htop"] },
+	packages: { alpine: ["tmux", "htop"], arch: ["tmux", "htop"], debian: ["tmux", "htop"] },
 	terminal: "window",
 	commands: [
 		"tmux has-session -t demo 2>/dev/null || ./layout.sh",

@@ -124,6 +124,8 @@ distro_images() {
 			# only the structure).
 			rm -rf "$distro_out/$name.erofs.x"
 			"$bin/fsck.erofs" --extract="$distro_out/$name.erofs.x" --no-preserve "$distro_out/$name.erofs.tmp" >/dev/null
+			# A mode the owner cannot read (4710 root:dbus) would stop diff.
+			chmod -R u+rwX "$distro_out/$name.erofs.x"
 			diff -r --no-dereference "$stage" "$distro_out/$name.erofs.x" >&2 ||
 				{ echo "distro: $name.erofs does not read back as $stage" >&2; exit 1; }
 			rm -rf "$distro_out/$name.erofs.x"

@@ -15,7 +15,7 @@ export default {
 	colors: ["#3f3f46", "#09090b"],
 	needs: { net: true },
 	// The shim is on both distros; nothing to install first.
-	packages: { alpine: [], debian: [] },
+	packages: { alpine: [], arch: [], debian: [] },
 	terminal: "window",
 	commands: ["fx"],
 } satisfies TerminalApp;

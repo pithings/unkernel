@@ -3,8 +3,8 @@
 #
 # Release: build everything from source (patched wasm-ld, the UP and SMP
 # kernels, the data disk template, the base bundle unkernel.wasm with its
-# SMP patch, the distro images alpine.erofs and debian.erofs and their
-# index distros.json), the guest GL renderer (gl/wasm, virgl.wasm) and
+# SMP patch, the distro images alpine.erofs, arch.erofs and debian.erofs and
+# their index distros.json), the guest GL renderer (gl/wasm, virgl.wasm) and
 # the guest Vulkan renderer's translator (vk/naga, kwvk-naga.wasm),
 # smoke-test it, build and pack the npm package (the base bundle, the
 # GL renderer and the translator, no distro image), and for a release publish it to npm
@@ -43,8 +43,8 @@
 #   kernel-out  the UP and SMP kernel build directories, reused only with
 #               the same tree (same patches, clang and fake-llvm wrapper), so
 #               Kbuild rebuilds incrementally and never from a different source
-#   downloads   Binaryen, the base's busybox, the Alpine and Debian root file
-#               systems, erofs-utils, lz4 and zstd (checksums are verified
+#   downloads   Binaryen, the base's busybox, the Alpine, Arch and Debian root
+#               file systems, erofs-utils, lz4 and zstd (checksums are verified
 #               anyway); key: env.sh, build.sh and the guest's pins
 #               (guest/**/pins.sh)
 #   zig, pnpm   by their setup actions
@@ -287,10 +287,12 @@ jobs:
           ls -l vendor/build/bundle/unkernel.wasm vendor/build/initramfs/base.cpio vendor/build/initramfs/base-test.cpio
           sha256sum vendor/build/bundle/unkernel.wasm
 
-      # alpine.erofs and debian.erofs (and .ext4, not released), their ids
-      # and distros.json, after the base bundle: the Debian image boots on it
-      # to make apt's source cache, and distros.json takes its ABI and base
-      # id from it. Network only for the pinned downloads.
+      # alpine.erofs, arch.erofs and debian.erofs (and .ext4, not released),
+      # their ids and distros.json, after the base bundle: the Debian image boots
+      # on it to make apt's source cache, the Arch image to upgrade itself from
+      # its mirror (not pinned: a release carries the packages of its build), and
+      # distros.json takes its ABI and base id from it. Network for the pinned
+      # downloads, and for the Arch image's packages.
       - name: Build the distro images
         run: |
           kernel/build.sh distro 2>&1 | tee distro.log
@@ -308,7 +310,7 @@ jobs:
             if (j.abi !== want) fail(`abi ${j.abi}, include/kw_emu.h has ${want}`);
             if (!j.base) fail("no base id");
             const names = j.distros.map((d) => d.name).sort().join(",");
-            if (names !== "alpine,debian") fail(`distros ${names}, expected alpine,debian`);
+            if (names !== "alpine,arch,debian") fail(`distros ${names}, expected alpine,arch,debian`);
             for (const d of j.distros) {
               if (!/^[a-z0-9]+\.erofs$/.test(d.file)) fail(`${d.name}: ${d.file} is not an erofs image`);
               const b = fs.readFileSync(`vendor/build/distro/${d.file}`);

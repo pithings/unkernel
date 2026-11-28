@@ -362,7 +362,7 @@ export default {
 		"README.md": README,
 		"hello.c": HELLO,
 	},
-	packages: { alpine: ["neovim"], debian: ["neovim"] },
+	packages: { alpine: ["neovim"], arch: ["neovim"], debian: ["neovim"] },
 	terminal: "window",
 	commands: ['XDG_CONFIG_HOME="$PWD/config" nvim'],
 } satisfies TerminalApp;

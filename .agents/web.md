@@ -2176,7 +2176,7 @@ apps are Wayland windows (Wayland desktop, above).
 The page ships no assets for terminal apps, so one is text only
 (`TerminalApp`, `launcher.ts` described at its top). `launch()` first
 checks in one `vm.exec()` what is missing: the `packages` it names for
-this boot's distro (`{ alpine, debian }`) not installed yet, and
+this boot's distro (`{ alpine, arch, debian }`) not installed yet, and
 `downloads` not in the guest (unless their `unless` test passes). With
 nothing missing the app starts at once. Else its installer does the
 preparation out of sight (`installer.ts`, `Installer.tsx`, both described
@@ -2201,9 +2201,9 @@ launch with a dynamic import, which keeps their text out of the page's
 main chunk), a generated `run.sh` and, when it has packages,
 `install.sh`; the downloads; then `install.sh` on pipes (`vm.spawn()`, no
 terminal) in a login shell: on Alpine `/etc/kw-apk-enable` when the app
-sets `community`, then `apk add`; on Debian `apt-get install`, again
-after `apt-get update` when the baked lists name a version the mirror
-dropped. `run.sh` runs `./install.sh` first too (a no-op once installed,
+sets `community`, then `apk add`; on Arch `pacman -S` and on Debian
+`apt-get install`, again after `pacman -Sy` or `apt-get update` when the
+baked lists name a version the mirror dropped. `run.sh` runs `./install.sh` first too (a no-op once installed,
 so the app's terminal shows only the app; it installs again when the
 user removed something), then the `commands`, each printed before it
 runs, under `set -e`. The files, the scripts and the terminal are the

@@ -18,7 +18,7 @@ export default {
 	colors: ["#d97757", "#4a1f12"],
 	needs: { net: true },
 	// The shim is on both distros; nothing to install first.
-	packages: { alpine: [], debian: [] },
+	packages: { alpine: [], arch: [], debian: [] },
 	terminal: "window",
 	commands: [
 		"echo 'The first run installs Claude Code into ~/.local/bin (about 130 MB to download, 360 MB on disk)'",

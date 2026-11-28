@@ -44,7 +44,7 @@ distro_unpack() {
 	stage="$distro_out/$name-root"
 	rm -rf "$stage"
 	mkdir -p "$stage"
-	tar -xzf "${!t}" -C "$stage" --no-same-owner
+	tar -xzf "${!t}" -C "$stage" --no-same-owner --delay-directory-restore
 	chmod -R u+rwX "$stage"
 	echo "$name" > "$stage/usr/lib/kw-distro"
 }

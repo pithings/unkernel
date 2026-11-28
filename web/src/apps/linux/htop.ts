@@ -13,7 +13,7 @@ export default {
 	icon: { svg: '<g opacity=".35"><rect x="2" y="3.3" width="20" height="4.4" rx="1.4"/><rect x="2" y="9.8" width="20" height="4.4" rx="1.4"/><rect x="2" y="16.3" width="20" height="4.4" rx="1.4"/></g><rect x="2" y="3.3" width="14" height="4.4" rx="1.4"/><rect x="2" y="9.8" width="8.5" height="4.4" rx="1.4"/><rect x="2" y="16.3" width="17.5" height="4.4" rx="1.4"/>' },
 	colors: ["#16a34a", "#0f2a1c"],
 	needs: { net: true },
-	packages: { alpine: ["htop"], debian: ["htop"] },
+	packages: { alpine: ["htop"], arch: ["htop"], debian: ["htop"] },
 	terminal: "window",
 	commands: [
 		"echo 'F6 sorts, F5 shows a tree, F9 kills, q quits (no F-keys: Esc then the digit)'",

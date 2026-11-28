@@ -37,9 +37,10 @@
 //      its output the installer's log and progress (installer.ts
 //      packageParser(); KW_STATUS=1 adds apt's status lines): unless the
 //      packages are all installed (then it prints nothing), Alpine:
-//      community enabled if the app asks, then `apk add`; Debian:
-//      `apt-get install`, once more after `apt-get update` when the image's
-//      baked package lists name a version the mirror no longer has. The
+//      community enabled if the app asks, then `apk add`; Arch: `pacman -S`
+//      and Debian: `apt-get install`, once more after `pacman -Sy` or
+//      `apt-get update` when the image's baked package lists name a version
+//      the mirror no longer has. The
 //      package manager runs with sudo ($SUDO, SUDO_SH; as root on the base
 //      shell without it), each step printed as `sudo cmd`;
 //    run.sh runs ./install.sh first too (a no-op once installed, so the
@@ -90,7 +91,7 @@ import { SUDO_SH } from "./sudo.ts";
 import { termWindow } from "./termtabs.ts";
 import { wm } from "./wm.ts";
 
-const DISTROS: Distro[] = ["alpine", "debian"];
+const DISTROS: Distro[] = ["alpine", "arch", "debian"];
 const isDistro = (s: string): s is Distro => (DISTROS as string[]).includes(s);
 
 /** What had the keyboard focus when the launcher opened (null: nothing, the page's body). */
@@ -134,7 +135,7 @@ export function appPackages(d: TerminalApp): string[] {
 	return isDistro(g) ? d.packages?.[g] ?? [] : [];
 }
 
-const DISTRO_NAMES: Record<Distro, string> = { alpine: "Alpine", debian: "Debian" };
+const DISTRO_NAMES: Record<Distro, string> = { alpine: "Alpine", arch: "Arch", debian: "Debian" };
 
 /** Why the app cannot run on this page, or null. */
 export function unavailable(d: AppDef): string | null {
@@ -224,6 +225,7 @@ function installedTest(d: TerminalApp): string {
 	if (!pkgs.length) return "";
 	const pk = pkgs.map(q).join(" ");
 	if (KW.config.guest === "alpine") return `apk info -e ${pk} >/dev/null 2>&1`;
+	if (KW.config.guest === "arch") return `pacman -Qq ${pk} >/dev/null 2>&1`;
 	return `[ "$(dpkg-query -W -f='\${db:Status-Status}\\n' ${pk} 2>/dev/null | grep -cx installed)" = ${pkgs.length} ]`;
 }
 
@@ -243,6 +245,18 @@ export function installScript(d: TerminalApp): string | null {
 	let install: string;
 	if (KW.config.guest === "alpine") {
 		install = (d.community ? step("$SUDO /etc/kw-apk-enable   # community") : "") + step(`$SUDO apk add ${pkgs.join(" ")}`, `$SUDO apk add ${pk}`);
+	} else if (KW.config.guest === "arch") {
+		// stdin from /dev/null: pacman would eat what was typed ahead. The image's
+		// package lists are those of its build, and the mirror keeps only current
+		// packages: when one is gone, the install fails, and runs again after
+		// pacman -Sy. pacman has no lock timeout: wait while another pacman runs
+		// (at most 10 minutes, saying so). A lock that no pacman holds was left by
+		// one that was killed: it is removed, as Arch's wiki says, before each try.
+		const get = `$SUDO pacman -S --noconfirm --needed ${pk} </dev/null`;
+		install = `unlock() { [ ! -e /var/lib/pacman/db.lck ] || pgrep -x pacman >/dev/null || $SUDO rm -f /var/lib/pacman/db.lck; }\n` +
+			`n=0; while pgrep -x pacman >/dev/null && [ $n -lt 600 ]; do [ $n = 0 ] && echo "Waiting for another install..."; n=$((n + 1)); sleep 1; done\n` +
+			`unlock\n` +
+			step(`$SUDO pacman -S ${pkgs.join(" ")}`, `${get} ||\n{ unlock; $SUDO pacman -Sy --noconfirm </dev/null && ${get}; }`);
 	} else {
 		// stdin from /dev/null: dpkg would eat what was typed ahead. The image's
 		// package lists are baked in and age: when a version is gone from the

@@ -37,6 +37,6 @@ export default {
 	files: {
 		"hello.rs": MAIN,
 	},
-	packages: { alpine: ["rust"], debian: ["rustc"] },
+	packages: { alpine: ["rust"], arch: ["rust"], debian: ["rustc"] },
 	commands: ["rustc --version", "rustc hello.rs", "./hello"],
 } satisfies TerminalApp;

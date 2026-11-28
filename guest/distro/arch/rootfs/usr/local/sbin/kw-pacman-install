@@ -1,0 +1,40 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+# kw-pacman-install CMD: installs the package that has CMD in /usr/bin
+# (/usr/lib/kw-commands, made by the build from the repositories' file
+# lists), for the shell's command_not_found_handle (etc/profile.d/
+# kw-pacman.sh). Exits 0 when CMD is there afterwards, else 127. The lists
+# pacman has are the image's, from its build: when the mirror has moved on, the
+# download fails, the lists are fetched again and the install repeated once.
+
+# unkernel: install the package of a missing command.
+cmd=$1
+notfound() { echo "bash: $cmd: command not found" >&2; exit 127; }
+case $cmd in ''|*[!A-Za-z0-9._+-]*) notfound ;; esac
+awk '$2 == "00000000" { f = 1 } END { exit !f }' /proc/net/route 2>/dev/null || notfound
+line=$(grep -m1 "^${cmd//./\\.} " /usr/lib/kw-commands 2>/dev/null) || notfound
+pkg=${line#* }
+sudo=()
+if [ "$EUID" != 0 ]; then
+	sudo -n true 2>/dev/null || notfound
+	sudo=(sudo -n)
+fi
+gray= reset=
+[ -t 2 ] && gray=$'\033[90m' reset=$'\033[0m'
+trap 'printf %s "$reset" >&2; exit 130' INT TERM
+pre="$cmd: not found, "
+say() { printf '%s%s%s%s\n' "$gray" "$pre" "$1" "$reset" >&2; pre=; }
+install() { "${sudo[@]}" pacman -S --noconfirm --needed "$pkg" </dev/null >&2; }
+# The keyring is made at boot (kw-init), which takes about 25 s.
+for _ in $(seq 60); do [ -e /etc/pacman.d/gnupg/.kw-keys ] && break; sleep 1; done
+say "${sudo:+sudo }pacman -S $pkg"
+printf %s "$gray" >&2
+if ! install; then
+	printf %s "$reset" >&2
+	say "fetching the package lists"
+	printf %s "$gray" >&2
+	"${sudo[@]}" pacman -Sy --noconfirm </dev/null >&2 && install
+fi
+printf %s "$reset" >&2
+command -v "$cmd" >/dev/null || notfound

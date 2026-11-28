@@ -14,7 +14,7 @@ export default {
 	colors: ["#7cc35a", "#1f4d22"],
 	needs: { net: true },
 	// The shim is on both distros; nothing to install first.
-	packages: { alpine: [], debian: [] },
+	packages: { alpine: [], arch: [], debian: [] },
 	terminal: "window",
 	commands: [
 		"echo 'The first run installs Node.js into ~/.local/bin. Try: process.versions, os.cpus().length   (.exit or Ctrl-D quits)'",

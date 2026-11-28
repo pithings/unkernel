@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+# /etc/sudoers.d/kw-user of the Arch image (the build makes it 0440): the
+# image's user ("user": the console's and kwtty sessions' default) runs
+# anything as anyone without a password, also without a terminal (sudo -n).
+
+# unkernel: the image's user is its administrator.
+# Arch's sudoers leaves /usr/sbin out of the path sudo runs with, and the kw
+# layer's tools (kw-overlay) are there: Debian's secure_path.
+Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+user ALL=(ALL:ALL) NOPASSWD: ALL

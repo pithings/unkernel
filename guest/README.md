@@ -30,7 +30,7 @@ kernel/build.sh distro [NAME...]     # the same as guest/build.sh distro
 | `tools/` | host tools: `mkcpio.py` (cpio archives), `mktree.py` (an image's tar stream and id), `erofs-utils.sh` (pinned mkfs.erofs, with `erofs-utils-patches/`), `erofs-trace.py` (the files a traced boot read), `distros-json.mjs` (the index), `vm-run.ts` (run a command in an image at build time); `pins.sh` (erofs-utils, lz4, zstd) |
 | `src/` | the guest programs in the base's kw layer: `kwtty`, `kw9p`, `kwvsock`, `kwshm`, `kwwasi`, `kwcmd`, linked as one program with `kwbox.c` (`/usr/bin/kwbox`: `kwbox TOOL ARGS`); `glimmer`, which every distro image gets (`install_common`, `lib/stage.sh`); `src/test/`: `kwtest`, `kwbench`, `abitest` (base-test.cpio) |
 | `base/` | `build.sh`, `pins.sh` (static busybox), `initramfs/` (the cpio root: `/init`, the base shell), `rootfs/` (the kw layer, `/kw/layer`: on top of every distro's root; `build.sh` adds guest Vulkan's ICD to it from `vk/icd/build.sh`: `/usr/lib/kw/libvulkan_kw.so` and `/usr/share/vulkan/icd.d/kw_icd.json`) |
-| `distro/NAME/` | `build.sh`, `pins.sh`, `rootfs/` (files added to the image); Debian: `tools/` (apt-lz4) |
+| `distro/NAME/` | `build.sh`, `pins.sh`, `rootfs/` (files added to the image); Debian: `tools/` (apt-lz4); Arch: `tools/` (commands.py) |
 
 `distros.json` (written by `guest/build.sh distro` and `index`, and
 refreshed by `kernel/build.sh base`, `kernel`, `smp`, `lower` and
